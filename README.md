@@ -1,5 +1,9 @@
 # DriloBoard - Image viewer and reviewer
 
+[![Download](https://img.shields.io/badge/Download-Windows%20portable%20·%2034%20MB-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.0-portable-win64.zip)
+[![Release](https://img.shields.io/github/v/release/Cokedrilo/DriloBoard)](https://github.com/Cokedrilo/DriloBoard/releases/latest)
+[![Licence](https://img.shields.io/github/license/Cokedrilo/DriloBoard)](LICENSE)
+
 **An image board for teachers.** Drop in folders of images, see them as
 thumbnails, sort them into categories of your own, compare two side by side
 with an opacity slider, and annotate them — all without ever touching the
@@ -7,6 +11,17 @@ original files.
 
 Built for preparing visual material for class: art history slides, reference
 sheets, before/after comparisons.
+
+### ⬇ Try it in one minute
+
+**[Download DriloBoard for Windows](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.0-portable-win64.zip)** → unzip anywhere → run
+`DriloBoard.exe`.
+
+Nothing is installed, nothing is written to the registry, and it runs happily
+from a USB stick. Windows will warn about an unknown publisher the first time
+(the executable is not signed): *More info* → *Run anyway*.
+
+On Linux, or to run from the source: [see below](#from-source).
 
 > Manual en español: [README.es.md](README.es.md)
 
@@ -88,19 +103,20 @@ overwrites your own edits.
 
 ### Prebuilt Windows package
 
-Download the ZIP from [Releases](../../releases), unpack it anywhere — hard
-disk, USB stick, network share — and run `DriloBoard.exe`. Nothing is
-installed and nothing is written to the registry.
+[**Download the ZIP**](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.0-portable-win64.zip)
+(34 MB) — or browse every version under
+[Releases](https://github.com/Cokedrilo/DriloBoard/releases). Unpack it
+anywhere: hard disk, USB stick, network share.
 
 Your library and the thumbnail cache are created **inside that same folder**,
-so copying the folder carries your whole classification with it.
-
-The executable is not code-signed, so Windows will warn about an unknown
-publisher the first time: *More info* → *Run anyway*.
+so copying the folder carries your whole classification with it. Delete the
+folder and nothing is left behind.
 
 To check a copy arrived intact: `DriloBoard.exe --selftest` starts the app
 headlessly, opens the help, verifies the icons and image codecs, and exits
 with status 0 if everything is in place.
+
+<a name="from-source"></a>
 
 ### From source
 

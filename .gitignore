@@ -1,0 +1,17 @@
+# Entorno y artefactos de construcción
+.venv/
+build/
+dist/
+__pycache__/
+*.pyc
+*.zip
+
+# Datos personales: NO subir nunca
+# biblioteca.json lleva las rutas reales de tus carpetas y tus anotaciones;
+# cache/ son miniaturas de tus propias imágenes; los .driloboard exportados
+# llevan también rutas absolutas.
+biblioteca.json
+biblioteca.json.*
+*.driloboard
+cache/
+tests/_tmp/

@@ -1,0 +1,13 @@
+# Normaliza los finales de línea al guardar en el repositorio.
+* text=auto
+
+# El lanzador de Linux tiene que llegar con LF: con CRLF, bash no lo ejecuta.
+*.sh text eol=lf
+
+# El .bat de Windows, al revés.
+*.bat text eol=crlf
+
+# Binarios, tal cual.
+*.ico binary
+*.png binary
+*.zip binary

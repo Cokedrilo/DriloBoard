@@ -1,4 +1,4 @@
-# DriloBoard - Image Viewer reviewer — manual en español
+# DriloBoard - Image viewer and reviewer — manual en español
 
 > El README público del proyecto está en inglés: [README.md](README.md).
 > Este es el manual completo, que es como lo leo yo.

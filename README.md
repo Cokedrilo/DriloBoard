@@ -1,4 +1,4 @@
-# DriloBoard - Image Viewer reviewer
+# DriloBoard - Image viewer and reviewer
 
 **An image board for teachers.** Drop in folders of images, see them as
 thumbnails, sort them into categories of your own, compare two side by side
@@ -9,6 +9,12 @@ Built for preparing visual material for class: art history slides, reference
 sheets, before/after comparisons.
 
 > Manual en español: [README.es.md](README.es.md)
+
+![DriloBoard](docs/screenshot.png)
+
+<sub>Folders on the left, thumbnails and a full-resolution preview in the
+middle, your own categories on the right. The images shown are generated
+samples, not real artwork.</sub>
 
 ---
 
@@ -48,6 +54,8 @@ cross-fade between them. For before/after restorations, two versions of a
 painting, or a sketch over the finished work. Differently sized images are
 fitted and centred, never stretched.
 
+![Comparing two images with the opacity slider](docs/compare.png)
+
 **Categories (right column)**
 Create them, **nest them by dragging one onto another**, reorder them. A
 parent's count includes its children without counting an image twice. Assign
@@ -62,6 +70,8 @@ rectangle, ellipse and text, in ten colours. Drawings are *objects, not
 pixels*: the eraser removes the whole stroke you click on, and if you rotate
 the image afterwards, the drawing rotates with it. Right-click rotates or
 flips every selected image at once.
+
+![The editor, with annotations on an image](docs/editor.png)
 
 **Undo everywhere**
 `Ctrl+Z` covers the lot — edits, assignments, categories, folders — for the

@@ -49,9 +49,10 @@ propio código, no hay archivos de diseño sueltos.
 .venv\Scripts\python.exe tests\correr_tests.py
 ```
 
-Siete suites que corren sin abrir ninguna ventana y usan su propio archivo de
+Nueve suites que corren sin abrir ninguna ventana y usan su propio archivo de
 estado, así que no pueden tocar tu `biblioteca.json`. Cubren, entre otras cosas, el mapeo de
-coordenadas de recortes y dibujos en 14 combinaciones de transformaciones, y
+coordenadas de recortes y dibujos en 14 combinaciones de transformaciones (y 9
+más con giro libre), los dos temas y el marco azul de la selección, y
 —dos veces, contrastando marca de tiempo y tamaño— que ni editar ni exportar
 modifican el archivo original.
 
@@ -125,6 +126,7 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   arrastrar mueve, `0` reencuadra, `F` o `F11` pantalla completa, `Esc` cierra.
 - Clic derecho: abrir, abrir la carpeta contenedora, copiar ruta, asignar o
   quitar de categorías.
+- Las miniaturas seleccionadas llevan un **marco azul** bien visible.
 - Los puntos de color en la esquina indican a qué categorías pertenece.
 - *Uncategorised only* deja a la vista lo que aún no has clasificado.
 
@@ -192,6 +194,13 @@ después.
 
 - **Editor** (botón *Edit…*, tecla `E`, o clic derecho ▸ *Edit*):
   - Rotar 90° a izquierda o derecha, voltear en horizontal y en vertical.
+  - **Girar los grados que quieras** con *Angle*: deslizador, o el valor
+    exacto en la casilla (positivo, en el sentido del reloj; `0 °` lo quita).
+    Mientras giras aparece una **rejilla** para enderezar a ojo, y todo el
+    giro cuenta como un solo paso de deshacer. Las esquinas que quedan al
+    descubierto son transparentes (blancas al exportar a JPG); recorta
+    después para quitarlas. Si ya había recorte, sigue centrado en el mismo
+    punto de la imagen, y los dibujos giran con ella.
   - **Recortar**: elige *Crop* y arrastra un rectángulo sobre la imagen.
     Puedes volver a recortar sobre el resultado, y *Remove crop* devuelve
     el encuadre completo. El recorte se guarda en coordenadas del original,
@@ -241,6 +250,12 @@ después.
   pisa un archivo que ya exista — se numera. Esto es lo que te llevas a la
   presentación. El editor tiene además *Export a copy…* para una sola.
 
+## Tema oscuro o claro
+
+El botón **Light / Dark** de arriba a la derecha, el menú *View* o `Ctrl+T`
+cambian toda la aplicación, editor incluido. Se recuerda al cerrar; la
+primera vez sigue al tema del sistema.
+
 ## Deshacer
 
 `Ctrl+Z` deshace, `Ctrl+Y` (o `Ctrl+Mayús+Z`) rehace, y funciona en **toda la
@@ -261,7 +276,7 @@ reordenar carpetas. Se guardan los últimos 40 pasos de la sesión.
 ## Detalles
 
 - Se guarda solo: carpetas, categorías, ediciones, dibujos, tamaño de
-  miniatura y posición de la ventana. En `biblioteca.json`, junto al programa — cópialo y llevas contigo
+  miniatura, tema y posición de la ventana. En `biblioteca.json`, junto al programa — cópialo y llevas contigo
   toda la clasificación.
 - Las miniaturas se cachean en la carpeta `cache\` del programa. Se puede
   borrar sin miedo: se regenera sola.

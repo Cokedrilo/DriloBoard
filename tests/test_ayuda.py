@@ -29,11 +29,16 @@ app.processEvents()
 # ---- el boton esta y sigue estando ------------------------------------------ #
 print("1. EL BOTON")
 gc.collect()                    # PySide se llevaba el boton si nadie lo guardaba
-boton = w.menuBar().cornerWidget(Qt.Corner.TopRightCorner)
-assert boton is not None, "la esquina del menu se quedo vacia"
-assert "Help" in boton.text(), boton.text()
+esquina = w.menuBar().cornerWidget(Qt.Corner.TopRightCorner)
+assert esquina is not None, "la esquina del menu se quedo vacia"
+from PySide6.QtWidgets import QPushButton
+botones = {b.text().strip(): b for b in esquina.findChildren(QPushButton)}
+boton = next((b for t, b in botones.items() if "Help" in t), None)
+assert boton is not None, list(botones)
 assert boton.isVisible(), "el boton no se ve"
-print("   boton '%s' visible arriba a la derecha" % boton.text().strip())
+assert any(t in ("Light", "Dark") for t in botones), \
+    "falta el cambio de tema junto a la ayuda: %s" % list(botones)
+print("   botones %s visibles arriba a la derecha" % sorted(botones))
 
 # tambien en el menu, y con F1
 acciones = [a.text() for a in w.menuBar().actions()[-1].menu().actions()]

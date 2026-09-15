@@ -23,11 +23,12 @@ from pathlib import Path
 from PySide6.QtCore import (QAbstractListModel, QByteArray, QMimeData, QModelIndex,
                             QObject, QPointF, QRect, QRectF, QRunnable, QSize, Qt,
                             QThreadPool, QTimer, Signal, Slot)
-from PySide6.QtGui import (QColor, QFont, QIcon, QImage, QImageReader, QImageWriter,
-                           QKeySequence, QPainter, QPainterPath, QPainterPathStroker,
-                           QPen, QPixmap, QShortcut, QTransform)
+from PySide6.QtGui import (QActionGroup, QColor, QFont, QIcon, QImage, QImageReader,
+                           QImageWriter, QKeySequence, QPainter, QPainterPath,
+                           QPainterPathStroker, QPalette, QPen, QPixmap, QShortcut,
+                           QTransform)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
-                               QDialog,
+                               QDialog, QDoubleSpinBox, QStyleOptionViewItem,
                                QFileDialog, QFrame, QGraphicsItem, QGraphicsPixmapItem,
                                QGraphicsScene,
                                QGraphicsView, QHBoxLayout, QInputDialog, QLabel,
@@ -67,6 +68,23 @@ PATH_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 # Colores de categoria, asignados por orden de creacion
 PALETTE = ["#e6542f", "#f0a500", "#3fa34d", "#2d8fd5", "#8e6cd0",
            "#d94f8a", "#00a3a3", "#a0761f", "#5b6b7c", "#c33b3b"]
+
+# Tema claro u oscuro. Botones, menus y listas los pinta el estilo del sistema;
+# esto es lo que pone DriloBoard por su cuenta: la rejilla, los lienzos, los
+# textos secundarios, la tinta de los iconos dibujados y el marco de seleccion.
+THEMES = {
+    "dark": {"grid": "#202020", "grid_text": "#dddddd", "canvas": "#1b1b1b",
+             "caption": "#bbbbbb", "dim": "#999999", "ink": "#c8c8c8",
+             "select": "#3d9bff"},
+    "light": {"grid": "#ffffff", "grid_text": "#1f1f1f", "canvas": "#d6d6d6",
+              "caption": "#444444", "dim": "#6e6e6e", "ink": "#3a3a3a",
+              "select": "#0067c0"},
+}
+_theme = "dark"
+
+
+def theme_color(clave: str) -> str:
+    return THEMES[_theme][clave]
 
 
 def cache_dir() -> Path:
@@ -250,14 +268,60 @@ def normalize_cats(cats: list, counter=None) -> list:
 #  una receta que se aplica al vuelo a la miniatura y a la vista previa, y
 #  solo se escribe en disco al exportar una copia.
 #
-#  Orden de la receta: recortar -> rotar -> voltear -> gris -> brillo y
-#  contraste -> redimensionar. El recorte va en coordenadas del ORIGINAL,
-#  asi que rotar despues no lo invalida.
+#  Orden de la receta: girar un angulo libre -> recortar -> rotar 90 ->
+#  voltear -> gris -> brillo y contraste -> redimensionar. El recorte va en
+#  coordenadas del original ya enderezado (sin angulo, las del ORIGINAL), asi
+#  que rotar 90 o voltear despues no lo invalida.
 # --------------------------------------------------------------------------- #
 def empty_edit() -> dict:
-    return {"crop": None, "rot": 0, "flip_h": False, "flip_v": False,
+    return {"crop": None, "rot": 0, "angle": 0, "flip_h": False, "flip_v": False,
             "gray": False, "bright": 0, "contrast": 0, "resize": None,
             "draw": []}
+
+
+def edit_angle(edit: dict | None) -> float:
+    """El giro libre en grados, entre -180 y 180. 0 si no hay."""
+    a = float((edit or {}).get("angle") or 0) % 360
+    if a > 180:
+        a -= 360
+    return 0.0 if abs(a) < 1e-9 else a
+
+
+def rotated_size(w: int, h: int, angle: float) -> tuple[int, int]:
+    """El lienzo en el que cabe entera una imagen w x h girada 'angle' grados."""
+    a = math.radians(angle)
+    c, s = abs(math.cos(a)), abs(math.sin(a))
+    return (max(1, math.ceil(w * c + h * s - 1e-6)),
+            max(1, math.ceil(w * s + h * c - 1e-6)))
+
+
+def angle_transform(w: int, h: int, angle: float) -> QTransform:
+    """Gira sobre el centro y deja la imagen centrada en su lienzo nuevo."""
+    W, H = rotated_size(w, h, angle)
+    t = QTransform.fromTranslate(-w / 2, -h / 2)
+    t *= QTransform().rotate(angle)
+    t *= QTransform.fromTranslate(W / 2, H / 2)
+    return t
+
+
+def straightened_size(edit: dict | None, w: int, h: int) -> tuple[int, int]:
+    """Tamano sobre el que se recorta: el original, o su lienzo si esta girado."""
+    a = edit_angle(edit)
+    return rotated_size(w, h, a) if a else (w, h)
+
+
+def rotate_free(img: QImage, angle: float) -> QImage:
+    """Gira la imagen; las esquinas que quedan al descubierto, transparentes."""
+    W, H = rotated_size(img.width(), img.height(), angle)
+    out = QImage(W, H, QImage.Format.Format_ARGB32_Premultiplied)
+    out.fill(Qt.GlobalColor.transparent)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setTransform(angle_transform(img.width(), img.height(), angle))
+    p.drawImage(0, 0, img)
+    p.end()
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -271,11 +335,13 @@ def source_to_display_transform(edit: dict | None, src_w: int, src_h: int) -> QT
     """Del original a lo que se ve, recorriendo la receta en orden."""
     edit = edit or empty_edit()
     crop = edit.get("crop")
-    cx, cy, cw, ch = crop if crop else (0, 0, src_w, src_h)
+    cx, cy, cw, ch = crop if crop else (0, 0, *straightened_size(edit, src_w, src_h))
     rot = edit.get("rot", 0) % 360
     W, H = (ch, cw) if rot in (90, 270) else (cw, ch)
 
-    t = QTransform.fromTranslate(-cx, -cy)              # recorte
+    angulo = edit_angle(edit)
+    t = angle_transform(src_w, src_h, angulo) if angulo else QTransform()
+    t *= QTransform.fromTranslate(-cx, -cy)             # recorte
     if rot == 90:                                       # (u,v) -> (ch-v, u)
         t *= QTransform(0, 1, -1, 0, ch, 0)
     elif rot == 180:
@@ -381,6 +447,10 @@ def edit_signature(edit: dict | None) -> str:
         return ""
     d = empty_edit()
     d.update({k: v for k, v in edit.items() if k in d})
+    if not edit_angle(d):
+        # sin giro libre la firma queda como antes de existir el angulo, y las
+        # miniaturas ya cacheadas de ediciones viejas siguen valiendo
+        del d["angle"]
     return json.dumps(d, sort_keys=True)
 
 
@@ -401,6 +471,9 @@ def apply_edit(img: QImage, edit: dict | None) -> QImage:
     if img.isNull() or is_empty_edit(edit):
         return img
     src_w, src_h = img.width(), img.height()
+    angulo = edit_angle(edit)
+    if angulo:
+        img = rotate_free(img, angulo)
     crop = edit.get("crop")
     if crop:
         r = QRect(*crop).intersected(QRect(0, 0, img.width(), img.height()))
@@ -415,12 +488,21 @@ def apply_edit(img: QImage, edit: dict | None) -> QImage:
             QTransform().scale(-1 if edit.get("flip_h") else 1,
                                -1 if edit.get("flip_v") else 1),
             Qt.TransformationMode.SmoothTransformation)
+    # gris, brillo y contraste trabajan sin transparencia: se aparta y se
+    # devuelve despues, o las esquinas de una imagen girada saldrian negras
+    alfa = None
+    if ((edit.get("gray") or edit.get("bright") or edit.get("contrast"))
+            and img.hasAlphaChannel()):
+        alfa = img.convertToFormat(QImage.Format.Format_Alpha8)
     if edit.get("gray"):
         img = img.convertToFormat(QImage.Format.Format_Grayscale8) \
                  .convertToFormat(QImage.Format.Format_RGB32)
     if edit.get("bright") or edit.get("contrast"):
         img = _brightness_contrast(img, edit.get("bright", 0),
                                    edit.get("contrast", 0))
+    if alfa is not None:
+        img = img.convertToFormat(QImage.Format.Format_ARGB32)
+        img.setAlphaChannel(alfa)
     rs = edit.get("resize")
     if rs and rs[0] > 0 and rs[1] > 0 and (img.width(), img.height()) != tuple(rs):
         img = img.scaled(rs[0], rs[1], Qt.AspectRatioMode.IgnoreAspectRatio,
@@ -455,6 +537,8 @@ def edited_size(edit: dict | None, w: int, h: int) -> tuple[int, int]:
     crop = edit.get("crop")
     if crop:
         w, h = crop[2], crop[3]
+    else:
+        w, h = straightened_size(edit, w, h)
     if edit.get("rot", 0) % 360 in (90, 270):
         w, h = h, w
     rs = edit.get("resize")
@@ -467,11 +551,12 @@ def display_to_source_rect(rect, edit: dict | None, src_w: int, src_h: int):
     """Pasa un rectangulo dibujado sobre lo que se ve a coordenadas del original.
 
     Deshace, en orden inverso, el redimensionado, los volteos y la rotacion,
-    y por ultimo suma el origen del recorte que ya hubiera.
+    y por ultimo suma el origen del recorte que ya hubiera. Con giro libre, el
+    resultado queda en coordenadas del lienzo enderezado, que es donde recorta.
     """
     edit = edit or empty_edit()
     crop = edit.get("crop")
-    cx, cy, cw, ch = crop if crop else (0, 0, src_w, src_h)
+    cx, cy, cw, ch = crop if crop else (0, 0, *straightened_size(edit, src_w, src_h))
     rot = edit.get("rot", 0) % 360
     W, H = (ch, cw) if rot in (90, 270) else (cw, ch)
     x, y, w, h = (float(v) for v in rect)
@@ -524,6 +609,15 @@ def export_edited(path: str, edit: dict | None, destino: str):
         if ext.encode() not in QImageWriter.supportedImageFormats():
             destino = os.path.splitext(destino)[0] + ".png"   # formato de reserva
             ext = "png"
+        if img.hasAlphaChannel() and ext not in ("png", "webp", "tif", "tiff"):
+            # un formato sin transparencia pintaria de negro las esquinas que
+            # deja un giro libre: mejor sobre blanco, como en papel
+            fondo = QImage(img.size(), QImage.Format.Format_RGB32)
+            fondo.fill(QColor("white"))
+            p = QPainter(fondo)
+            p.drawImage(0, 0, img)
+            p.end()
+            img = fondo
         writer = QImageWriter(destino, ext.encode())
         if ext in ("jpg", "jpeg", "webp"):
             writer.setQuality(95)
@@ -973,18 +1067,49 @@ class ThumbDelegate(QStyledItemDelegate):
         self.mark_of = mark_of
         self.is_edited = is_edited
 
+    PAD = 6             # aire para los marcos: el azul por fuera, el verde dentro
+
+    def sizeHint(self, option, index):
+        s = super().sizeHint(option, index)
+        return QSize(s.width() + 2 * self.PAD, s.height() + 2 * self.PAD)
+
     def paint(self, painter, option, index):
-        super().paint(painter, option, index)
+        seleccionada = bool(option.state & QStyle.StateFlag.State_Selected)
+        azul = QColor(theme_color("select"))
+        opt = QStyleOptionViewItem(option)
+        opt.rect = option.rect.adjusted(self.PAD, self.PAD, -self.PAD, -self.PAD)
+        if seleccionada:
+            # el resaltado del sistema es gris sobre gris y apenas se ve: se
+            # quita y se pinta uno propio, un fondo azulado y un marco azul
+            opt.state &= ~QStyle.StateFlag.State_Selected
+            fondo = QColor(azul)
+            fondo.setAlpha(55)
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fondo)
+            painter.drawRoundedRect(QRectF(option.rect), 5, 5)
+            painter.restore()
+        super().paint(painter, opt, index)
         path = index.data(PATH_ROLE)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         if self.is_edited(path):
             # marco fino: la miniatura ya ensena el resultado, esto avisa de
-            # que lo que ves no es lo que hay en el archivo
+            # que lo que ves no es lo que hay en el archivo. Si esta
+            # seleccionada va por dentro, para que no lo tape el azul
             painter.setPen(QPen(QColor("#3fa34d"), 2))
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(option.rect.adjusted(1, 1, -2, -2), 4, 4)
+            hueco = 4 if seleccionada else 1
+            painter.drawRoundedRect(option.rect.adjusted(hueco, hueco, -hueco - 1,
+                                                         -hueco - 1), 4, 4)
+
+        if seleccionada:
+            painter.setPen(QPen(azul, 3))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(QRectF(option.rect).adjusted(1.5, 1.5, -1.5, -1.5),
+                                    5, 5)
 
         y = option.rect.top() + 6
         for c in self.colors_for(path)[:4]:
@@ -1279,25 +1404,25 @@ class PreviewPane(QWidget):
         self.view = ZoomView(self.scene, self)
         self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.view.setRenderHints(QPainter.RenderHint.SmoothPixmapTransform)
-        self.view.setBackgroundBrush(QColor("#1b1b1b"))
+        themed(self.view, canvas=True)
         self.view.setFrameShape(QFrame.Shape.NoFrame)
         self.view.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # las flechas son de la rejilla
         self.view.zoomed.connect(self._on_zoom)
 
         self.caption = QLabel("")
-        self.caption.setStyleSheet("color:#bbb; padding:2px 6px;")
+        themed(self.caption, css="color:%(caption)s; padding:2px 6px;")
 
         bar = QHBoxLayout()
         bar.setContentsMargins(0, 0, 0, 0)
         bar.addWidget(self.caption, 1)
         b_fit = QPushButton("Fit")
-        b_fit.setIcon(tool_icon("fit"))
+        themed(b_fit, icon="fit")
         b_fit.setToolTip("Fit the image in the panel (key 0)")
         b_fit.clicked.connect(self.fit)
         bar.addWidget(b_fit)
         if with_button:
             b_big = QPushButton("Open large")
-            b_big.setIcon(std_icon("SP_TitleBarMaxButton"))
+            themed(b_big, std="SP_TitleBarMaxButton")
             b_big.clicked.connect(self.openBig.emit)
             bar.addWidget(b_big)
 
@@ -1306,7 +1431,7 @@ class PreviewPane(QWidget):
         cmp_lay = QHBoxLayout(self.cmp_bar)
         cmp_lay.setContentsMargins(6, 2, 6, 2)
         self.lbl_cmp = QLabel("")
-        self.lbl_cmp.setStyleSheet("color:#bbb;")
+        themed(self.lbl_cmp, css="color:%(caption)s;")
         cmp_lay.addWidget(self.lbl_cmp, 1)
         self.sld_opacity = QSlider(Qt.Orientation.Horizontal)
         self.sld_opacity.setRange(0, 100)
@@ -1316,15 +1441,15 @@ class PreviewPane(QWidget):
         self.sld_opacity.valueChanged.connect(self._on_opacity)
         cmp_lay.addWidget(self.sld_opacity)
         self.lbl_pct = QLabel("50 %")
-        self.lbl_pct.setStyleSheet("color:#bbb;")
+        themed(self.lbl_pct, css="color:%(caption)s;")
         self.lbl_pct.setFixedWidth(42)
         cmp_lay.addWidget(self.lbl_pct)
         b_swap = QPushButton("Swap")
-        b_swap.setIcon(tool_icon("swap"))
+        themed(b_swap, icon="swap")
         b_swap.clicked.connect(self.swap_compare)
         cmp_lay.addWidget(b_swap)
         b_stop = QPushButton("Exit compare")
-        b_stop.setIcon(std_icon("SP_DialogCloseButton"))
+        themed(b_stop, std="SP_DialogCloseButton")
         b_stop.clicked.connect(self.stop_compare)
         cmp_lay.addWidget(b_stop)
         self.cmp_bar.hide()
@@ -1563,6 +1688,108 @@ def std_icon(nombre: str) -> QIcon:
     return estilo.standardIcon(getattr(QStyle.StandardPixmap, nombre))
 
 
+def system_theme() -> str:
+    """El tema que tiene puesto el sistema; oscuro si no lo dice."""
+    if QApplication.styleHints().colorScheme() == Qt.ColorScheme.Light:
+        return "light"
+    return "dark"
+
+
+def fusion_palette(nombre: str) -> QPalette:
+    """Paleta completa para cuando el estilo del sistema no sabe cambiar de tema."""
+    oscuro = nombre == "dark"
+    fondo, base, boton, texto, apagado = (
+        ("#202020", "#1b1b1b", "#2d2d2d", "#e6e6e6", "#7a7a7a") if oscuro else
+        ("#f3f3f3", "#ffffff", "#fbfbfb", "#1a1a1a", "#9a9a9a"))
+    pal = QPalette()
+    R, G = QPalette.ColorRole, QPalette.ColorGroup
+    for rol, color in ((R.Window, fondo), (R.WindowText, texto), (R.Base, base),
+                       (R.AlternateBase, boton), (R.Button, boton),
+                       (R.ButtonText, texto), (R.Text, texto),
+                       (R.ToolTipBase, boton), (R.ToolTipText, texto),
+                       (R.PlaceholderText, apagado),
+                       (R.Highlight, THEMES[nombre]["select"]),
+                       (R.HighlightedText, "#ffffff"),
+                       (R.Link, THEMES[nombre]["select"]),
+                       (R.Light, "#3a3a3a" if oscuro else "#ffffff"),
+                       (R.Midlight, "#333333" if oscuro else "#e3e3e3"),
+                       (R.Mid, "#2a2a2a" if oscuro else "#c8c8c8"),
+                       (R.Dark, "#151515" if oscuro else "#a0a0a0"),
+                       (R.Shadow, "#000000" if oscuro else "#707070")):
+        pal.setColor(rol, QColor(color))
+    for rol in (R.WindowText, R.ButtonText, R.Text):
+        pal.setColor(G.Disabled, rol, QColor(apagado))
+    return pal
+
+
+_fusion_fallback = False
+
+
+def apply_theme(nombre: str):
+    """Pone el tema en toda la aplicacion, tambien en lo que ya esta abierto.
+
+    Primero se le pide al estilo del sistema, que asi conserva su aspecto
+    (en Windows 11 cambia entero). Si no hace caso (algunos escritorios de
+    Linux, o sin pantalla) se pasa a Fusion con una paleta propia.
+    """
+    global _theme, _fusion_fallback
+    _theme = nombre if nombre in THEMES else "dark"
+    app = QApplication.instance()
+    oscuro = _theme == "dark"
+    if not _fusion_fallback:
+        app.styleHints().setColorScheme(Qt.ColorScheme.Dark if oscuro
+                                        else Qt.ColorScheme.Light)
+        if (app.palette().window().color().lightness() < 128) != oscuro:
+            _fusion_fallback = True
+            app.setStyle("Fusion")
+    if _fusion_fallback:
+        app.setPalette(fusion_palette(_theme))
+    for w in app.allWidgets():
+        retheme_widget(w)
+
+
+def themed(widget, css: str | None = None, icon: str | None = None,
+           std: str | None = None, canvas: bool = False):
+    """Marca lo que depende del tema, para rehacerlo cuando cambie.
+
+    css lleva huecos como %(dim)s que se rellenan con los colores del tema;
+    icon es el nombre de un tool_icon y std el de un icono del sistema (vale
+    tambien para acciones de menu); canvas, un visor con fondo de lienzo.
+    """
+    if css is not None:
+        widget.setProperty("drilo_css", css)
+    if icon is not None:
+        widget.setProperty("drilo_icon", icon)
+    if std is not None:
+        widget.setProperty("drilo_std", std)
+    if canvas:
+        widget.setProperty("drilo_canvas", True)
+    retheme_widget(widget)
+    return widget
+
+
+def retheme_widget(w):
+    css = w.property("drilo_css")
+    if css:
+        w.setStyleSheet(css % THEMES[_theme])
+    icono = w.property("drilo_icon")
+    if icono:
+        w.setIcon(tool_icon(icono))
+    # los iconos del sistema tambien: en Windows 11 son blancos en oscuro y
+    # negros en claro, y uno viejo desaparece sobre el fondo nuevo
+    sistema = w.property("drilo_std")
+    if sistema:
+        w.setIcon(std_icon(sistema))
+    if w.property("drilo_canvas"):
+        w.setBackgroundBrush(QColor(theme_color("canvas")))
+    if isinstance(w, QWidget):
+        for accion in w.actions():
+            if accion.property("drilo_std"):
+                accion.setIcon(std_icon(accion.property("drilo_std")))
+    if isinstance(w, QAbstractItemView):
+        w.viewport().update()               # el delegado lee el tema al pintar
+
+
 def swatch_icon(color: str, size: int = 18) -> QIcon:
     pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
@@ -1581,7 +1808,7 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    tinta = QColor("#c8c8c8")
+    tinta = QColor(theme_color("ink"))
     lapiz = QPen(tinta, 1.8)
     lapiz.setCapStyle(Qt.PenCapStyle.RoundCap)
     lapiz.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -1711,6 +1938,26 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
         p.drawLine(m, size / 2, M - 4, size / 2)
         p.drawPolyline([QPointF(M - 7, size / 2 - 3), QPointF(M - 4, size / 2),
                         QPointF(M - 7, size / 2 + 3)])
+    elif kind == "sun":
+        c = QPointF(size / 2, size / 2)
+        p.drawEllipse(c, size * 0.19, size * 0.19)
+        for i in range(8):
+            a = i * math.pi / 4
+            p.drawLine(QPointF(c.x() + math.cos(a) * size * 0.32,
+                               c.y() + math.sin(a) * size * 0.32),
+                       QPointF(c.x() + math.cos(a) * size * 0.44,
+                               c.y() + math.sin(a) * size * 0.44))
+    elif kind == "moon":
+        luna = QPainterPath()
+        luna.addEllipse(QRectF(m, m, M - m, M - m))
+        mordisco = QPainterPath()
+        mordisco.addEllipse(QRectF(m + size * 0.28, m - size * 0.12, M - m, M - m))
+        p.setBrush(tinta)
+        p.drawPath(luna.subtracted(mordisco))
+    elif kind == "angle":
+        p.drawLine(m, M, M, M)
+        p.drawLine(m, M, M - 2, m + 1)
+        p.drawArc(QRectF(m - 7, M - 7, 14, 14), 0, 60 * 16)
     p.end()
     return QIcon(pm)
 
@@ -1727,8 +1974,32 @@ class CropView(QGraphicsView):
         self.tool = None                    # None = mover y hacer zoom
         self.color = QColor(DRAW_COLORS[0][1])
         self.width = 6
+        self.show_grid = False              # rejilla de guia al girar
         self._puntos: list = []
         self._preview = None
+
+    def drawForeground(self, painter, rect):
+        """Rejilla de cuadros sobre la imagen, para enderezar a ojo."""
+        area = self.sceneRect()
+        if not self.show_grid or area.isEmpty():
+            return
+        painter.save()
+        paso = max(area.width(), area.height()) / 12
+        for color, dx in ((QColor(0, 0, 0, 90), 1), (QColor(255, 255, 255, 150), 0)):
+            pen = QPen(color, 0)            # 0 = un pixel de pantalla, con zoom o sin el
+            painter.setPen(pen)
+            desvio = dx / max(self.transform().m11(), 1e-6)
+            x = area.left() + paso
+            while x < area.right():
+                painter.drawLine(QPointF(x + desvio, area.top()),
+                                 QPointF(x + desvio, area.bottom()))
+                x += paso
+            y = area.top() + paso
+            while y < area.bottom():
+                painter.drawLine(QPointF(area.left(), y + desvio),
+                                 QPointF(area.right(), y + desvio))
+                y += paso
+        painter.restore()
 
     def set_tool(self, tool: str | None):
         self.tool = tool
@@ -1844,7 +2115,7 @@ class EditorDialog(QDialog):
         self.scene.addItem(self.item)
         self.view = CropView(self.scene, self)
         self.view.setRenderHints(QPainter.RenderHint.SmoothPixmapTransform)
-        self.view.setBackgroundBrush(QColor("#1b1b1b"))
+        themed(self.view, canvas=True)
         self.view.setFrameShape(QFrame.Shape.NoFrame)
         self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.view.cropped.connect(self.on_crop)
@@ -1862,13 +2133,36 @@ class EditorDialog(QDialog):
                 ("  Flip V", "flip_v", lambda: self.flip("flip_v"),
                  "Mirror vertically")):
             b = QPushButton(txt)
-            b.setIcon(tool_icon(icono))
+            themed(b, icon=icono)
             b.setToolTip(tip)
             b.clicked.connect(fn)
             geo.addWidget(b)
         geo.addSpacing(12)
+        geo.addWidget(QLabel("Angle"))
+        self.sld_angle = QSlider(Qt.Orientation.Horizontal)
+        self.sld_angle.setRange(-1800, 1800)            # en decimas de grado
+        self.sld_angle.setSingleStep(5)
+        self.sld_angle.setPageStep(50)
+        self.sld_angle.setFixedWidth(200)
+        self.sld_angle.setToolTip("Rotate by any angle, to straighten a photo "
+                                  "or tilt a drawing. A grid appears while you turn.")
+        geo.addWidget(self.sld_angle)
+        self.spin_angle = QDoubleSpinBox()
+        self.spin_angle.setRange(-180.0, 180.0)
+        self.spin_angle.setDecimals(1)
+        self.spin_angle.setSingleStep(0.5)
+        self.spin_angle.setSuffix(" °")
+        self.spin_angle.setKeyboardTracking(False)      # 45 no pasa antes por 4
+        self.spin_angle.setFixedWidth(100)
+        self.spin_angle.setToolTip("Exact angle in degrees; positive turns clockwise")
+        geo.addWidget(self.spin_angle)
+        self.b_angle0 = QPushButton("0 °")
+        self.b_angle0.setToolTip("Back to 0 degrees")
+        self.b_angle0.setFixedWidth(44)
+        geo.addWidget(self.b_angle0)
+        geo.addSpacing(12)
         self.b_uncrop = QPushButton("  Remove crop")
-        self.b_uncrop.setIcon(tool_icon("crop"))
+        themed(self.b_uncrop, icon="crop")
         self.b_uncrop.clicked.connect(self.uncrop)
         geo.addWidget(self.b_uncrop)
         geo.addStretch(1)
@@ -1891,7 +2185,7 @@ class EditorDialog(QDialog):
                 ("goma", "eraser", "Eraser", "Remove the drawing you click on"),
                 ("recortar", "crop", "Crop", "Drag a rectangle over the image")):
             b = QToolButton()
-            b.setIcon(tool_icon(icono))
+            themed(b, icon=icono)
             b.setIconSize(QSize(20, 20))
             b.setCheckable(True)
             b.setAutoRaise(True)
@@ -1932,7 +2226,7 @@ class EditorDialog(QDialog):
         self.sld_width.valueChanged.connect(self.set_width)
         dibujo.addWidget(self.sld_width)
         self.b_undraw = QPushButton("  Clear drawings")
-        self.b_undraw.setIcon(tool_icon("eraser"))
+        themed(self.b_undraw, icon="eraser")
         self.b_undraw.clicked.connect(self.clear_drawings)
         dibujo.addWidget(self.b_undraw)
         dibujo.addStretch(1)
@@ -1973,13 +2267,13 @@ class EditorDialog(QDialog):
         tam.addWidget(b_orig_size)
         tam.addStretch(1)
         self.lbl_info = QLabel("")
-        self.lbl_info.setStyleSheet("color:#999;")
+        themed(self.lbl_info, css="color:%(dim)s;")
         tam.addWidget(self.lbl_info)
 
         zoom = QHBoxLayout()
         zoom.addWidget(QLabel("Zoom:"))
         b_menos = QPushButton()
-        b_menos.setIcon(tool_icon("zoom_out"))
+        themed(b_menos, icon="zoom_out")
         b_menos.setToolTip("Zoom out (Ctrl+-)")
         b_menos.setFixedWidth(34)
         b_menos.clicked.connect(lambda: self.zoom_by(1 / 1.2))
@@ -1991,7 +2285,7 @@ class EditorDialog(QDialog):
         self.sld_zoom.valueChanged.connect(self.on_zoom_slider)
         zoom.addWidget(self.sld_zoom)
         b_mas = QPushButton()
-        b_mas.setIcon(tool_icon("zoom_in"))
+        themed(b_mas, icon="zoom_in")
         b_mas.setToolTip("Zoom in (Ctrl++)")
         b_mas.setFixedWidth(34)
         b_mas.clicked.connect(lambda: self.zoom_by(1.2))
@@ -2000,7 +2294,7 @@ class EditorDialog(QDialog):
         self.lbl_zoom.setFixedWidth(56)
         zoom.addWidget(self.lbl_zoom)
         b_fit = QPushButton("  Fit")
-        b_fit.setIcon(tool_icon("fit"))
+        themed(b_fit, icon="fit")
         b_fit.setToolTip("Fit the image in the window (key 0)")
         b_fit.clicked.connect(self.fit)
         zoom.addWidget(b_fit)
@@ -2011,31 +2305,31 @@ class EditorDialog(QDialog):
 
         final = QHBoxLayout()
         self.b_undo = QPushButton("  Undo")
-        self.b_undo.setIcon(std_icon("SP_ArrowBack"))
+        themed(self.b_undo, std="SP_ArrowBack")
         self.b_undo.setToolTip("Ctrl+Z")
         self.b_undo.clicked.connect(self.undo)
         self.b_redo = QPushButton("  Redo")
-        self.b_redo.setIcon(std_icon("SP_ArrowForward"))
+        themed(self.b_redo, std="SP_ArrowForward")
         self.b_redo.setToolTip("Ctrl+Y")
         self.b_redo.clicked.connect(self.redo)
         final.addWidget(self.b_undo)
         final.addWidget(self.b_redo)
         final.addSpacing(12)
         b_reset = QPushButton("  Reset all")
-        b_reset.setIcon(std_icon("SP_DialogResetButton"))
+        themed(b_reset, std="SP_DialogResetButton")
         b_reset.clicked.connect(self.reset_all)
         final.addWidget(b_reset)
         b_export = QPushButton("  Export a copy…")
-        b_export.setIcon(std_icon("SP_DialogSaveButton"))
+        themed(b_export, std="SP_DialogSaveButton")
         b_export.clicked.connect(self.export_one)
         final.addWidget(b_export)
         final.addStretch(1)
         b_ok = QPushButton("OK")
-        b_ok.setIcon(std_icon("SP_DialogOkButton"))
+        themed(b_ok, std="SP_DialogOkButton")
         b_ok.setDefault(True)
         b_ok.clicked.connect(self.accept)
         b_cancel = QPushButton("Cancel")
-        b_cancel.setIcon(std_icon("SP_DialogCancelButton"))
+        themed(b_cancel, std="SP_DialogCancelButton")
         b_cancel.clicked.connect(self.reject)
         final.addWidget(b_cancel)
         final.addWidget(b_ok)
@@ -2069,6 +2363,18 @@ class EditorDialog(QDialog):
         self.chk_gray.toggled.connect(self.on_gray)
         self.spin_w.valueChanged.connect(lambda v: self.on_spin(v, self.spin_h, True))
         self.spin_h.valueChanged.connect(lambda v: self.on_spin(v, self.spin_w, False))
+        # un gesto de girar (arrastrar, rueda, flechas) es un solo paso de
+        # deshacer, y la rejilla se va un rato despues de soltar
+        self._angle_timer = QTimer(self)
+        self._angle_timer.setSingleShot(True)
+        self._angle_timer.setInterval(900)
+        self._angle_timer.timeout.connect(self._end_angle_gesture)
+        self._sync_angle_widgets(edit_angle(self.edit))
+        self.sld_angle.valueChanged.connect(lambda v: self.set_angle(v / 10.0))
+        self.sld_angle.sliderPressed.connect(lambda: self._show_grid(True))
+        self.sld_angle.sliderReleased.connect(self._angle_timer.start)
+        self.spin_angle.valueChanged.connect(self.set_angle)
+        self.b_angle0.clicked.connect(lambda: self.set_angle(0.0))
         self.render_preview()
         self.update_undo_buttons()
 
@@ -2188,6 +2494,8 @@ class EditorDialog(QDialog):
         self.chk_gray.blockSignals(True)
         self.chk_gray.setChecked(self.edit["gray"])
         self.chk_gray.blockSignals(False)
+        self._sync_angle_widgets(edit_angle(self.edit))
+        self._angle_gesture = False         # tras deshacer, girar es un paso nuevo
 
     # --- zoom --------------------------------------------------------------
     def zoom_pct(self) -> float:
@@ -2232,6 +2540,65 @@ class EditorDialog(QDialog):
         self.push("flip")
         self.edit[key] = not self.edit[key]
         self.render_preview()
+
+    def set_angle(self, grados: float):
+        """Giro libre. El recorte y los dibujos siguen a la imagen."""
+        grados = round(max(-180.0, min(180.0, float(grados))), 1)
+        viejo = edit_angle(self.edit)
+        self._sync_angle_widgets(grados)
+        if abs(grados - viejo) < 1e-6:
+            return
+        if not self._angle_gesture:
+            self.push("rotate by angle")
+            self._angle_gesture = True
+        self._show_grid(True)
+        if not self.sld_angle.isSliderDown():
+            self._angle_timer.start()
+        crop = self.edit.get("crop")
+        if crop:
+            self.edit["crop"] = self._crop_after_angle(crop, viejo, grados)
+        else:
+            # el tamano de salida era para el lienzo de antes, que ya no mide igual
+            self.edit["resize"] = None
+        self.edit["angle"] = grados
+        # sin reencuadrar: al enderezar interesa que la imagen no cambie de escala
+        self.render_preview(reajustar=False)
+
+    def _crop_after_angle(self, crop: list, viejo: float, nuevo: float) -> list:
+        """El mismo encuadre, centrado en el mismo punto de la imagen.
+
+        El recorte vive en el lienzo girado; al cambiar el angulo, su centro
+        se lleva al original y de vuelta con el giro nuevo.
+        """
+        w0, h0 = self.full_size
+        x, y, cw, ch = crop
+        ida, ok = angle_transform(w0, h0, viejo).inverted()
+        if not ok:
+            return crop
+        centro = angle_transform(w0, h0, nuevo).map(
+            ida.map(QPointF(x + cw / 2, y + ch / 2)))
+        W, H = rotated_size(w0, h0, nuevo) if nuevo else (w0, h0)
+        nx = max(0, min(int(round(centro.x() - cw / 2)), W - cw))
+        ny = max(0, min(int(round(centro.y() - ch / 2)), H - ch))
+        return [nx, ny, cw, ch]
+
+    def _sync_angle_widgets(self, grados: float):
+        for wgt, val in ((self.sld_angle, int(round(grados * 10))),
+                         (self.spin_angle, grados)):
+            wgt.blockSignals(True)
+            wgt.setValue(val)
+            wgt.blockSignals(False)
+        self.b_angle0.setEnabled(abs(grados) > 1e-6)
+
+    def _show_grid(self, visible: bool):
+        if self.view.show_grid != visible:
+            self.view.show_grid = visible
+            self.view.viewport().update()
+
+    def _end_angle_gesture(self):
+        self._angle_gesture = False
+        if not self.sld_angle.isSliderDown():
+            self._show_grid(False)
 
     def on_crop(self, rect):
         vista = self.item.mapFromScene(rect).boundingRect()
@@ -2445,6 +2812,7 @@ class EditorDialog(QDialog):
     _sin_recursion = False
     _auto_fit = True
     _mostrado = False
+    _angle_gesture = False
 
 
 HELP_HTML = """
@@ -2481,8 +2849,8 @@ the arrow keys and the preview follows.</li>
 <li>Wheel zooms, drag pans, <i>Fit</i> (key <b>0</b>) reframes.</li>
 <li>Double-click opens the large window: ← → change image, <b>F11</b> is
 fullscreen, <b>Esc</b> closes.</li>
-<li>Coloured dots on a thumbnail mean it belongs to those categories. A green
-frame means it has edits or drawings.</li>
+<li>Selected thumbnails get a <b>blue frame</b>. Coloured dots mean the image
+belongs to those categories. A green frame means it has edits or drawings.</li>
 <li><b>Uncategorised only</b> leaves just what you have not classified yet —
 handy to see what is left to do.</li>
 </ul>
@@ -2518,6 +2886,10 @@ everything nested inside it, whatever folder the images come from.</li>
 <ul>
 <li><i>Edit…</i> (key <b>E</b>) opens the editor: rotate, flip, crop,
 brightness, contrast, black and white, and output size.</li>
+<li><b>Angle</b> turns the image by any number of degrees (slider, or type
+the exact value). A grid appears while you turn, to straighten a photo by
+eye. The uncovered corners stay transparent, and turn white when you export
+to JPG. Crop afterwards to trim them.</li>
 <li><b>Drawing tools</b> like a snipping tool: pen, highlighter, line, arrow,
 rectangle, ellipse and text, in ten colours. The <b>eraser removes the whole
 stroke you click on</b> — each one is an object, not pixels.</li>
@@ -2552,6 +2924,7 @@ with the same name instead of duplicating them, and keeps your own edits.</li>
 <tr><td><b>Ctrl+1…9</b></td><td>assign to the first nine categories</td></tr>
 <tr><td><b>Ctrl+Z</b> / <b>Ctrl+Y</b></td><td>undo / redo</td></tr>
 <tr><td><b>F5</b></td><td>re-read the folders from disk</td></tr>
+<tr><td><b>Ctrl+T</b></td><td>switch between the dark and light theme</td></tr>
 <tr><td><b>F1</b></td><td>this help</td></tr>
 </table>
 
@@ -2560,6 +2933,11 @@ with the same name instead of duplicating them, and keeps your own edits.</li>
 holds the classification, <code>cache\\</code> holds the thumbnails already
 generated (safe to delete — it rebuilds itself). Copy the folder to a USB
 stick and your classification travels with it.</p>
+
+<h3>Dark or light</h3>
+<p>The <b>Light / Dark</b> button at the top right, <b>View ▸ theme</b> or
+<b>Ctrl+T</b> switch the whole window, editor included. DriloBoard remembers
+your choice; the first time it follows the system.</p>
 """
 
 
@@ -2667,6 +3045,8 @@ class MainWindow(QMainWindow):
         self._prune_pool.setMaxThreadCount(1)
         self._prune_pool.start(PruneTask(self._prune_signals))
 
+        # el tema va antes de montar nada, para que los iconos nazcan ya bien
+        apply_theme(self._saved_theme() or system_theme())
         self._build_ui()
         self._build_menu()
         self.load_state()
@@ -2698,13 +3078,13 @@ class MainWindow(QMainWindow):
 
         row = QHBoxLayout()
         b_add = QPushButton("  Add…")
-        b_add.setIcon(std_icon("SP_DirOpenIcon"))
+        themed(b_add, std="SP_DirOpenIcon")
         b_add.clicked.connect(self.pick_folders)
         b_del = QPushButton("  Remove")
-        b_del.setIcon(std_icon("SP_DialogDiscardButton"))
+        themed(b_del, std="SP_DialogDiscardButton")
         b_del.clicked.connect(self.remove_folders)
         b_upd = QPushButton("  Refresh")
-        b_upd.setIcon(std_icon("SP_BrowserReload"))
+        themed(b_upd, std="SP_BrowserReload")
         b_upd.setToolTip("Re-read the folders from disk (F5)")
         b_upd.clicked.connect(self.rescan)
         row.addWidget(b_add)
@@ -2733,7 +3113,7 @@ class MainWindow(QMainWindow):
                       "With none selected you see them all.\n"
                       "Picking a folder includes its subfolders.\n"
                       "Drag folders onto each other to reorder.")
-        hint.setStyleSheet("color:gray; font-size:11px;")
+        themed(hint, css="color:%(dim)s; font-size:11px;")
         hint.setWordWrap(True)
         lay.addWidget(hint)
         return w
@@ -2790,8 +3170,8 @@ class MainWindow(QMainWindow):
         self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self.image_menu)
         self.view.doubleClicked.connect(self.open_viewer)
-        self.view.setStyleSheet("QListView{background:#202020;} "
-                                "QListView::item{color:#ddd;}")
+        themed(self.view, css="QListView{background:%(grid)s;} "
+                           "QListView::item{color:%(grid_text)s;}")
         self.view.selectionModel().currentChanged.connect(self.on_current_image)
         self.view.selectionModel().selectionChanged.connect(self.on_selection_changed)
 
@@ -2820,36 +3200,36 @@ class MainWindow(QMainWindow):
 
         row = QHBoxLayout()
         b_all = QPushButton("  All")
-        b_all.setIcon(tool_icon("select_all"))
+        themed(b_all, icon="select_all")
         b_all.clicked.connect(self.view.selectAll)
         b_none = QPushButton("  None")
-        b_none.setIcon(tool_icon("select_none"))
+        themed(b_none, icon="select_none")
         b_none.clicked.connect(self.view.clearSelection)
         self.b_mark_a = QPushButton("  Mark A")
-        self.b_mark_a.setIcon(tool_icon("mark_a"))
+        themed(self.b_mark_a, icon="mark_a")
         self.b_mark_a.setToolTip("Mark the chosen image as A (key A)")
         self.b_mark_a.clicked.connect(lambda: self.mark_image("A"))
         self.b_mark_b = QPushButton("  Mark B")
-        self.b_mark_b.setIcon(tool_icon("mark_b"))
+        themed(self.b_mark_b, icon="mark_b")
         self.b_mark_b.setToolTip("Mark the chosen image as B (key B)")
         self.b_mark_b.clicked.connect(lambda: self.mark_image("B"))
         self.lbl_marks = QLabel("")
-        self.lbl_marks.setStyleSheet("color:#999; font-size:11px;")
+        themed(self.lbl_marks, css="color:%(dim)s; font-size:11px;")
         self.b_compare = QPushButton("  Compare A/B")
-        self.b_compare.setIcon(tool_icon("compare"))
+        themed(self.b_compare, icon="compare")
         self.b_compare.setToolTip("Overlay A and B with an opacity slider (C)")
         self.b_compare.setEnabled(False)
         self.b_compare.clicked.connect(self.compare_selected)
         self.b_edit = QPushButton("  Edit…")
-        self.b_edit.setIcon(tool_icon("pencil"))
+        themed(self.b_edit, icon="pencil")
         self.b_edit.setToolTip("Crop, flip, rotate, draw, adjust (E)")
         self.b_edit.clicked.connect(self.edit_current)
         self.b_export = QPushButton("  Export…")
-        self.b_export.setIcon(std_icon("SP_DialogSaveButton"))
+        themed(self.b_export, std="SP_DialogSaveButton")
         self.b_export.setToolTip("Save edited copies of the selected images")
         self.b_export.clicked.connect(self.export_selected)
         self.b_assign = QPushButton("  Assign to selected category")
-        self.b_assign.setIcon(tool_icon("assign"))
+        themed(self.b_assign, icon="assign")
         self.b_assign.clicked.connect(self.assign_selected)
         row.addWidget(b_all)
         row.addWidget(b_none)
@@ -2875,10 +3255,10 @@ class MainWindow(QMainWindow):
 
         row = QHBoxLayout()
         b_new = QPushButton("  New")
-        b_new.setIcon(tool_icon("category"))
+        themed(b_new, icon="category")
         b_new.clicked.connect(self.new_category)
         b_sub = QPushButton("  Subcategory")
-        b_sub.setIcon(tool_icon("subcategory"))
+        themed(b_sub, icon="subcategory")
         b_sub.setToolTip("Create inside the selected category")
         b_sub.clicked.connect(self.new_subcategory)
         row.addWidget(b_new)
@@ -2887,10 +3267,10 @@ class MainWindow(QMainWindow):
 
         row = QHBoxLayout()
         b_ren = QPushButton("  Rename")
-        b_ren.setIcon(tool_icon("rename"))
+        themed(b_ren, icon="rename")
         b_ren.clicked.connect(self.rename_category)
         b_del = QPushButton("  Delete")
-        b_del.setIcon(std_icon("SP_TrashIcon"))
+        themed(b_del, std="SP_TrashIcon")
         b_del.clicked.connect(self.delete_category)
         row.addWidget(b_ren)
         row.addWidget(b_del)
@@ -2917,7 +3297,7 @@ class MainWindow(QMainWindow):
                       "Drag a category ONTO another to nest it inside,\n"
                       "or between two to reorder.\n"
                       "Ctrl+1 ... Ctrl+9 assign to the first nine.")
-        hint.setStyleSheet("color:gray; font-size:11px;")
+        themed(hint, css="color:%(dim)s; font-size:11px;")
         hint.setWordWrap(True)
         lay.addWidget(hint)
         return w
@@ -3349,6 +3729,7 @@ class MainWindow(QMainWindow):
         self.model.set_icon_size(px)
         self.view.setIconSize(QSize(px, px))
         extra = 34 if self.model.show_names else 10
+        extra += 2 * ThumbDelegate.PAD              # el aire del marco de seleccion
         self.view.setGridSize(QSize(px + 22, px + extra))
 
     def on_names(self, on: bool):
@@ -3383,16 +3764,28 @@ class MainWindow(QMainWindow):
         barra = self.menuBar()
         m = barra.addMenu("&Library")
         a = m.addAction("Export library…", self.export_library)
-        a.setIcon(std_icon("SP_DialogSaveButton"))
+        themed(a, std="SP_DialogSaveButton")
         a.setToolTip("Save folders, categories, edits and drawings to a file")
         a = m.addAction("Import library…", self.import_library)
-        a.setIcon(std_icon("SP_DirOpenIcon"))
+        themed(a, std="SP_DirOpenIcon")
         m.addSeparator()
         a = m.addAction("Refresh folders", self.rescan)
-        a.setIcon(std_icon("SP_BrowserReload"))
+        themed(a, std="SP_BrowserReload")
         a.setShortcut(QKeySequence("F5"))
         m.addSeparator()
         m.addAction("Quit", self.close)
+
+        v = barra.addMenu("&View")
+        grupo = QActionGroup(self)
+        grupo.setExclusive(True)
+        self.act_dark = v.addAction("Dark theme", lambda: self.set_theme("dark"))
+        self.act_light = v.addAction("Light theme", lambda: self.set_theme("light"))
+        for a in (self.act_dark, self.act_light):
+            a.setCheckable(True)
+            grupo.addAction(a)
+        v.addSeparator()
+        a = v.addAction("Switch theme", self.toggle_theme)
+        a.setShortcut(QKeySequence("Ctrl+T"))
 
         h = barra.addMenu("&Help")
         a = h.addAction("How DriloBoard works…", self.show_help)
@@ -3400,13 +3793,50 @@ class MainWindow(QMainWindow):
         h.addSeparator()
         h.addAction("About DriloBoard…", self.about)
 
-        # y un boton siempre a la vista, arriba a la derecha. Hay que guardar
-        # la referencia: si no, Python se lo lleva y la esquina queda vacia
+        # y arriba a la derecha, siempre a la vista, el cambio de tema y la
+        # ayuda. Hay que guardar las referencias: si no, Python se las lleva y
+        # la esquina queda vacia
+        self.b_theme = QPushButton()
+        self.b_theme.setFlat(True)
+        self.b_theme.clicked.connect(self.toggle_theme)
         self.b_help = QPushButton("  ?  Help  ")
         self.b_help.setToolTip("How DriloBoard works (F1)")
         self.b_help.setFlat(True)
         self.b_help.clicked.connect(self.show_help)
-        barra.setCornerWidget(self.b_help, Qt.Corner.TopRightCorner)
+        self.corner = QWidget()
+        fila = QHBoxLayout(self.corner)
+        fila.setContentsMargins(0, 0, 0, 0)
+        fila.setSpacing(2)
+        fila.addWidget(self.b_theme)
+        fila.addWidget(self.b_help)
+        barra.setCornerWidget(self.corner, Qt.Corner.TopRightCorner)
+        self._sync_theme_ui()
+
+    # ---------------- tema claro u oscuro --------------------------------- #
+    @staticmethod
+    def _saved_theme() -> str | None:
+        try:
+            return json.loads(STATE_FILE.read_text(encoding="utf-8")).get("theme")
+        except Exception:
+            return None
+
+    def set_theme(self, nombre: str):
+        apply_theme(nombre)
+        self._sync_theme_ui()
+        self.touch()
+
+    def toggle_theme(self):
+        self.set_theme("light" if _theme == "dark" else "dark")
+
+    def _sync_theme_ui(self):
+        oscuro = _theme == "dark"
+        self.act_dark.setChecked(oscuro)
+        self.act_light.setChecked(not oscuro)
+        # el boton ensena a donde se va, no donde se esta
+        themed(self.b_theme, icon="sun" if oscuro else "moon")
+        self.b_theme.setText("  Light  " if oscuro else "  Dark  ")
+        self.b_theme.setToolTip("Switch to the %s theme (Ctrl+T)"
+                                % ("light" if oscuro else "dark"))
 
     def show_help(self):
         if getattr(self, "_help", None) is None:
@@ -3874,6 +4304,7 @@ class MainWindow(QMainWindow):
             "splitter": self.splitter.sizes(),
             "center_splitter": self.center_split.sizes(),
             "geometry": [self.x(), self.y(), self.width(), self.height()],
+            "theme": _theme,
         }
         try:
             tmp = STATE_FILE.with_suffix(".tmp")

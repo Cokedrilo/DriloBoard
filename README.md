@@ -61,6 +61,7 @@ Adjustable size (64–420 px), generated in background threads with an on-disk
 cache. *Preview below* splits the column and shows the selected image large
 underneath at full resolution — arrow through the thumbnails and the preview
 follows. Double-click opens a large window with zoom, pan and fullscreen.
+Selected thumbnails get a clear **blue frame**.
 
 **A/B comparison**
 Mark one image as **A** and another as **B** — the marks stay put while you
@@ -79,7 +80,9 @@ category only* turns the centre into that category and everything below it,
 whatever folder the images came from.
 
 **Non-destructive editor**
-Rotate, flip, crop, brightness, contrast, black and white, output size. Plus
+Rotate, flip, crop, brightness, contrast, black and white, output size.
+**Rotate by any angle** too — slider or exact degrees, with a grid to
+straighten by eye; drawings and crops follow the turn. Plus
 **drawing tools** like a snipping tool — pen, highlighter, line, arrow,
 rectangle, ellipse and text, in ten colours. Drawings are *objects, not
 pixels*: the eraser removes the whole stroke you click on, and if you rotate
@@ -87,6 +90,11 @@ the image afterwards, the drawing rotates with it. Right-click rotates or
 flips every selected image at once.
 
 ![The editor, with annotations on an image](docs/editor.png)
+
+**Dark or light**
+The **Light / Dark** button in the top-right corner, *View ▸ theme* or
+`Ctrl+T` switch the whole application, editor included. The choice is
+remembered; the first run follows the system.
 
 **Undo everywhere**
 `Ctrl+Z` covers the lot — edits, assignments, categories, folders — for the
@@ -147,6 +155,7 @@ you try it there, reports are welcome.
 | `Ctrl+1` … `Ctrl+9` | assign to the first nine categories |
 | `Ctrl+Z` / `Ctrl+Y` | undo / redo |
 | `F5` | re-read the folders from disk |
+| `Ctrl+T` | switch between dark and light theme |
 | `F1` | help |
 
 There is a **? Help** button in the top-right corner with a full guide that
@@ -180,7 +189,7 @@ Constants at the top of `driloboard.py`:
 ## Development
 
 ```bash
-.venv/bin/python tests/correr_tests.py     # seven suites, ~13 s, no windows opened
+.venv/bin/python tests/correr_tests.py     # nine suites, ~15 s, no windows opened
 ```
 
 The suites run headless (`QT_QPA_PLATFORM=offscreen`) and use their own state
@@ -192,6 +201,10 @@ file, so they cannot touch your library. They cover, among other things:
 - That **neither editing nor exporting modifies the original file**, verified
   against its timestamp and size.
 - The memory ceiling, the queue priority and the cache pruning.
+- Free rotation: canvas size, transparent corners (white when exporting to
+  JPG), and drawings and crops landing in the right place across 9 angle
+  combinations.
+- Both themes, and that a selected thumbnail really gets its blue frame.
 - That every shortcut the in-app help advertises actually exists.
 
 Rebuilding the Windows package:

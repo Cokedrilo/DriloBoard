@@ -1,6 +1,6 @@
 # DriloBoard - Image viewer and reviewer
 
-[![Download](https://img.shields.io/badge/Download-Windows%20portable%20·%2044%20MB-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.3-portable-win64.zip)
+[![Download](https://img.shields.io/badge/Download-Windows%20portable%20·%2044%20MB-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.3.1-portable-win64.zip)
 [![Release](https://img.shields.io/github/v/release/Cokedrilo/DriloBoard)](https://github.com/Cokedrilo/DriloBoard/releases/latest)
 [![Licence](https://img.shields.io/github/license/Cokedrilo/DriloBoard)](LICENSE)
 
@@ -14,7 +14,7 @@ sheets, before/after comparisons.
 
 ### ⬇ Try it in one minute
 
-**[Download DriloBoard for Windows](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.3-portable-win64.zip)** → unzip anywhere → run
+**[Download DriloBoard for Windows](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.3.1-portable-win64.zip)** → unzip anywhere → run
 `DriloBoard.exe`.
 
 Nothing is installed, nothing is written to the registry, and it runs happily
@@ -122,7 +122,7 @@ overwrites your own edits.
 
 ### Prebuilt Windows package
 
-[**Download the ZIP**](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.3-portable-win64.zip)
+[**Download the ZIP**](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.3.1-portable-win64.zip)
 (44 MB) — or browse every version under
 [Releases](https://github.com/Cokedrilo/DriloBoard/releases). Unpack it
 anywhere: hard disk, USB stick, network share.

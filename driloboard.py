@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.0"
+VERSION = "1.1"
 
 
 def app_dir() -> Path:
@@ -4383,9 +4383,20 @@ def selftest() -> int:
                 ("lectura de imagenes", {".jpg", ".png"} <= supported_exts()),
                 ("escritura de imagenes",
                  b"png" in QImageWriter.supportedImageFormats()),
-                ("dialogo del editor", EditorDialog is not None)):
+                ("dialogo del editor", EditorDialog is not None),
+                ("giro libre", rotate_free(QImage(40, 20, QImage.Format.Format_RGB32),
+                                           90).size() == QSize(20, 40))):
             if not cond:
                 fallos.append("no funciona: %s" % pieza)
+        # el cambio de tema, que depende del estilo de Qt que lleve el paquete
+        antes = _theme
+        for nombre in ("light", "dark"):
+            win.set_theme(nombre)
+            QApplication.processEvents()
+            oscura = QApplication.instance().palette().window().color().lightness() < 128
+            if oscura != (nombre == "dark"):
+                fallos.append("el tema %s no se aplica" % nombre)
+        win.set_theme(antes)
         win._help.close()
         win.close()
     except Exception as e:                       # noqa: BLE001

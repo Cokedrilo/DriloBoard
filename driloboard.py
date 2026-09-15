@@ -54,7 +54,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.2"
+VERSION = "1.3"
 
 
 def app_dir() -> Path:

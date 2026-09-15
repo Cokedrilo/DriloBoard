@@ -36,7 +36,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QListView, QMainWindow,
                                QMenu, QMessageBox, QPushButton, QSlider, QSplitter,
                                QButtonGroup, QColorDialog, QGraphicsPathItem,
-                               QSpinBox, QStyle, QStyledItemDelegate, QTextBrowser,
+                               QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionSlider,
+                               QTextBrowser,
                                QToolButton,
                                QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -44,7 +45,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
 # El video es opcional: QtMultimedia viene en PySide6-Addons, no en Essentials.
 # Sin el, DriloBoard sigue siendo un visor de imagenes y la casilla se apaga.
 try:
-    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
+    from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoSink
     from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
     HAS_VIDEO = True
     VIDEO_IMPORT_ERROR = ""
@@ -82,6 +83,18 @@ DURATION_ROLE = int(Qt.ItemDataRole.UserRole) + 2     # ms de un video, o None
 VIDEO_EXTS = {".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".wmv", ".mpg",
               ".mpeg", ".ogv", ".3gp", ".flv", ".mts", ".m2ts"}
 VIDEO_THUMB_TIMEOUT_MS = 8000        # un video que no da fotograma en este tiempo, falla
+KEYFRAME_COLOR = "#f0a500"           # los fotogramas clave, en la barra y en los botones
+
+# Atajos del reproductor. Van en los bocadillos de los botones y en la ayuda,
+# asi que se definen una sola vez
+VIDEO_KEYS = {
+    "frame_prev": (",", "Previous frame"),
+    "frame_next": (".", "Next frame"),
+    "key_add": ("-", "Set keyframe"),
+    "key_prev": ("Ctrl+,", "Go to previous keyframe"),
+    "key_next": ("Ctrl+.", "Go to next keyframe"),
+    "key_del": ("Ctrl+-", "Delete keyframe"),
+}
 
 # Colores de categoria, asignados por orden de creacion
 PALETTE = ["#e6542f", "#f0a500", "#3fa34d", "#2d8fd5", "#8e6cd0",
@@ -697,12 +710,28 @@ def from_portable(guardada: str, raiz: str) -> str:
     return os.path.normpath(os.path.join(raiz, guardada.replace("/", os.sep)))
 
 
+def clean_video_marks(crudo) -> dict[str, list[int]]:
+    """Fotogramas clave leidos de un json: ms enteros, ordenados y sin repetir."""
+    limpio = {}
+    if isinstance(crudo, dict):
+        for p, marcas in crudo.items():
+            if isinstance(p, str) and isinstance(marcas, list):
+                ms = sorted({int(m) for m in marcas
+                             if isinstance(m, (int, float)) and m >= 0})
+                if ms:
+                    limpio[p] = ms
+    return limpio
+
+
 def build_export(folders: list, categories: list, edits: dict,
-                 extras: dict | None = None) -> dict:
+                 extras: dict | None = None,
+                 video_marks: dict | None = None) -> dict:
+    video_marks = video_marks or {}
     todas = list(folders)
     for c, _ in iter_cats(categories):
         todas.extend(c["images"])
     todas.extend(edits)
+    todas.extend(video_marks)
     raiz = common_root(todas)
 
     def cats(lista):
@@ -714,8 +743,16 @@ def build_export(folders: list, categories: list, edits: dict,
          "folders": [to_portable(f, raiz) for f in folders],
          "categories": cats(copy.deepcopy(categories)),
          "edits": {to_portable(p, raiz): e for p, e in edits.items()}}
+    if video_marks:
+        d["video_marks"] = {to_portable(p, raiz): m for p, m in video_marks.items()}
     d.update(extras or {})
     return d
+
+
+def read_export_marks(data: dict, raiz: str) -> dict[str, list[int]]:
+    """Los fotogramas clave de un archivo exportado, con rutas de este equipo."""
+    return {from_portable(p, raiz): m
+            for p, m in clean_video_marks(data.get("video_marks")).items()}
 
 
 def read_export(data: dict, raiz: str):
@@ -1568,6 +1605,58 @@ class PreviewTask(QRunnable):
         self.signals.done.emit(self.slot, self.token, self.path, img, size, reduced)
 
 
+class MarkSlider(QSlider):
+    """Barra de tiempo que ensena encima los fotogramas clave."""
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self.marks: list[int] = []          # ms
+        self.setMinimumHeight(22)
+
+    def set_marks(self, marks: list[int]):
+        self.marks = list(marks)
+        self.update()
+
+    def mark_x(self, ms: int) -> float:
+        """Donde cae un tiempo, en pixeles: igual que el tirador del estilo."""
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        estilo = self.style()
+        surco = estilo.subControlRect(QStyle.ComplexControl.CC_Slider, opt,
+                                      QStyle.SubControl.SC_SliderGroove, self)
+        tirador = estilo.subControlRect(QStyle.ComplexControl.CC_Slider, opt,
+                                        QStyle.SubControl.SC_SliderHandle, self)
+        recorrido = max(1, surco.width() - tirador.width())
+        return (surco.left() + tirador.width() / 2
+                + QStyle.sliderPositionFromValue(self.minimum(), max(self.minimum(),
+                                                 self.maximum()), int(ms), recorrido))
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if not self.marks or self.maximum() <= self.minimum():
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        ambar = QColor(KEYFRAME_COLOR)
+        p.setPen(QPen(ambar.darker(140), 1))
+        p.setBrush(ambar)
+        arriba = 1.5
+        for ms in self.marks:
+            x = self.mark_x(ms)
+            p.drawPolygon([QPointF(x, arriba + 7), QPointF(x - 4, arriba + 3),
+                           QPointF(x, arriba - 1), QPointF(x + 4, arriba + 3)])
+            p.drawLine(QPointF(x, arriba + 7), QPointF(x, self.height() - 3))
+        p.end()
+
+
+def shortcut_tip(accion: str) -> str:
+    """Bocadillo de un boton con su atajo de teclado debajo, en negrita."""
+    tecla, titulo = VIDEO_KEYS[accion]
+    # nobr: si no, Qt parte en dos lineas los bocadillos con formato
+    return "<nobr>%s&nbsp;&nbsp;<b>%s</b></nobr>" % (titulo, QKeySequence(tecla).toString(
+        QKeySequence.SequenceFormat.NativeText))
+
+
 class PreviewPane(QWidget):
     """Visor de una imagen. Se usa incrustado (abajo del centro) y en ventana.
 
@@ -1666,20 +1755,67 @@ class PreviewPane(QWidget):
         self.video_bar = QWidget()
         vid_lay = QHBoxLayout(self.video_bar)
         vid_lay.setContentsMargins(6, 2, 6, 2)
+        # fotograma a fotograma y fotogramas clave: estado del paso en curso
+        self.marks_for = lambda path: []            # los rellena la ventana principal
+        self.on_marks_changed = lambda path, marks, desc: None
+        self._frame_start_us = 0                    # inicio del fotograma que se ve
+        self._frame_us = 40000                      # duracion de un fotograma
+        self._want_us = None                        # fotograma al que se va
+        self._tries = 0
+        self._fps_known = False
+
+        def boton(accion, fn):
+            b = QToolButton()
+            b.setAutoRaise(True)
+            b.setToolTip(shortcut_tip(accion))
+            themed(b, icon=accion)
+            b.clicked.connect(fn)
+            vid_lay.addWidget(b)
+            return b
+
+        self.b_key_prev = boton("key_prev", lambda: self.jump_keyframe(-1))
+        self.b_frame_prev = boton("frame_prev", lambda: self.step_frame(-1))
         self.b_play = QToolButton()
         self.b_play.setAutoRaise(True)
         self.b_play.setToolTip("Play / pause")
         themed(self.b_play, icon="play")
         self.b_play.clicked.connect(self.toggle_play)
         vid_lay.addWidget(self.b_play)
-        self.sld_pos = QSlider(Qt.Orientation.Horizontal)
-        self.sld_pos.setToolTip("Drag to move through the video")
+        self.b_frame_next = boton("frame_next", lambda: self.step_frame(1))
+        self.b_key_next = boton("key_next", lambda: self.jump_keyframe(1))
+        self.sld_pos = MarkSlider()
+        self.sld_pos.setToolTip("Drag to move through the video. "
+                                "Keyframes are marked above the bar.")
         self.sld_pos.sliderMoved.connect(self._on_seek)
         self.sld_pos.valueChanged.connect(self._on_seek_click)
         vid_lay.addWidget(self.sld_pos, 1)
         self.lbl_time = QLabel("0:00 / 0:00")
         themed(self.lbl_time, css="color:%(caption)s;")
         vid_lay.addWidget(self.lbl_time)
+        self.lbl_key = QLabel("")
+        self.lbl_key.setMinimumWidth(78)
+        self.lbl_key.setStyleSheet("color:%s; font-weight:bold;" % KEYFRAME_COLOR)
+        vid_lay.addWidget(self.lbl_key)
+        self.b_key_add = boton("key_add", self.set_keyframe)
+        self.b_key_del = boton("key_del", self.delete_keyframe)
+        vid_lay.addSpacing(8)
+
+        # los atajos, activos solo mientras hay un video puesto
+        self._video_shortcuts = []
+        for accion, fn in (("frame_prev", lambda: self.step_frame(-1)),
+                           ("frame_next", lambda: self.step_frame(1)),
+                           ("key_add", self.set_keyframe),
+                           ("key_prev", lambda: self.jump_keyframe(-1)),
+                           ("key_next", lambda: self.jump_keyframe(1)),
+                           ("key_del", self.delete_keyframe)):
+            atajo = QShortcut(QKeySequence(VIDEO_KEYS[accion][0]), self, fn)
+            atajo.setEnabled(False)
+            self._video_shortcuts.append(atajo)
+        self._flash_timer = QTimer(self)
+        self._flash_timer.setSingleShot(True)
+        self._flash_timer.setInterval(2500)
+        self._flash_timer.timeout.connect(lambda: self.showing_video and self._caption_video())
+
         self.b_mute = QToolButton()
         self.b_mute.setAutoRaise(True)
         self.b_mute.setCheckable(True)
@@ -1695,7 +1831,9 @@ class PreviewPane(QWidget):
         self.sld_vol.valueChanged.connect(self._on_volume)
         vid_lay.addWidget(self.sld_vol)
         # sin foco: las flechas y el espacio siguen siendo de la rejilla y del visor
-        for w in (self.b_play, self.sld_pos, self.b_mute, self.sld_vol):
+        for w in (self.b_play, self.sld_pos, self.b_mute, self.sld_vol, self.b_key_prev,
+                  self.b_frame_prev, self.b_frame_next, self.b_key_next, self.b_key_add,
+                  self.b_key_del):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.video_bar.hide()
 
@@ -1760,6 +1898,8 @@ class PreviewPane(QWidget):
         self.player.positionChanged.connect(self._on_position)
         self.player.playbackStateChanged.connect(self._on_state)
         self.player.errorOccurred.connect(self._on_video_error)
+        self.player.metaDataChanged.connect(self._on_metadata)
+        self.video_item.videoSink().videoFrameChanged.connect(self._on_video_frame)
         self._on_volume(self.sld_vol.value())
 
     def _load_video(self, path: str):
@@ -1775,7 +1915,13 @@ class PreviewPane(QWidget):
         self.sld_pos.blockSignals(True)
         self.sld_pos.setRange(0, 0)
         self.sld_pos.blockSignals(False)
+        self._frame_start_us, self._frame_us = 0, 40000
+        self._fps_known = False
+        self._want_us = None
         self.lbl_time.setText("0:00 / 0:00")
+        for atajo in self._video_shortcuts:
+            atajo.setEnabled(True)
+        self.refresh_marks()
         self.player.setSource(QUrl.fromLocalFile(path))
         self.player.pause()
         self._caption_video()
@@ -1785,11 +1931,159 @@ class PreviewPane(QWidget):
         if self.player is not None:
             self.player.stop()
             self.player.setSource(QUrl())
+        for atajo in self._video_shortcuts:
+            atajo.setEnabled(False)
         if self.showing_video:
             self.showing_video = False
+            self._want_us = None
             self.video_item.hide()
             self.item.show()
             self.video_bar.hide()
+
+    # --- fotograma a fotograma ---------------------------------------------
+    #  QMediaPlayer no sabe avanzar un fotograma: solo saltar a un milisegundo.
+    #  Se salta al primer cuarto del fotograma que toca (al centro, en algunos
+    #  AVI cerca de un fotograma completo, el decodificador se pasaba al
+    #  siguiente) y, al llegar, se comprueba cual ha salido; si no es, se
+    #  reintenta un poco antes o despues.
+    def _on_metadata(self):
+        fps = self.player.metaData().value(QMediaMetaData.Key.VideoFrameRate)
+        try:
+            fps = float(fps)
+        except (TypeError, ValueError):
+            fps = 0.0
+        self._fps_known = fps > 0
+        if fps > 0:
+            self._frame_us = 1_000_000 / fps
+
+    def _on_video_frame(self, frame):
+        if not self.showing_video or not frame.isValid() or frame.startTime() < 0:
+            return
+        inicio, fin = frame.startTime(), frame.endTime()
+        if fin > inicio and not self._fps_known:
+            self._frame_us = fin - inicio        # sin fps en el archivo: el fotograma lo dice
+        self._frame_start_us = inicio
+        if self._want_us is not None:
+            error = inicio - self._want_us
+            if abs(error) <= self._frame_us * 0.3 or self._tries >= 3:
+                self._want_us = None
+            else:
+                self._tries += 1
+                # se paso: justo al empezar el fotograma; se quedo corto: mas adentro
+                destino = self._want_us + (1000 if error > 0 else self._frame_us * 0.6)
+                self.player.setPosition(int(math.ceil(destino / 1000)))
+        self._refresh_frame_ui()
+
+    def current_frame_us(self) -> float:
+        """El fotograma actual; si se esta yendo a uno, ese (pulsaciones seguidas)."""
+        return self._want_us if self._want_us is not None else self._frame_start_us
+
+    def frame_index(self, us: float | None = None) -> int:
+        us = self.current_frame_us() if us is None else us
+        return int(round(us / (self._frame_us or 40000)))
+
+    def _go_to_frame_us(self, inicio_us: float):
+        if self.player is None:
+            return
+        if self.is_playing():
+            self.player.pause()
+        ultimo = max(0.0, self.player.duration() * 1000 - self._frame_us)
+        inicio_us = max(0.0, min(inicio_us, ultimo))
+        # redondeado a un fotograma entero: los tiempos guardados son en ms
+        inicio_us = round(inicio_us / self._frame_us) * self._frame_us
+        self._want_us = inicio_us
+        self._tries = 0
+        self.player.setPosition(int(round((inicio_us + self._frame_us / 4) / 1000)))
+        self._refresh_frame_ui()
+
+    def step_frame(self, delta: int):
+        if not self.showing_video:
+            return
+        self._go_to_frame_us(self.current_frame_us() + delta * self._frame_us)
+
+    # --- fotogramas clave --------------------------------------------------
+    def marks(self) -> list[int]:
+        return sorted(self.marks_for(self.loaded_path)) if self.loaded_path else []
+
+    def _mark_here(self) -> int | None:
+        actual = self.current_frame_us()
+        for ms in self.marks():
+            if abs(ms * 1000 - actual) < self._frame_us / 2:
+                return ms
+        return None
+
+    def refresh_marks(self):
+        """Tras cambiar las marcas desde fuera (deshacer, importar)."""
+        self.sld_pos.set_marks(self.marks())
+        self._refresh_frame_ui()
+
+    def set_keyframe(self):
+        if not self.showing_video:
+            return
+        if self.is_playing():
+            self.player.pause()
+        if self._mark_here() is not None:
+            self.flash("This frame is already a keyframe")
+            return
+        ms = int(round(self.current_frame_us() / 1000))
+        marcas = sorted(self.marks() + [ms])
+        self.on_marks_changed(self.loaded_path, marcas,
+                              "set keyframe at frame %d" % self.frame_index())
+        self.refresh_marks()
+        self.flash("Keyframe set at frame %d" % self.frame_index())
+
+    def delete_keyframe(self):
+        if not self.showing_video:
+            return
+        ms = self._mark_here()
+        if ms is None:
+            self.flash("No keyframe on this frame")
+            return
+        marcas = [m for m in self.marks() if m != ms]
+        self.on_marks_changed(self.loaded_path, marcas,
+                              "delete keyframe at frame %d" % self.frame_index())
+        self.refresh_marks()
+        self.flash("Keyframe deleted")
+
+    def jump_keyframe(self, sentido: int):
+        if not self.showing_video:
+            return
+        actual = self.current_frame_us()
+        margen = self._frame_us / 2
+        if sentido < 0:
+            antes = [ms for ms in self.marks() if ms * 1000 < actual - margen]
+            destino = antes[-1] if antes else None
+        else:
+            despues = [ms for ms in self.marks() if ms * 1000 > actual + margen]
+            destino = despues[0] if despues else None
+        if destino is None:
+            self.flash("No %s keyframe" % ("earlier" if sentido < 0 else "later"))
+            return
+        self._go_to_frame_us(destino * 1000)
+
+    def flash(self, texto: str):
+        """Un aviso corto en el pie, que se va solo."""
+        self.caption.setText("%s%s   ·   %s" % (self.prefix,
+                                                os.path.basename(self.loaded_path or ""),
+                                                texto))
+        self._flash_timer.start()
+
+    def _refresh_frame_ui(self):
+        if not self.showing_video or self.player is None:
+            return
+        marcas = self.marks()
+        aqui = self._mark_here() is not None
+        total = int(round(self.player.duration() * 1000 / (self._frame_us or 40000)))
+        self.lbl_time.setText("%s / %s   frame %d%s"
+                              % (format_duration(self.current_frame_us() / 1000),
+                                 format_duration(self.player.duration()),
+                                 self.frame_index(), " / %d" % total if total else ""))
+        self.lbl_key.setText("◆ Keyframe" if aqui else "")
+        self.b_key_del.setEnabled(aqui)
+        antes = any(ms * 1000 < self.current_frame_us() - self._frame_us / 2 for ms in marcas)
+        despues = any(ms * 1000 > self.current_frame_us() + self._frame_us / 2 for ms in marcas)
+        self.b_key_prev.setEnabled(antes)
+        self.b_key_next.setEnabled(despues)
 
     def is_playing(self) -> bool:
         return (self.player is not None and self.player.playbackState()
@@ -1801,6 +2095,7 @@ class PreviewPane(QWidget):
         if self.is_playing():
             self.player.pause()
             return
+        self._want_us = None
         if self.player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia:
             self.player.setPosition(0)          # al final, vuelve a empezar
         self.player.play()
@@ -1837,10 +2132,11 @@ class PreviewPane(QWidget):
             self.sld_pos.blockSignals(True)
             self.sld_pos.setValue(ms)
             self.sld_pos.blockSignals(False)
-        self.lbl_time.setText("%s / %s" % (format_duration(ms),
-                                           format_duration(self.player.duration())))
+        self._refresh_frame_ui()
 
     def _on_seek(self, ms: int):
+        self._want_us = None                    # manda la barra, no un paso a medias
+        self._frame_start_us = ms * 1000        # provisional: el fotograma lo afina
         if self.player is not None:
             self.player.setPosition(ms)         # tambien en pausa: se ve el fotograma
 
@@ -2347,6 +2643,47 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
         p.setBrush(tinta)
         p.drawRoundedRect(QRectF(m + 1.5, m, 4.5, M - m), 1, 1)
         p.drawRoundedRect(QRectF(M - 6, m, 4.5, M - m), 1, 1)
+    elif kind in ("frame_prev", "frame_next"):
+        # |◀  y  ▶| : un fotograma
+        p.setBrush(tinta)
+        if kind == "frame_prev":
+            p.drawLine(QPointF(m + 1, m + 1), QPointF(m + 1, M - 1))
+            p.drawPolygon([QPointF(M - 1, m + 1), QPointF(M - 1, M - 1),
+                           QPointF(m + 4, size / 2)])
+        else:
+            p.drawLine(QPointF(M - 1, m + 1), QPointF(M - 1, M - 1))
+            p.drawPolygon([QPointF(m + 1, m + 1), QPointF(m + 1, M - 1),
+                           QPointF(M - 4, size / 2)])
+    elif kind in ("key_prev", "key_next", "key_add", "key_del"):
+        ambar = QColor(KEYFRAME_COLOR)
+        def rombo(cx, r):
+            return [QPointF(cx, size / 2 - r), QPointF(cx + r, size / 2),
+                    QPointF(cx, size / 2 + r), QPointF(cx - r, size / 2)]
+        if kind in ("key_prev", "key_next"):
+            cx = M - 4.5 if kind == "key_next" else m + 4.5
+            p.setPen(QPen(ambar.darker(130), 1))
+            p.setBrush(ambar)
+            p.drawPolygon(rombo(cx, 4.5))
+            p.setPen(lapiz)
+            p.setBrush(tinta)
+            if kind == "key_next":          # flecha hacia el rombo
+                p.drawPolygon([QPointF(m, m + 3), QPointF(m, M - 3),
+                               QPointF(m + 6, size / 2)])
+            else:
+                p.drawPolygon([QPointF(M, m + 3), QPointF(M, M - 3),
+                               QPointF(M - 6, size / 2)])
+        else:
+            p.setPen(QPen(ambar.darker(130), 1))
+            p.setBrush(ambar)
+            p.drawPolygon(rombo(size / 2 - 2, 6))
+            p.setPen(QPen(tinta, 2.0))
+            cx, cy = M - 2.5, M - 2.5
+            if kind == "key_add":
+                p.drawLine(QPointF(cx - 3.5, cy), QPointF(cx + 2, cy))
+                p.drawLine(QPointF(cx - 0.75, cy - 3), QPointF(cx - 0.75, cy + 2.5))
+            else:
+                p.drawLine(QPointF(cx - 3.5, cy - 3), QPointF(cx + 1.5, cy + 2))
+                p.drawLine(QPointF(cx + 1.5, cy - 3), QPointF(cx - 3.5, cy + 2))
     elif kind in ("volume", "mute"):
         altavoz = [QPointF(m, size / 2 - 3), QPointF(m + 4, size / 2 - 3),
                    QPointF(m + 9, m + 1), QPointF(m + 9, M - 1),
@@ -3331,6 +3668,9 @@ with the same name instead of duplicating them, and keeps your own edits.</li>
 <tr><td><b>Ctrl+Z</b> / <b>Ctrl+Y</b></td><td>undo / redo</td></tr>
 <tr><td><b>F5</b></td><td>re-read the folders from disk</td></tr>
 <tr><td><b>Ctrl+T</b></td><td>switch between the dark and light theme</td></tr>
+<tr><td><b>,</b> / <b>.</b></td><td>video: previous / next frame</td></tr>
+<tr><td><b>-</b> / <b>Ctrl+-</b></td><td>video: set / delete a keyframe</td></tr>
+<tr><td><b>Ctrl+,</b> / <b>Ctrl+.</b></td><td>video: previous / next keyframe</td></tr>
 <tr><td><b>F1</b></td><td>this help</td></tr>
 </table>
 
@@ -3355,6 +3695,14 @@ browsing stays silent. Use the play button and the bar under it; in the large
 window <b>Space</b> plays and pauses.</li>
 <li>Videos go into categories like images, and <i>Export…</i> copies them as
 they are. The editor and the A/B comparison are for images only.</li>
+<li><b>Frame by frame</b>: the buttons either side of play, or <b>,</b> and
+<b>.</b>, step one frame back or forward (playback pauses). The bar shows the
+frame number.</li>
+<li><b>Keyframes</b> mark the frames you care about, saved with the library:
+<b>-</b> sets one on the current frame, <b>Ctrl+,</b> and <b>Ctrl+.</b> jump
+to the previous or next one, <b>Ctrl+-</b> deletes it. They appear as amber
+diamonds above the time bar, and <b>Ctrl+Z</b> undoes them. Hover over any
+button to see its shortcut.</li>
 </ul>
 """
 
@@ -3395,6 +3743,13 @@ class ImageViewer(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.pane)
+        # los fotogramas clave son de la biblioteca: se leen y se guardan en la
+        # ventana principal, y Ctrl+Z los deshace tambien desde aqui
+        if hasattr(parent, "marks_of"):
+            self.pane.marks_for = parent.marks_of
+            self.pane.on_marks_changed = parent.set_video_marks
+            QShortcut(QKeySequence.StandardKey.Undo, self, lambda: self._history(parent.undo))
+            QShortcut(QKeySequence.StandardKey.Redo, self, lambda: self._history(parent.redo))
 
         QShortcut(QKeySequence(Qt.Key.Key_Right), self, lambda: self.step(1))
         QShortcut(QKeySequence(Qt.Key.Key_Left), self, lambda: self.step(-1))
@@ -3414,6 +3769,11 @@ class ImageViewer(QDialog):
     def _toggle_full(self):
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
         QTimer.singleShot(60, self.pane.fit)
+
+    def _history(self, fn):
+        fn()
+        if self.pane.showing_video:
+            self.pane.refresh_marks()
 
     def done(self, r):
         self.pane.stop_video()                  # que no siga sonando al cerrar
@@ -3451,6 +3811,7 @@ class MainWindow(QMainWindow):
         self.mark_a: str | None = None               # imagenes marcadas para
         self.mark_b: str | None = None               # comparar
         self.edits: dict[str, dict] = {}             # ruta -> receta de edicion
+        self.video_marks: dict[str, list[int]] = {}  # ruta de video -> ms clave
         self.export_dir = ""
         self._undo: list = []
         self._redo: list = []
@@ -3615,6 +3976,8 @@ class MainWindow(QMainWindow):
 
         self.preview = PreviewPane()
         self.preview.edit_for = self.edit_of
+        self.preview.marks_for = self.marks_of
+        self.preview.on_marks_changed = self.set_video_marks
         self.preview.openBig.connect(self.open_viewer_current)
         self.preview.hide()
 
@@ -4332,7 +4695,8 @@ class MainWindow(QMainWindow):
             self.folders, self.categories, self.edits,
             {"recursive": self.recursive,
              "folder_order": self.cmb_folder_order.currentData(),
-             "category_order": self.cmb_cat_order.currentData()})
+             "category_order": self.cmb_cat_order.currentData()},
+            video_marks=self.video_marks)
         try:
             with open(destino, "w", encoding="utf-8") as f:
                 json.dump(datos, f, indent=1, ensure_ascii=False)
@@ -4419,12 +4783,14 @@ class MainWindow(QMainWindow):
         """Mete en la biblioteca lo que trae el archivo. Sin dialogos, para
         que las pruebas puedan usar exactamente este mismo camino."""
         folders, cats, edits = read_export(datos, raiz)
+        marcas = read_export_marks(datos, raiz)
         self.push_undo("import library")     # se puede deshacer con Ctrl+Z
         saltadas = 0
         if reemplazar:
             self.folders = folders
             self.categories = cats
             self.edits = edits
+            self.video_marks = marcas
             nuevas_cats = len(list(iter_cats(cats)))
             nuevas_edits = len(edits)
         else:
@@ -4438,6 +4804,8 @@ class MainWindow(QMainWindow):
                     nuevas_edits += 1
                 else:
                     saltadas += 1
+            for p, ms in marcas.items():        # fundir: se suman los fotogramas clave
+                self.video_marks[p] = sorted(set(self.video_marks.get(p, [])) | set(ms))
         self._set_mode(self.cmb_folder_order,
                        datos.get("folder_order", self.cmb_folder_order.currentData()))
         self._set_mode(self.cmb_cat_order,
@@ -4464,6 +4832,7 @@ class MainWindow(QMainWindow):
             "folders": list(self.folders),
             "categories": copy.deepcopy(self.categories),
             "edits": copy.deepcopy(self.edits),
+            "video_marks": copy.deepcopy(self.video_marks),
             "folder_order": self.cmb_folder_order.currentData(),
             "category_order": self.cmb_cat_order.currentData(),
         }
@@ -4481,6 +4850,7 @@ class MainWindow(QMainWindow):
         self.folders = snap["folders"]
         self.categories = snap["categories"]
         self.edits = snap["edits"]
+        self.video_marks = snap.get("video_marks", {})
         self._set_mode(self.cmb_folder_order, snap["folder_order"])
         self._set_mode(self.cmb_cat_order, snap["category_order"])
         self.refresh_folders()
@@ -4492,6 +4862,11 @@ class MainWindow(QMainWindow):
         if self.preview.comparing:
             self.preview.compare(self.preview.path, self.preview.path_b,
                                  self.preview.sld_opacity.value())
+        elif (self.preview.showing_video and self.preview.loaded_path == self.preview.path
+              and self.preview.path in self.model.paths()):
+            # el mismo video: se repintan las marcas sin recargarlo, que si no
+            # deshacer un fotograma clave te devolveria al principio
+            self.preview.refresh_marks()
         elif self.preview.path:
             self.preview.show_path(self.preview.path, immediate=True)
         self.touch()
@@ -4527,6 +4902,20 @@ class MainWindow(QMainWindow):
         self._undo.append((desc, self.snapshot()))
         self.restore(snap)
         self.statusBar().showMessage("Redone: %s" % desc, 5000)
+
+    # ---------------- fotogramas clave de los videos ---------------------- #
+    def marks_of(self, path: str | None) -> list[int]:
+        return list(self.video_marks.get(path, [])) if path else []
+
+    def set_video_marks(self, path: str, marks: list[int], descripcion: str):
+        """Como las ediciones: se guarda en la biblioteca y se deshace."""
+        self.push_undo("%s (%s)" % (descripcion, os.path.basename(path)))
+        limpias = sorted({int(m) for m in marks})
+        if limpias:
+            self.video_marks[path] = limpias
+        else:
+            self.video_marks.pop(path, None)
+        self.touch()
 
     # ---------------- edicion no destructiva ------------------------------ #
     def edit_of(self, path: str | None) -> dict | None:
@@ -4792,6 +5181,7 @@ class MainWindow(QMainWindow):
             "geometry": [self.x(), self.y(), self.width(), self.height()],
             "theme": _theme,
             "videos": self.show_videos,
+            "video_marks": self.video_marks,
         }
         try:
             tmp = STATE_FILE.with_suffix(".tmp")
@@ -4814,6 +5204,7 @@ class MainWindow(QMainWindow):
         self.edits = {p: dict(empty_edit(), **e)
                       for p, e in crudo.items() if isinstance(e, dict)}
         self.edits = {p: e for p, e in self.edits.items() if not is_empty_edit(e)}
+        self.video_marks = clean_video_marks(data.get("video_marks"))
         self.export_dir = data.get("export_dir", "")
         self._set_mode(self.cmb_folder_order, data.get("folder_order", "manual"))
         self._set_mode(self.cmb_cat_order, data.get("category_order", "manual"))

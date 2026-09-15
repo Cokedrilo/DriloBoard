@@ -97,6 +97,10 @@ webm, mkv, avi… — join the grid with a ▶ badge and their duration. They pl
 in the preview and the large window, opening paused so browsing stays silent,
 and they go into categories and export like images. The editor and the A/B
 comparison stay image-only.
+Step **frame by frame** and set **keyframes** on the frames that matter: they
+show as amber diamonds on the time bar, jump from one to the next, are saved
+with the library and undo with `Ctrl+Z`. Every button shows its shortcut when
+you hover over it.
 
 **Dark or light**
 The **Light / Dark** button in the top-right corner, *View ▸ theme* or
@@ -165,6 +169,9 @@ you try it there, reports are welcome.
 | `F5` | re-read the folders from disk |
 | `Ctrl+T` | switch between dark and light theme |
 | `Space` | play / pause a video in the large window |
+| `,` / `.` | video: previous / next frame |
+| `-` / `Ctrl+-` | video: set / delete a keyframe |
+| `Ctrl+,` / `Ctrl+.` | video: previous / next keyframe |
 | `F1` | help |
 
 There is a **? Help** button in the top-right corner with a full guide that
@@ -198,7 +205,7 @@ Constants at the top of `driloboard.py`:
 ## Development
 
 ```bash
-.venv/bin/python tests/correr_tests.py     # ten suites, ~17 s, no windows opened
+.venv/bin/python tests/correr_tests.py     # eleven suites, ~15 s, no windows opened
 ```
 
 The suites run headless (`QT_QPA_PLATFORM=offscreen`) and use their own state
@@ -217,6 +224,9 @@ file, so they cannot touch your library. They cover, among other things:
 - Video: the checkbox starts off, thumbnails and durations, play, pause and
   seek, the file being released when you move on, and that editing and A/B
   refuse videos while export copies them byte for byte.
+- Frame stepping lands on exactly the next or previous frame, keyframes can
+  be set, jumped to and deleted with the real keys, and undoing one does not
+  reload the video.
 - That every shortcut the in-app help advertises actually exists.
 
 Rebuilding the Windows package:

@@ -84,7 +84,26 @@ print("   encendida: '%s', y la carpeta cuenta 3" % w.lbl_count.text())
 print("\n2. LA MINIATURA")
 fila = w.model.paths().index(str(video))
 indice = w.model.index(fila)
-visor.thumb_cache_file(str(video), "").unlink(missing_ok=True)
+
+
+def borrar(ruta):
+    """En Windows no se borra un archivo mientras otro hilo lo lee: se reintenta."""
+    limite = time.time() + 3
+    while True:
+        try:
+            ruta.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if time.time() > limite:
+                raise
+            app.processEvents()
+            time.sleep(0.02)
+
+
+# de una pasada anterior puede quedar en la cache: se quita para generarla de verdad
+espera(lambda: False, 300)
+borrar(visor.thumb_cache_file(str(video), ""))
+w.model.invalidate([str(video)])
 w.model.data(indice, visor.Qt.ItemDataRole.DecorationRole)       # la pide
 assert espera(lambda: str(video) in w.model._pix, 15000), "no se genero la miniatura del video"
 pm = w.model._pix[str(video)]

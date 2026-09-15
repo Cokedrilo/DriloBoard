@@ -51,11 +51,11 @@ propio código, no hay archivos de diseño sueltos.
 .venv\Scripts\python.exe tests\correr_tests.py
 ```
 
-Diez suites que corren sin abrir ninguna ventana y usan su propio archivo de
+Once suites que corren sin abrir ninguna ventana y usan su propio archivo de
 estado, así que no pueden tocar tu `biblioteca.json`. Cubren, entre otras cosas, el mapeo de
 coordenadas de recortes y dibujos en 14 combinaciones de transformaciones (y 9
 más con giro libre), los dos temas, el marco azul de la selección, los
-vídeos, y
+vídeos y sus fotogramas clave, y
 —dos veces, contrastando marca de tiempo y tamaño— que ni editar ni exportar
 modifican el archivo original.
 
@@ -137,6 +137,16 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
     vídeo avisan en la barra de estado.
   - Quitar la casilla los esconde también de las categorías, pero no los
     desclasifica: al volver a marcarla siguen donde estaban.
+  - **Fotograma a fotograma**: los botones a los lados de play, o `,` y `.`,
+    retroceden o avanzan un fotograma (si estaba reproduciendo, pausa). Junto
+    al tiempo sale el número de fotograma.
+  - **Fotogramas clave**: `-` marca el fotograma actual, `Ctrl+,` y `Ctrl+.`
+    saltan a la clave anterior o siguiente, y `Ctrl+-` borra la del fotograma
+    en el que estás. Salen como rombos ámbar sobre la barra de tiempo, y un
+    «◆ Keyframe» avisa cuando estás encima de una. Se guardan con la
+    biblioteca (también al exportarla) y se deshacen con `Ctrl+Z`, sin que el
+    vídeo vuelva al principio.
+  - Cada botón enseña su atajo en un bocadillo al dejar el ratón encima.
   - Desde el código fuente hace falta `pip install PySide6-Addons`; sin él la
     casilla sale desactivada y lo explica. La versión portable ya lo lleva.
 - Doble clic abre el visor grande: `←`/`→` pasan imágenes, rueda hace zoom,

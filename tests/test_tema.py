@@ -14,7 +14,7 @@ TMP.mkdir(parents=True, exist_ok=True)
 
 from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem
 from PySide6.QtGui import QColor, QImage, QPainter
-from PySide6.QtCore import Qt, QRect, QSize
+from PySide6.QtCore import QRect, QSize
 
 app = QApplication(sys.argv)
 import driloboard as visor

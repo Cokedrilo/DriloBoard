@@ -15,7 +15,7 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parent.parent
 SUITES = ["test_bug_zoom.py", "test_edicion.py", "test_dibujo.py",
           "test_general.py", "test_rendimiento.py", "test_importar.py", "test_ayuda.py",
-          "test_tema.py", "test_angulo.py"]
+          "test_tema.py", "test_angulo.py", "test_video.py"]
 
 entorno = dict(os.environ, QT_QPA_PLATFORM="offscreen")
 entorno.setdefault("SCRATCH", str(RAIZ / "tests" / "_tmp"))

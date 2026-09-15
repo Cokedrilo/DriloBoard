@@ -38,6 +38,8 @@ ejecutable no está firmado): *Más información* → *Ejecutar de todas formas*
 .venv\Scripts\python.exe -m PyInstaller DriloBoard.spec --noconfirm
 ```
 
+Hace falta tener instalado también `PySide6-Addons`, que es el que trae el
+vídeo; si falta, `DriloBoard.exe --selftest` lo detecta y devuelve 1.
 Deja `dist/DriloBoard/` lista para comprimir. Antes de comprimir, borra
 `dist/DriloBoard/cache/` si existe: la crea cualquier ejecución de prueba y no
 pinta nada en el paquete. El icono se regenera desde el
@@ -49,10 +51,11 @@ propio código, no hay archivos de diseño sueltos.
 .venv\Scripts\python.exe tests\correr_tests.py
 ```
 
-Nueve suites que corren sin abrir ninguna ventana y usan su propio archivo de
+Diez suites que corren sin abrir ninguna ventana y usan su propio archivo de
 estado, así que no pueden tocar tu `biblioteca.json`. Cubren, entre otras cosas, el mapeo de
 coordenadas de recortes y dibujos en 14 combinaciones de transformaciones (y 9
-más con giro libre), los dos temas y el marco azul de la selección, y
+más con giro libre), los dos temas, el marco azul de la selección, los
+vídeos, y
 —dos veces, contrastando marca de tiempo y tamaño— que ni editar ni exportar
 modifican el archivo original.
 
@@ -122,6 +125,20 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   - Si son de distinto tamaño, B se encaja dentro de A centrada y sin
     deformarse.
   - *Open large* se lleva la pareja y la opacidad tal cual.
+- **Vídeos** (casilla *Videos*, **apagada por defecto**): al marcarla se buscan
+  también mp4, mov, webm, mkv, avi… y entran en la rejilla con un distintivo
+  ▶ y su duración. La casilla se recuerda al cerrar.
+  - En la vista previa y en el visor grande el vídeo **abre en pausa**, para
+    que no suene nada al pasar por las miniaturas. Debajo, play/pausa, barra
+    para moverse (también en pausa, se ve el fotograma), tiempo y volumen. En
+    el visor grande, `Espacio` reproduce y pausa.
+  - Se clasifican en categorías igual que las imágenes, y *Export…* los copia
+    tal cual. El editor y la comparación A/B son solo para imágenes: con un
+    vídeo avisan en la barra de estado.
+  - Quitar la casilla los esconde también de las categorías, pero no los
+    desclasifica: al volver a marcarla siguen donde estaban.
+  - Desde el código fuente hace falta `pip install PySide6-Addons`; sin él la
+    casilla sale desactivada y lo explica. La versión portable ya lo lleva.
 - Doble clic abre el visor grande: `←`/`→` pasan imágenes, rueda hace zoom,
   arrastrar mueve, `0` reencuadra, `F` o `F11` pantalla completa, `Esc` cierra.
 - Clic derecho: abrir, abrir la carpeta contenedora, copiar ruta, asignar o

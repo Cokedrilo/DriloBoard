@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,8 +22,8 @@ from collections import OrderedDict, deque
 from pathlib import Path
 
 from PySide6.QtCore import (QAbstractListModel, QByteArray, QMimeData, QModelIndex,
-                            QObject, QPointF, QRect, QRectF, QRunnable, QSize, Qt,
-                            QThreadPool, QTimer, Signal, Slot)
+                            QObject, QPointF, QRect, QRectF, QRunnable, QSize, QSizeF,
+                            Qt, QThreadPool, QTimer, QUrl, Signal, Slot)
 from PySide6.QtGui import (QActionGroup, QColor, QFont, QIcon, QImage, QImageReader,
                            QImageWriter, QKeySequence, QPainter, QPainterPath,
                            QPainterPathStroker, QPalette, QPen, QPixmap, QShortcut,
@@ -39,6 +40,17 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QToolButton,
                                QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
+
+# El video es opcional: QtMultimedia viene en PySide6-Addons, no en Essentials.
+# Sin el, DriloBoard sigue siendo un visor de imagenes y la casilla se apaga.
+try:
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
+    from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
+    HAS_VIDEO = True
+    VIDEO_IMPORT_ERROR = ""
+except ImportError as _e:                               # pragma: no cover
+    HAS_VIDEO = False
+    VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
 VERSION = "1.1"
@@ -64,6 +76,12 @@ EDIT_PREVIEW_MAX = 2400              # resolucion a la que trabaja el editor
 UNDO_LIMIT = 40                      # pasos de deshacer que se recuerdan
 ZOOM_MIN, ZOOM_MAX = 5, 800          # porcentaje de zoom en el editor
 PATH_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+DURATION_ROLE = int(Qt.ItemDataRole.UserRole) + 2     # ms de un video, o None
+
+# Solo se buscan si esta marcada la casilla "Videos"
+VIDEO_EXTS = {".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".wmv", ".mpg",
+              ".mpeg", ".ogv", ".3gp", ".flv", ".mts", ".m2ts"}
+VIDEO_THUMB_TIMEOUT_MS = 8000        # un video que no da fotograma en este tiempo, falla
 
 # Colores de categoria, asignados por orden de creacion
 PALETTE = ["#e6542f", "#f0a500", "#3fa34d", "#2d8fd5", "#8e6cd0",
@@ -120,6 +138,17 @@ def supported_exts() -> set[str]:
     exts = {"." + bytes(f).decode().lower() for f in QImageReader.supportedImageFormats()}
     exts.discard(".pdf")
     return exts
+
+
+def is_video(path: str | None) -> bool:
+    return bool(path) and os.path.splitext(path)[1].lower() in VIDEO_EXTS
+
+
+def format_duration(ms: int | None) -> str:
+    """6000 -> 0:06, 3725000 -> 1:02:05."""
+    s = max(0, int(ms or 0) // 1000)
+    h, m = s // 3600, (s // 60) % 60
+    return "%d:%02d:%02d" % (h, m, s % 60) if h else "%d:%02d" % (m, s % 60)
 
 
 def natural_key(s: str):
@@ -814,6 +843,7 @@ class PruneTask(QRunnable):
 
 class ThumbSignals(QObject):
     done = Signal(str, str, QImage)         # ruta, firma de la edicion, imagen
+    needVideo = Signal(str, str)            # un video sin miniatura en la cache
 
 
 class ThumbTask(QRunnable):
@@ -834,6 +864,11 @@ class ThumbTask(QRunnable):
         img = QImage()
         if cache.exists():
             img.load(str(cache))
+        if img.isNull() and is_video(self.path):
+            # un video no se decodifica aqui: el reproductor de Qt necesita el
+            # hilo grafico. Se le pasa al VideoThumbnailer, que la cachea igual
+            self.signals.needVideo.emit(self.path, self.sig)
+            return
         if img.isNull():
             reader = QImageReader(self.path)
             reader.setAutoTransform(True)          # respeta la orientacion EXIF
@@ -861,6 +896,109 @@ class ThumbTask(QRunnable):
         self.signals.done.emit(self.path, self.sig, img)
 
 
+class VideoThumbnailer(QObject):
+    """Saca la miniatura de un video: un fotograma de hacia el 10 % (tope 2 s).
+
+    El primer fotograma suele ser negro, por eso se adelanta un poco. Va de
+    uno en uno, sin sonido, y atiende primero lo ultimo pedido, como la cola
+    de las imagenes. La duracion viaja dentro del PNG de la cache, como texto,
+    para no tener que abrir el video otra vez.
+    """
+    done = Signal(str, str, QImage)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._queue: deque = deque()
+        self._actual = None                 # (ruta, firma) en marcha
+        self._player = None
+        self._sink = None
+        self._objetivo = None
+        self._timeout = QTimer(self)
+        self._timeout.setSingleShot(True)
+        self._timeout.setInterval(VIDEO_THUMB_TIMEOUT_MS)
+        self._timeout.timeout.connect(lambda: self._terminar(QImage()))
+
+    def request(self, path: str, sig: str):
+        pedido = (path, sig)
+        if pedido == self._actual:
+            return
+        try:
+            self._queue.remove(pedido)
+        except ValueError:
+            pass
+        self._queue.appendleft(pedido)
+        self._siguiente()
+
+    def clear(self):
+        self._queue.clear()
+
+    def busy(self) -> bool:
+        return self._actual is not None or bool(self._queue)
+
+    def _siguiente(self):
+        if self._actual is not None or not self._queue:
+            return
+        self._actual = self._queue.popleft()
+        self._objetivo = None
+        self._player = QMediaPlayer(self)
+        self._sink = QVideoSink(self)
+        self._player.setVideoSink(self._sink)
+        self._player.mediaStatusChanged.connect(self._on_status)
+        self._player.errorOccurred.connect(lambda *_: self._terminar(QImage()))
+        self._sink.videoFrameChanged.connect(self._on_frame)
+        self._timeout.start()
+        self._player.setSource(QUrl.fromLocalFile(self._actual[0]))
+
+    def _on_status(self, estado):
+        if self._player is None:
+            return
+        if estado == QMediaPlayer.MediaStatus.LoadedMedia and self._objetivo is None:
+            dur = self._player.duration()
+            self._objetivo = min(2000, dur // 10) if dur > 1000 else 0
+            if self._objetivo:
+                self._player.setPosition(self._objetivo)
+            self._player.play()
+        elif estado == QMediaPlayer.MediaStatus.InvalidMedia:
+            self._terminar(QImage())
+
+    def _on_frame(self, frame):
+        if self._player is None or self._objetivo is None or not frame.isValid():
+            return
+        inicio = frame.startTime()          # microsegundos; -1 si no lo sabe
+        if 0 <= inicio < self._objetivo * 1000 - 60000:
+            return                          # aun es de antes del salto
+        img = frame.toImage()
+        if img.isNull():
+            return
+        if img.width() > THUMB_BOX or img.height() > THUMB_BOX:
+            img = img.scaled(THUMB_BOX, THUMB_BOX, Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+        img = img.convertToFormat(QImage.Format.Format_RGB32)
+        img.setText("drilo_duration", str(self._player.duration()))
+        self._terminar(img)
+
+    def _terminar(self, img: QImage):
+        if self._actual is None:
+            return
+        path, sig = self._actual
+        self._timeout.stop()
+        player, sink = self._player, self._sink
+        self._player = self._sink = None
+        self._actual = None
+        if player is not None:
+            player.stop()
+            player.setSource(QUrl())        # suelta el archivo: en Windows lo bloquea
+            player.deleteLater()
+            sink.deleteLater()
+        if not img.isNull():
+            try:
+                img.save(str(thumb_cache_file(path, sig)), "PNG")
+            except Exception:
+                pass
+        self.done.emit(path, sig, img)
+        QTimer.singleShot(0, self._siguiente)
+
+
 # --------------------------------------------------------------------------- #
 #  Modelo de la rejilla central
 # --------------------------------------------------------------------------- #
@@ -885,6 +1023,12 @@ class ThumbModel(QAbstractListModel):
         self.pool.setMaxThreadCount(max(2, (os.cpu_count() or 4) - 1))
         self.signals = ThumbSignals()
         self.signals.done.connect(self._on_thumb, Qt.ConnectionType.QueuedConnection)
+        self.signals.needVideo.connect(self._on_need_video,
+                                       Qt.ConnectionType.QueuedConnection)
+        self.durations: dict[str, int] = {}     # ruta de video -> ms
+        self.videos = VideoThumbnailer(self) if HAS_VIDEO else None
+        if self.videos is not None:
+            self.videos.done.connect(self._on_video_thumb)
 
     # --- cache en memoria, con tope --------------------------------------
     @staticmethod
@@ -924,6 +1068,8 @@ class ThumbModel(QAbstractListModel):
         self._paths = paths
         self._queue.clear()
         self._pending.clear()
+        if self.videos is not None:
+            self.videos.clear()             # lo que quedaba en cola ya no se mira
         self.endResetModel()
 
     def paths(self) -> list[str]:
@@ -956,6 +1102,8 @@ class ThumbModel(QAbstractListModel):
             return path
         if role == PATH_ROLE:
             return path
+        if role == DURATION_ROLE:
+            return self.durations.get(path)
         if role == Qt.ItemDataRole.DecorationRole:
             pm = self._pix.get(path)
             if pm is not None:
@@ -1034,16 +1182,38 @@ class ThumbModel(QAbstractListModel):
             self._inflight += 1
             self.pool.start(ThumbTask(path, self.signals, self.edit_for(path)))
 
+    @Slot(str, str)
+    def _on_need_video(self, path: str, sig: str):
+        # el hilo queda libre para otras miniaturas; el video sigue pendiente
+        self._inflight = max(0, self._inflight - 1)
+        self._pump()
+        if self.videos is None:
+            self._pending.discard(path)
+            self._failed.add(path)
+        else:
+            self.videos.request(path, sig)
+
+    @Slot(str, str, QImage)
+    def _on_video_thumb(self, path: str, sig: str, img: QImage):
+        self._pending.discard(path)
+        self._accept(path, sig, img)
+
     @Slot(str, str, QImage)
     def _on_thumb(self, path: str, sig: str, img: QImage):
         self._inflight = max(0, self._inflight - 1)
         self._pending.discard(path)
         self._pump()
+        self._accept(path, sig, img)
+
+    def _accept(self, path: str, sig: str, img: QImage):
         if sig != edit_signature(self.edit_for(path)):
             return                          # la edicion cambio mientras cargaba
         if img.isNull():
             self._failed.add(path)
             return
+        duracion = img.text("drilo_duration")
+        if duracion.isdigit():
+            self.durations[path] = int(duracion)
         self._guardar(path, QPixmap.fromImage(
             img.scaled(self.icon, self.icon, Qt.AspectRatioMode.KeepAspectRatio,
                        Qt.TransformationMode.SmoothTransformation)))
@@ -1068,6 +1238,36 @@ class ThumbDelegate(QStyledItemDelegate):
         self.is_edited = is_edited
 
     PAD = 6             # aire para los marcos: el azul por fuera, el verde dentro
+
+    @staticmethod
+    def _video_badge(painter, opt, index):
+        """Triangulo de play y duracion, abajo a la izquierda del fotograma."""
+        pm = index.data(Qt.ItemDataRole.DecorationRole)
+        ancho = pm.width() if isinstance(pm, QPixmap) and not pm.isNull() else 0
+        alto = pm.height() if ancho else opt.decorationSize.height()
+        ancho = ancho or opt.decorationSize.width()
+        # el fotograma va centrado en horizontal y pegado arriba de la celda
+        x0 = opt.rect.left() + (opt.rect.width() - ancho) / 2
+        y1 = opt.rect.top() + 3 + alto
+        texto = format_duration(index.data(DURATION_ROLE)) \
+            if index.data(DURATION_ROLE) is not None else ""
+        f = painter.font()
+        f.setPixelSize(11)
+        f.setBold(True)
+        painter.setFont(f)
+        w = 22 + (painter.fontMetrics().horizontalAdvance(texto) + 6 if texto else 0)
+        caja = QRectF(x0 + 5, y1 - 24, w, 19)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 170))
+        painter.drawRoundedRect(caja, 4, 4)
+        painter.setBrush(QColor("white"))
+        cy = caja.center().y()
+        painter.drawPolygon([QPointF(caja.left() + 7, cy - 5), QPointF(caja.left() + 7, cy + 5),
+                             QPointF(caja.left() + 16, cy)])
+        if texto:
+            painter.setPen(QColor("white"))
+            painter.drawText(QRectF(caja.left() + 21, caja.top(), w - 23, caja.height()),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, texto)
 
     def sizeHint(self, option, index):
         s = super().sizeHint(option, index)
@@ -1117,6 +1317,9 @@ class ThumbDelegate(QStyledItemDelegate):
             painter.setBrush(QColor(c))
             painter.drawEllipse(option.rect.right() - 16, y, 10, 10)
             y += 13
+
+        if is_video(path):
+            self._video_badge(painter, opt, index)
 
         mark = self.mark_of(path)
         if mark:
@@ -1454,10 +1657,53 @@ class PreviewPane(QWidget):
         cmp_lay.addWidget(b_stop)
         self.cmp_bar.hide()
 
+        # barra de video: solo aparece con un video puesto. El reproductor se
+        # crea la primera vez que hace falta, no al abrir el panel
+        self.player = None
+        self.audio = None
+        self.video_item = None
+        self.showing_video = False
+        self.video_bar = QWidget()
+        vid_lay = QHBoxLayout(self.video_bar)
+        vid_lay.setContentsMargins(6, 2, 6, 2)
+        self.b_play = QToolButton()
+        self.b_play.setAutoRaise(True)
+        self.b_play.setToolTip("Play / pause")
+        themed(self.b_play, icon="play")
+        self.b_play.clicked.connect(self.toggle_play)
+        vid_lay.addWidget(self.b_play)
+        self.sld_pos = QSlider(Qt.Orientation.Horizontal)
+        self.sld_pos.setToolTip("Drag to move through the video")
+        self.sld_pos.sliderMoved.connect(self._on_seek)
+        self.sld_pos.valueChanged.connect(self._on_seek_click)
+        vid_lay.addWidget(self.sld_pos, 1)
+        self.lbl_time = QLabel("0:00 / 0:00")
+        themed(self.lbl_time, css="color:%(caption)s;")
+        vid_lay.addWidget(self.lbl_time)
+        self.b_mute = QToolButton()
+        self.b_mute.setAutoRaise(True)
+        self.b_mute.setCheckable(True)
+        self.b_mute.setToolTip("Mute")
+        themed(self.b_mute, icon="volume")
+        self.b_mute.toggled.connect(self._on_mute)
+        vid_lay.addWidget(self.b_mute)
+        self.sld_vol = QSlider(Qt.Orientation.Horizontal)
+        self.sld_vol.setRange(0, 100)
+        self.sld_vol.setValue(80)
+        self.sld_vol.setFixedWidth(80)
+        self.sld_vol.setToolTip("Volume")
+        self.sld_vol.valueChanged.connect(self._on_volume)
+        vid_lay.addWidget(self.sld_vol)
+        # sin foco: las flechas y el espacio siguen siendo de la rejilla y del visor
+        for w in (self.b_play, self.sld_pos, self.b_mute, self.sld_vol):
+            w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.video_bar.hide()
+
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         lay.addWidget(self.view, 1)
+        lay.addWidget(self.video_bar)
         lay.addWidget(self.cmp_bar)
         lay.addLayout(bar)
 
@@ -1476,6 +1722,7 @@ class PreviewPane(QWidget):
         self._tokens[0] += 1                # invalida lo que estuviera cargando
         self._timer.stop()
         if path is None:
+            self.stop_video()
             self.loaded_path = None
             self.item.setPixmap(QPixmap())
             self.caption.setText("")
@@ -1486,14 +1733,148 @@ class PreviewPane(QWidget):
         self._load() if immediate else self._timer.start()
 
     def _load(self):
-        if self.path:
-            self._pool.start(PreviewTask(0, self._tokens[0], self.path,
-                                         self.max_side, self._signals,
-                                         self.edit_for(self.path)))
+        if not self.path:
+            return
+        if is_video(self.path) and HAS_VIDEO:
+            self._load_video(self.path)
+            return
+        self.stop_video()
+        self._pool.start(PreviewTask(0, self._tokens[0], self.path,
+                                     self.max_side, self._signals,
+                                     self.edit_for(self.path)))
+
+    # --- video -------------------------------------------------------------
+    def _ensure_player(self):
+        if self.player is not None:
+            return
+        self.video_item = QGraphicsVideoItem()
+        self.video_item.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
+        self.video_item.hide()
+        self.scene.addItem(self.video_item)
+        self.video_item.nativeSizeChanged.connect(self._on_native_size)
+        self.player = QMediaPlayer(self)
+        self.audio = QAudioOutput(self)
+        self.player.setAudioOutput(self.audio)
+        self.player.setVideoOutput(self.video_item)
+        self.player.durationChanged.connect(self._on_duration)
+        self.player.positionChanged.connect(self._on_position)
+        self.player.playbackStateChanged.connect(self._on_state)
+        self.player.errorOccurred.connect(self._on_video_error)
+        self._on_volume(self.sld_vol.value())
+
+    def _load_video(self, path: str):
+        """Abre en pausa: se ve el primer fotograma y no suena nada al pasar."""
+        self._ensure_player()
+        self.player.stop()
+        self.item.setPixmap(QPixmap())
+        self.item.hide()
+        self.video_item.show()
+        self.showing_video = True
+        self.loaded_path = path
+        self.video_bar.show()
+        self.sld_pos.blockSignals(True)
+        self.sld_pos.setRange(0, 0)
+        self.sld_pos.blockSignals(False)
+        self.lbl_time.setText("0:00 / 0:00")
+        self.player.setSource(QUrl.fromLocalFile(path))
+        self.player.pause()
+        self._caption_video()
+
+    def stop_video(self):
+        """Para y suelta el archivo (en Windows, si no, no se podria mover)."""
+        if self.player is not None:
+            self.player.stop()
+            self.player.setSource(QUrl())
+        if self.showing_video:
+            self.showing_video = False
+            self.video_item.hide()
+            self.item.show()
+            self.video_bar.hide()
+
+    def is_playing(self) -> bool:
+        return (self.player is not None and self.player.playbackState()
+                == QMediaPlayer.PlaybackState.PlayingState)
+
+    def toggle_play(self):
+        if not self.showing_video or self.player is None:
+            return
+        if self.is_playing():
+            self.player.pause()
+            return
+        if self.player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia:
+            self.player.setPosition(0)          # al final, vuelve a empezar
+        self.player.play()
+
+    def _caption_video(self):
+        tam = self.video_item.nativeSize() if self.video_item is not None else QSizeF()
+        partes = [self.prefix + os.path.basename(self.loaded_path or "")]
+        if tam.isValid() and not tam.isEmpty():
+            partes.append("%d x %d" % (tam.width(), tam.height()))
+        if self.player is not None and self.player.duration() > 0:
+            partes.append(format_duration(self.player.duration()))
+        else:
+            partes.append("opening…")
+        self.caption.setText("   ·   ".join(partes))
+
+    def _on_native_size(self, tam):
+        if not self.showing_video or not tam.isValid() or tam.isEmpty():
+            return
+        self.video_item.setSize(tam)
+        self.scene.setSceneRect(QRectF(QPointF(0, 0), tam))
+        self.fit()
+        self._caption_video()
+
+    def _on_duration(self, ms: int):
+        self.sld_pos.blockSignals(True)
+        self.sld_pos.setRange(0, max(0, ms))
+        self.sld_pos.blockSignals(False)
+        self._on_position(self.player.position())
+        if self.showing_video:
+            self._caption_video()
+
+    def _on_position(self, ms: int):
+        if not self.sld_pos.isSliderDown():
+            self.sld_pos.blockSignals(True)
+            self.sld_pos.setValue(ms)
+            self.sld_pos.blockSignals(False)
+        self.lbl_time.setText("%s / %s" % (format_duration(ms),
+                                           format_duration(self.player.duration())))
+
+    def _on_seek(self, ms: int):
+        if self.player is not None:
+            self.player.setPosition(ms)         # tambien en pausa: se ve el fotograma
+
+    def _on_seek_click(self, ms: int):
+        if not self.sld_pos.isSliderDown():     # clic o flechas sobre la barra
+            self._on_seek(ms)
+
+    def _on_state(self, _estado):
+        themed(self.b_play, icon="pause" if self.is_playing() else "play")
+
+    def _on_mute(self, silencio: bool):
+        if self.audio is not None:
+            self.audio.setMuted(silencio)
+        themed(self.b_mute, icon="mute" if silencio else "volume")
+
+    def _on_volume(self, v: int):
+        if self.audio is not None:
+            self.audio.setVolume(v / 100.0)
+
+    def _on_video_error(self, _error, texto: str):
+        if self.showing_video:
+            self.caption.setText("%sCould not play %s: %s"
+                                 % (self.prefix, os.path.basename(self.loaded_path or ""),
+                                    texto))
+
+    def hideEvent(self, e):
+        if self.is_playing():
+            self.player.pause()                 # oculto no deberia seguir sonando
+        super().hideEvent(e)
 
     # --- comparar dos imagenes --------------------------------------------
     def compare(self, path_a: str, path_b: str, opacity: int | None = None):
         self._timer.stop()
+        self.stop_video()
         self.comparing = True
         self.path, self.path_b = path_a, path_b
         self.loaded_path = self.loaded_path_b = None
@@ -1580,7 +1961,11 @@ class PreviewPane(QWidget):
                                 "   (scaled down to be able to show it)" if reduced else ""))
 
     def fit(self):
-        if not self.item.pixmap().isNull():
+        if self.showing_video:
+            if not self.video_item.size().isEmpty():
+                self.view.resetTransform()
+                self.view.fitInView(self.video_item, Qt.AspectRatioMode.KeepAspectRatio)
+        elif not self.item.pixmap().isNull():
             self.view.resetTransform()
             self.view.fitInView(self.item, Qt.AspectRatioMode.KeepAspectRatio)
         self._fitted = True
@@ -1954,6 +2339,27 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
         mordisco.addEllipse(QRectF(m + size * 0.28, m - size * 0.12, M - m, M - m))
         p.setBrush(tinta)
         p.drawPath(luna.subtracted(mordisco))
+    elif kind == "play":
+        p.setBrush(tinta)
+        p.drawPolygon([QPointF(m + 2, m), QPointF(m + 2, M), QPointF(M - 1, size / 2)])
+    elif kind == "pause":
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(tinta)
+        p.drawRoundedRect(QRectF(m + 1.5, m, 4.5, M - m), 1, 1)
+        p.drawRoundedRect(QRectF(M - 6, m, 4.5, M - m), 1, 1)
+    elif kind in ("volume", "mute"):
+        altavoz = [QPointF(m, size / 2 - 3), QPointF(m + 4, size / 2 - 3),
+                   QPointF(m + 9, m + 1), QPointF(m + 9, M - 1),
+                   QPointF(m + 4, size / 2 + 3), QPointF(m, size / 2 + 3)]
+        p.setBrush(tinta)
+        p.drawPolygon(altavoz)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        if kind == "volume":
+            p.drawArc(QRectF(M - 9, size / 2 - 4, 6, 8), -60 * 16, 120 * 16)
+            p.drawArc(QRectF(M - 11, size / 2 - 7, 10, 14), -60 * 16, 120 * 16)
+        else:
+            p.drawLine(QPointF(M - 6, size / 2 - 3), QPointF(M, size / 2 + 3))
+            p.drawLine(QPointF(M, size / 2 - 3), QPointF(M - 6, size / 2 + 3))
     elif kind == "angle":
         p.drawLine(m, M, M, M)
         p.drawLine(m, M, M - 2, m + 1)
@@ -2938,6 +3344,18 @@ stick and your classification travels with it.</p>
 <p>The <b>Light / Dark</b> button at the top right, <b>View ▸ theme</b> or
 <b>Ctrl+T</b> switch the whole window, editor included. DriloBoard remembers
 your choice; the first time it follows the system.</p>
+
+<h3>Videos</h3>
+<ul>
+<li>Tick <b>Videos</b> above the thumbnails to also list video files (mp4,
+mov, webm, mkv, avi…). It is off by default, and remembered.</li>
+<li>Video thumbnails show a ▶ badge with the duration.</li>
+<li>In the preview and the large window a video opens <b>paused</b>, so
+browsing stays silent. Use the play button and the bar under it; in the large
+window <b>Space</b> plays and pauses.</li>
+<li>Videos go into categories like images, and <i>Export…</i> copies them as
+they are. The editor and the A/B comparison are for images only.</li>
+</ul>
 """
 
 
@@ -2980,7 +3398,10 @@ class ImageViewer(QDialog):
 
         QShortcut(QKeySequence(Qt.Key.Key_Right), self, lambda: self.step(1))
         QShortcut(QKeySequence(Qt.Key.Key_Left), self, lambda: self.step(-1))
-        QShortcut(QKeySequence(Qt.Key.Key_Space), self, lambda: self.step(1))
+        # con un video, espacio es reproducir / pausar; con una imagen, pasar
+        QShortcut(QKeySequence(Qt.Key.Key_Space), self,
+                  lambda: self.pane.toggle_play() if self.pane.showing_video
+                  else self.step(1))
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, self.close)
         QShortcut(QKeySequence("F"), self, self._toggle_full)
         QShortcut(QKeySequence("F11"), self, self._toggle_full)
@@ -2993,6 +3414,10 @@ class ImageViewer(QDialog):
     def _toggle_full(self):
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
         QTimer.singleShot(60, self.pane.fit)
+
+    def done(self, r):
+        self.pane.stop_video()                  # que no siga sonando al cerrar
+        super().done(r)
 
     def step(self, d: int):
         if self.paths and not self.pane.comparing:
@@ -3014,7 +3439,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("%s %s" % (APP_NAME, VERSION))
         self.resize(1500, 900)
-        self.exts = supported_exts()
+        self.image_exts = supported_exts()
+        self.show_videos = False                     # la casilla "Videos", apagada
+        self.exts = set(self.image_exts)
 
         self.folders: list[str] = []
         self.categories: list[dict] = []     # {name, color, images:[...]}
@@ -3136,6 +3563,17 @@ class MainWindow(QMainWindow):
         self.chk_unassigned = QCheckBox("Uncategorised only")
         self.chk_unassigned.toggled.connect(self.refresh_images)
         bar.addWidget(self.chk_unassigned)
+
+        self.chk_videos = QCheckBox("Videos")
+        if HAS_VIDEO:
+            self.chk_videos.setToolTip("Also look for video files (mp4, mov, webm, mkv, "
+                                       "avi…) and play them in the preview")
+        else:
+            self.chk_videos.setEnabled(False)
+            self.chk_videos.setToolTip("Video needs Qt's multimedia module:\n"
+                                       "pip install PySide6-Addons")
+        self.chk_videos.toggled.connect(self.on_videos)
+        bar.addWidget(self.chk_videos)
 
         self.chk_names = QCheckBox("Names")
         self.chk_names.setChecked(True)
@@ -3716,10 +4154,33 @@ class MainWindow(QMainWindow):
                     if p not in seen:
                         seen.add(p)
                         paths.append(p)
+        if not self.show_videos:
+            # un video clasificado cuando la casilla estaba puesta no asoma
+            # por una categoria al quitarla
+            paths = [p for p in paths if not is_video(p)]
         if self.chk_unassigned.isChecked():
             paths = [p for p in paths if p not in self._index]
         self.model.set_paths(paths)
-        self.lbl_count.setText("%d images" % len(paths))
+        videos = sum(1 for p in paths if is_video(p))
+        texto = "%d images" % (len(paths) - videos)
+        if videos:
+            texto += "  ·  %d video%s" % (videos, "" if videos == 1 else "s")
+        self.lbl_count.setText(texto)
+
+    def on_videos(self, on: bool):
+        self.set_show_videos(on)
+        self.refresh_folders()
+        self.refresh_images()
+        self.touch()
+
+    def set_show_videos(self, on: bool):
+        """Cambia lo que se busca en disco; los recuentos se rehacen."""
+        self.show_videos = bool(on) and HAS_VIDEO
+        self.exts = set(self.image_exts) | (VIDEO_EXTS if self.show_videos else set())
+        self._tree_cache.clear()
+        self._files_cache.clear()
+        if not self.show_videos and is_video(self.preview.path):
+            self.preview.show_path(None)
 
     def on_icon_size(self, px: int):
         self.apply_icon_size(px)
@@ -4100,6 +4561,10 @@ class MainWindow(QMainWindow):
         if not path:
             self.statusBar().showMessage("Pick an image first.", 4000)
             return
+        if is_video(path):
+            self.statusBar().showMessage(
+                "Videos can be played, sorted and exported, but not edited.", 5000)
+            return
         d = EditorDialog(path, self.edits.get(path), self)
         if d.exec() == QDialog.DialogCode.Accepted:
             self.set_edit(path, d.edit)
@@ -4108,8 +4573,10 @@ class MainWindow(QMainWindow):
 
     def quick_edit(self, cambio: str):
         """Rotar o voltear de golpe todo lo seleccionado, sin abrir el editor."""
-        sel = self.selected_images()
+        sel = [p for p in self.selected_images() if not is_video(p)]
         if not sel:
+            if self.selected_images():
+                self.statusBar().showMessage("Videos cannot be edited.", 4000)
             return
         nombres = {"izquierda": "rotate left", "derecha": "rotate right",
                    "flip_h": "flip horizontally", "flip_v": "flip vertically",
@@ -4147,7 +4614,15 @@ class MainWindow(QMainWindow):
         hechas, fallos = 0, []
         for p in sel:
             destino = unique_path(os.path.join(carpeta, os.path.basename(p)))
-            ok, err = export_edited(p, self.edits.get(p), destino)
+            if is_video(p):
+                # un video no tiene ediciones: se copia tal cual
+                try:
+                    shutil.copy2(p, destino)
+                    ok, err = True, destino
+                except OSError as e:
+                    ok, err = False, str(e)
+            else:
+                ok, err = export_edited(p, self.edits.get(p), destino)
             hechas += 1 if ok else 0
             if not ok:
                 fallos.append("%s: %s" % (os.path.basename(p), err))
@@ -4177,6 +4652,9 @@ class MainWindow(QMainWindow):
         path = path or self.current_image_path()
         if not path:
             self.statusBar().showMessage("Pick an image first.", 4000)
+            return
+        if is_video(path):
+            self.statusBar().showMessage("A/B comparison works with images only.", 5000)
             return
         otro = "B" if slot == "A" else "A"
         movida = False
@@ -4218,6 +4696,9 @@ class MainWindow(QMainWindow):
                     "Mark one image as A and another as B, or select two.", 6000)
                 return
             a, b = sel
+        if is_video(a) or is_video(b):
+            self.statusBar().showMessage("A/B comparison works with images only.", 5000)
+            return
         if not self.chk_preview.isChecked():
             self.chk_preview.setChecked(True)      # hace falta donde ensenarlas
         self.preview.compare(a, b, self.preview.sld_opacity.value())
@@ -4251,26 +4732,31 @@ class MainWindow(QMainWindow):
         m.addAction("Copy path",
                     lambda: QApplication.clipboard().setText("\n".join(sel)))
         path = idx.data(PATH_ROLE)
+        # marcar, comparar y editar son cosa de imagenes
+        solo_videos = all(is_video(p) for p in sel)
         m.addSeparator()
-        m.addAction("Mark as image A", lambda: self.mark_image("A", path))
-        m.addAction("Mark as image B", lambda: self.mark_image("B", path))
+        if not is_video(path):
+            m.addAction("Mark as image A", lambda: self.mark_image("A", path))
+            m.addAction("Mark as image B", lambda: self.mark_image("B", path))
         if self.mark_a or self.mark_b:
             m.addAction("Clear the A/B marks", self.clear_marks)
         if self.mark_a and self.mark_b:
             m.addAction("Compare A and B (opacity)", self.compare_selected)
-        elif len(sel) == 2:
+        elif len(sel) == 2 and not any(is_video(p) for p in sel):
             m.addAction("Compare the 2 selected (opacity)", self.compare_selected)
         m.addSeparator()
-        ed = m.addMenu("Edit")
-        ed.addAction("Open the editor\u2026", self.edit_current)
-        ed.addSeparator()
-        ed.addAction("Rotate 90 left", lambda: self.quick_edit("izquierda"))
-        ed.addAction("Rotate 90 right", lambda: self.quick_edit("derecha"))
-        ed.addAction("Flip horizontally", lambda: self.quick_edit("flip_h"))
-        ed.addAction("Flip vertically", lambda: self.quick_edit("flip_v"))
-        if any(self.is_edited(p) for p in sel):
-            ed.addSeparator()
-            ed.addAction("Remove the edits", lambda: self.quick_edit("reset"))
+        if not solo_videos:
+            ed = m.addMenu("Edit")
+            if not is_video(path):
+                ed.addAction("Open the editor\u2026", self.edit_current)
+                ed.addSeparator()
+            ed.addAction("Rotate 90 left", lambda: self.quick_edit("izquierda"))
+            ed.addAction("Rotate 90 right", lambda: self.quick_edit("derecha"))
+            ed.addAction("Flip horizontally", lambda: self.quick_edit("flip_h"))
+            ed.addAction("Flip vertically", lambda: self.quick_edit("flip_v"))
+            if any(self.is_edited(p) for p in sel):
+                ed.addSeparator()
+                ed.addAction("Remove the edits", lambda: self.quick_edit("reset"))
         m.addAction("Export copy/copies\u2026", self.export_selected)
         m.addSeparator()
         if self.categories:
@@ -4305,6 +4791,7 @@ class MainWindow(QMainWindow):
             "center_splitter": self.center_split.sizes(),
             "geometry": [self.x(), self.y(), self.width(), self.height()],
             "theme": _theme,
+            "videos": self.show_videos,
         }
         try:
             tmp = STATE_FILE.with_suffix(".tmp")
@@ -4332,6 +4819,10 @@ class MainWindow(QMainWindow):
         self._set_mode(self.cmb_cat_order, data.get("category_order", "manual"))
         self.recursive = bool(data.get("recursive", False))
         self.chk_recursive.setChecked(self.recursive)
+        self.chk_videos.blockSignals(True)          # el refresco viene despues
+        self.chk_videos.setChecked(bool(data.get("videos", False)) and HAS_VIDEO)
+        self.chk_videos.blockSignals(False)
+        self.set_show_videos(self.chk_videos.isChecked())
         self.chk_names.setChecked(bool(data.get("show_names", True)))
         self.slider.setValue(int(data.get("icon", 160)))
         if isinstance(data.get("splitter"), list):
@@ -4347,6 +4838,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         self._save_timer.stop()
         self.save_state()
+        self.preview.stop_video()
+        if self.model.videos is not None:
+            self.model.videos.clear()
         # sin esto, una miniatura a medio cargar emite sobre un objeto ya muerto
         for pool in (self.model.pool, self.preview._pool, self._prune_pool):
             pool.clear()
@@ -4388,6 +4882,17 @@ def selftest() -> int:
                                            90).size() == QSize(20, 40))):
             if not cond:
                 fallos.append("no funciona: %s" % pieza)
+        # el paquete tiene que llevar el video: el modulo y el FFmpeg de Qt, que
+        # sin su plugin no sabe abrir nada. Desde el codigo fuente es opcional
+        if getattr(sys, "frozen", False):
+            if not HAS_VIDEO:
+                fallos.append("falta QtMultimedia (%s)" % VIDEO_IMPORT_ERROR)
+            else:
+                from PySide6.QtMultimedia import QMediaFormat
+                formatos = QMediaFormat().supportedFileFormats(
+                    QMediaFormat.ConversionMode.Decode)
+                if QMediaFormat.FileFormat.MPEG4 not in formatos:
+                    fallos.append("el video no decodifica mp4 (falta el plugin FFmpeg)")
         # el cambio de tema, que depende del estilo de Qt que lleve el paquete
         antes = _theme
         for nombre in ("light", "dark"):

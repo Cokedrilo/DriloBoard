@@ -91,6 +91,13 @@ flips every selected image at once.
 
 ![The editor, with annotations on an image](docs/editor.png)
 
+**Videos too, if you want them**
+Tick *Videos* above the thumbnails (off by default) and video files — mp4, mov,
+webm, mkv, avi… — join the grid with a ▶ badge and their duration. They play
+in the preview and the large window, opening paused so browsing stays silent,
+and they go into categories and export like images. The editor and the A/B
+comparison stay image-only.
+
 **Dark or light**
 The **Light / Dark** button in the top-right corner, *View ▸ theme* or
 `Ctrl+T` switch the whole application, editor included. The choice is
@@ -133,6 +140,7 @@ Needs Python 3.10+.
 ```bash
 python -m venv .venv
 .venv/bin/python -m pip install PySide6-Essentials    # .venv\Scripts\ on Windows
+.venv/bin/python -m pip install PySide6-Addons        # optional: video playback
 .venv/bin/python driloboard.py
 ```
 
@@ -156,6 +164,7 @@ you try it there, reports are welcome.
 | `Ctrl+Z` / `Ctrl+Y` | undo / redo |
 | `F5` | re-read the folders from disk |
 | `Ctrl+T` | switch between dark and light theme |
+| `Space` | play / pause a video in the large window |
 | `F1` | help |
 
 There is a **? Help** button in the top-right corner with a full guide that
@@ -189,7 +198,7 @@ Constants at the top of `driloboard.py`:
 ## Development
 
 ```bash
-.venv/bin/python tests/correr_tests.py     # nine suites, ~15 s, no windows opened
+.venv/bin/python tests/correr_tests.py     # ten suites, ~17 s, no windows opened
 ```
 
 The suites run headless (`QT_QPA_PLATFORM=offscreen`) and use their own state
@@ -205,6 +214,9 @@ file, so they cannot touch your library. They cover, among other things:
   JPG), and drawings and crops landing in the right place across 9 angle
   combinations.
 - Both themes, and that a selected thumbnail really gets its blue frame.
+- Video: the checkbox starts off, thumbnails and durations, play, pause and
+  seek, the file being released when you move on, and that editing and A/B
+  refuse videos while export copies them byte for byte.
 - That every shortcut the in-app help advertises actually exists.
 
 Rebuilding the Windows package:

@@ -24,6 +24,24 @@ the LGPL asks for.
 If you build from source instead, nothing is redistributed: PySide6 is
 installed from PyPI by pip, straight from its own publisher.
 
+## FFmpeg (video playback)
+
+- **Project:** [FFmpeg](https://ffmpeg.org/), as built and shipped by The Qt
+  Company inside PySide6-Addons for the Qt Multimedia FFmpeg backend.
+- **Copyright:** the FFmpeg developers.
+- **Licence:** LGPL v2.1 or later. Qt's build of FFmpeg is configured without
+  the GPL-only components.
+- Full text: <https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html>.
+
+The prebuilt package includes `avcodec`, `avformat`, `avutil`, `swresample` and
+`swscale` as separate DLLs in `_internal/PySide6/`, so they can be replaced in
+the same way as the Qt libraries. Video support is optional when running from
+source: it only works if PySide6-Addons is installed.
+
+Decoding some formats (for example H.264 or HEVC) may be subject to patents in
+some countries. DriloBoard only plays files already on your disk and does not
+encode video.
+
 ## PyInstaller
 
 - **Project:** [PyInstaller](https://pyinstaller.org/) — used only to build the

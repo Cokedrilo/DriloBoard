@@ -3743,6 +3743,10 @@ class ImageViewer(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.pane)
+        # las ediciones tambien: sin esto la ventana grande ensenaba el archivo
+        # tal cual, sin recortes, giros ni dibujos, al contrario que la vista previa
+        if hasattr(parent, "edit_of"):
+            self.pane.edit_for = parent.edit_of
         # los fotogramas clave son de la biblioteca: se leen y se guardan en la
         # ventana principal, y Ctrl+Z los deshace tambien desde aqui
         if hasattr(parent, "marks_of"):

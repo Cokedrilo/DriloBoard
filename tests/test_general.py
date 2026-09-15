@@ -729,6 +729,25 @@ pv = w.preview.item.pixmap()
 print("previa editada:", pv.width(), "x", pv.height())
 assert pv.height() > pv.width(), "la previa deberia estar girada"
 
+# ...y la ventana grande igual: antes ensenaba el archivo sin editar
+big = visor.ImageViewer(w.model.paths(), 0, w)
+big.show()
+wait_preview(big.pane, objetivo)
+pg = big.pane.item.pixmap()
+print("ventana grande editada:", pg.width(), "x", pg.height())
+assert (pg.width(), pg.height()) == (pv.width(), pv.height()), \
+    "la ventana grande no aplica las ediciones: %s vs %s" % (pg.size(), pv.size())
+assert pg.toImage() == pv.toImage(), "la ventana grande no ensena lo mismo que la previa"
+big.close()
+# y al comparar dentro de la ventana grande, la editada tambien va editada
+otra = w.model.paths()[1]
+big = visor.ImageViewer(w.model.paths(), 0, w, compare_pair=(objetivo, otra), opacity=50)
+wait_compare(big.pane, objetivo, otra)
+pa = big.pane.item.pixmap()
+assert pa.height() > pa.width(), "al comparar en grande, A deberia salir girada"
+big.close()
+print("ventana grande: misma imagen editada que la previa, tambien al comparar")
+
 # quitar las ediciones
 w.quick_edit("reset")
 assert objetivo not in w.edits and not w.is_edited(objetivo)

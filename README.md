@@ -89,7 +89,7 @@ pixels*: the eraser removes the whole stroke you click on, and if you rotate
 the image afterwards, the drawing rotates with it. Right-click rotates or
 flips every selected image at once.
 
-![The editor, with annotations on an image](docs/editor.png)
+![The editor, with a plate straightened by a few degrees and annotated](docs/editor.png)
 
 **Videos too, if you want them**
 Tick *Videos* above the thumbnails (off by default) and video files — mp4, mov,
@@ -101,6 +101,8 @@ Step **frame by frame** and set **keyframes** on the frames that matter: they
 show as amber diamonds on the time bar, jump from one to the next, are saved
 with the library and undo with `Ctrl+Z`. Every button shows its shortcut when
 you hover over it.
+
+![A video on a keyframe, with keyframes marked on the time bar, in the light theme](docs/video.png)
 
 **Dark or light**
 The **Light / Dark** button in the top-right corner, *View ▸ theme* or

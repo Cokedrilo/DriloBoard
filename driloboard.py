@@ -12,6 +12,7 @@ import copy
 import hashlib
 import json
 import math
+import ntpath
 import os
 import re
 import shutil
@@ -21,14 +22,15 @@ import tempfile
 from collections import OrderedDict, deque
 from pathlib import Path
 
-from PySide6.QtCore import (QAbstractListModel, QByteArray, QMimeData, QModelIndex,
+from PySide6.QtCore import (QAbstractListModel, QByteArray, QEvent, QMimeData, QModelIndex,
                             QObject, QPointF, QRect, QRectF, QRunnable, QSize, QSizeF,
                             Qt, QThreadPool, QTimer, QUrl, Signal, Slot)
 from PySide6.QtGui import (QActionGroup, QColor, QFont, QIcon, QImage, QImageReader,
                            QImageWriter, QKeySequence, QPainter, QPainterPath,
                            QPainterPathStroker, QPalette, QPen, QPixmap, QShortcut,
                            QTransform)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QBoxLayout, QCheckBox,
+                               QComboBox,
                                QDialog, QDoubleSpinBox, QStyleOptionViewItem,
                                QFileDialog, QFrame, QGraphicsItem, QGraphicsPixmapItem,
                                QGraphicsScene,
@@ -59,14 +61,62 @@ VERSION = "1.3.1"
 
 def app_dir() -> Path:
     """La carpeta del programa. Empaquetado, la del ejecutable: es portable,
-    todo (biblioteca y cache) vive junto al .exe y se puede llevar en un USB."""
+    todo (biblioteca y cache) vive junto al .exe y se puede llevar en un USB.
+
+    En macOS el ejecutable va dentro de DriloBoard.app/Contents/MacOS, y
+    escribir dentro del paquete rompe su firma: los datos van en la carpeta
+    que contiene DriloBoard.app, igual que en Windows van junto al .exe.
+    """
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        exe = Path(sys.executable).resolve()
+        if sys.platform == "darwin" and exe.parent.name == "MacOS" \
+                and exe.parents[2].suffix == ".app":
+            return exe.parents[3]
+        return exe.parent
     return Path(__file__).resolve().parent
 
 
+def user_data_dir() -> Path:
+    """La carpeta de datos del sistema, para cuando la del programa no sirve."""
+    if sys.platform.startswith("win"):
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library/Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+    return base / APP_NAME
+
+
+def writable(carpeta: Path) -> bool:
+    try:
+        carpeta.mkdir(parents=True, exist_ok=True)
+        prueba = carpeta / ".escritura"
+        prueba.write_text("ok", encoding="utf-8")
+        prueba.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def data_dir() -> Path:
+    """Donde se guardan biblioteca.json y la cache: junto al programa si se puede.
+
+    No se puede, por ejemplo, en una carpeta de solo lectura o cuando macOS
+    ejecuta una app recien descargada desde una copia aislada y de solo lectura
+    (App Translocation). Entonces se usa la carpeta de datos del usuario, que
+    siempre funciona, en vez de perder la clasificacion al cerrar.
+    """
+    carpeta = app_dir()
+    if "/AppTranslocation/" not in str(carpeta) and writable(carpeta):
+        return carpeta
+    carpeta = user_data_dir()
+    carpeta.mkdir(parents=True, exist_ok=True)
+    return carpeta
+
+
 APP_DIR = app_dir()
-STATE_FILE = APP_DIR / "biblioteca.json"
+DATA_DIR = data_dir()
+STATE_FILE = DATA_DIR / "biblioteca.json"
 MIME_IMAGES = "application/x-driloboard-images"
 THUMB_BOX = 512                      # tamano al que se cachea la miniatura en disco
 THUMB_RAM_MB = 256                   # tope de miniaturas guardadas en memoria
@@ -96,6 +146,30 @@ VIDEO_KEYS = {
     "key_del": ("Ctrl+-", "Delete keyframe"),
 }
 
+MAC = sys.platform == "darwin"
+
+
+def keys_text(texto: str) -> str:
+    """Los atajos de un texto escritos como los ve cada sistema.
+
+    Qt ya hace que "Ctrl" sea la tecla Comando en macOS; esto solo cambia lo que
+    se lee en la ayuda y en los bocadillos: Ctrl+Z pasa a ser ⌘Z. Rehacer en
+    Mac es ⇧⌘Z, no Ctrl+Y.
+    """
+    if not MAC:
+        return texto
+    texto = texto.replace("Ctrl+Y", "⇧⌘Z")
+    return re.sub(r"\bCtrl\b\+?", "⌘", texto)
+
+
+def extra_redo_shortcut(parent, fn):
+    """Ctrl+Shift+Z tambien rehace, salvo donde ya es el atajo del sistema
+    (macOS, Linux): dos atajos iguales se anulan y no haria nada ninguno."""
+    extra = QKeySequence("Ctrl+Shift+Z")
+    if extra not in QKeySequence.keyBindings(QKeySequence.StandardKey.Redo):
+        QShortcut(extra, parent, fn)
+
+
 # Colores de categoria, asignados por orden de creacion
 PALETTE = ["#e6542f", "#f0a500", "#3fa34d", "#2d8fd5", "#8e6cd0",
            "#d94f8a", "#00a3a3", "#a0761f", "#5b6b7c", "#c33b3b"]
@@ -124,15 +198,9 @@ def cache_dir() -> Path:
     Si esa carpeta no se puede escribir (por ejemplo instalado en Archivos de
     programa), se recurre a la del sistema en vez de fallar.
     """
-    portatil = APP_DIR / "cache" / "thumbs"
-    try:
-        portatil.mkdir(parents=True, exist_ok=True)
-        prueba = portatil / ".escritura"
-        prueba.write_text("ok", encoding="utf-8")
-        prueba.unlink()
+    portatil = DATA_DIR / "cache" / "thumbs"
+    if writable(portatil):
         return portatil
-    except OSError:
-        pass
     if sys.platform.startswith("win"):
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
     elif sys.platform == "darwin":
@@ -695,7 +763,7 @@ def common_root(paths: list[str]) -> str:
 
 
 def to_portable(path: str, raiz: str) -> str:
-    if not raiz:
+    if not raiz or (is_abs_anywhere(path) and not os.path.isabs(path)):
         return path
     try:
         rel = os.path.relpath(path, raiz)
@@ -704,8 +772,14 @@ def to_portable(path: str, raiz: str) -> str:
     return path if rel.startswith("..") else rel.replace(os.sep, "/")
 
 
+def is_abs_anywhere(ruta: str) -> bool:
+    """Absoluta en este sistema o en otro: una biblioteca exportada en Windows
+    puede traer C:\\... y abrirse en un Mac, y al reves."""
+    return os.path.isabs(ruta) or ntpath.isabs(ruta) or ruta.startswith("/")
+
+
 def from_portable(guardada: str, raiz: str) -> str:
-    if os.path.isabs(guardada) or not raiz:
+    if is_abs_anywhere(guardada) or not raiz:
         return os.path.normpath(guardada)
     return os.path.normpath(os.path.join(raiz, guardada.replace("/", os.sep)))
 
@@ -3017,7 +3091,7 @@ class EditorDialog(QDialog):
         zoom.addWidget(QLabel("Zoom:"))
         b_menos = QPushButton()
         themed(b_menos, icon="zoom_out")
-        b_menos.setToolTip("Zoom out (Ctrl+-)")
+        b_menos.setToolTip(keys_text("Zoom out (Ctrl+-)"))
         b_menos.setFixedWidth(34)
         b_menos.clicked.connect(lambda: self.zoom_by(1 / 1.2))
         zoom.addWidget(b_menos)
@@ -3029,7 +3103,7 @@ class EditorDialog(QDialog):
         zoom.addWidget(self.sld_zoom)
         b_mas = QPushButton()
         themed(b_mas, icon="zoom_in")
-        b_mas.setToolTip("Zoom in (Ctrl++)")
+        b_mas.setToolTip(keys_text("Zoom in (Ctrl++)"))
         b_mas.setFixedWidth(34)
         b_mas.clicked.connect(lambda: self.zoom_by(1.2))
         zoom.addWidget(b_mas)
@@ -3049,11 +3123,11 @@ class EditorDialog(QDialog):
         final = QHBoxLayout()
         self.b_undo = QPushButton("  Undo")
         themed(self.b_undo, std="SP_ArrowBack")
-        self.b_undo.setToolTip("Ctrl+Z")
+        self.b_undo.setToolTip(keys_text("Ctrl+Z"))
         self.b_undo.clicked.connect(self.undo)
         self.b_redo = QPushButton("  Redo")
         themed(self.b_redo, std="SP_ArrowForward")
-        self.b_redo.setToolTip("Ctrl+Y")
+        self.b_redo.setToolTip(keys_text("Ctrl+Y"))
         self.b_redo.clicked.connect(self.redo)
         final.addWidget(self.b_undo)
         final.addWidget(self.b_redo)
@@ -3089,7 +3163,7 @@ class EditorDialog(QDialog):
         QShortcut(QKeySequence("0"), self, self.fit)
         QShortcut(QKeySequence.StandardKey.Undo, self, self.undo)
         QShortcut(QKeySequence.StandardKey.Redo, self, self.redo)
-        QShortcut(QKeySequence("Ctrl+Shift+Z"), self, self.redo)
+        extra_redo_shortcut(self, self.redo)
         QShortcut(QKeySequence.StandardKey.ZoomIn, self, lambda: self.zoom_by(1.2))
         QShortcut(QKeySequence.StandardKey.ZoomOut, self, lambda: self.zoom_by(1 / 1.2))
         self.view.zoomed.connect(self.zoom_by)
@@ -3707,6 +3781,20 @@ button to see its shortcut.</li>
 """
 
 
+def help_html() -> str:
+    """La guia con los atajos y las carpetas de este sistema."""
+    html = keys_text(HELP_HTML)
+    if MAC:
+        html = (html.replace("the file manager", "the Finder")
+                .replace("Everything is inside the program's own folder",
+                         "Everything is in the folder that holds DriloBoard.app")
+                .replace("cache\\", "cache/")
+                .replace("button at the top right", "button at the bottom right"))
+    elif not sys.platform.startswith("win"):
+        html = html.replace("cache\\", "cache/")
+    return html
+
+
 class HelpDialog(QDialog):
     """La guia, en una ventana que se queda abierta mientras trabajas."""
 
@@ -3716,7 +3804,7 @@ class HelpDialog(QDialog):
         self.resize(760, 720)
         texto = QTextBrowser(self)
         texto.setOpenExternalLinks(False)
-        texto.setHtml(HELP_HTML)
+        texto.setHtml(help_html())
         cerrar = QPushButton("Close")
         cerrar.clicked.connect(self.close)
         fila = QHBoxLayout()
@@ -3796,6 +3884,70 @@ class ImageViewer(QDialog):
 
 
 # --------------------------------------------------------------------------- #
+#  Fila de botones que se parte en dos si no cabe
+# --------------------------------------------------------------------------- #
+class WrapRow(QWidget):
+    """Dos grupos de botones: en una fila si caben, y si no, uno encima de otro.
+
+    Asi los botones no obligan a una ventana mas ancha que la pantalla: en
+    macOS los botones son bastante mas anchos que en Windows, y en una fila no
+    caben en un portatil. Con partible=False (Windows, Linux) es siempre una
+    fila, como ha sido siempre. En la lista, un numero es un hueco en pixeles.
+    """
+
+    def __init__(self, izquierda: list, derecha: list, partible: bool = MAC):
+        super().__init__()
+        self.partible = partible
+        self.grupos = []
+        for piezas, a_la_derecha in ((izquierda, False), (derecha, True)):
+            g = QWidget()
+            fila = QHBoxLayout(g)
+            fila.setContentsMargins(0, 0, 0, 0)
+            if a_la_derecha:
+                fila.addStretch(1)
+            for pieza in piezas:
+                if isinstance(pieza, int):
+                    fila.addSpacing(pieza)
+                else:
+                    fila.addWidget(pieza)
+            if not a_la_derecha:
+                fila.addStretch(1)
+            self.grupos.append(g)
+        self.caja = QBoxLayout(QBoxLayout.Direction.LeftToRight, self)
+        self.caja.setContentsMargins(0, 0, 0, 0)
+        for g in self.grupos:
+            self.caja.addWidget(g)
+        self._ajustar()
+
+    def partida(self) -> bool:
+        return self.caja.direction() == QBoxLayout.Direction.TopToBottom
+
+    def _ajustar(self):
+        if not self.partible:
+            return
+        anchos = [g.minimumSizeHint().width() for g in self.grupos]
+        # el minimo es el del grupo mas ancho, no la suma: por debajo de la
+        # suma se parte en dos
+        if self.minimumWidth() != max(anchos):
+            self.setMinimumWidth(max(anchos))
+        cabe = self.width() >= sum(anchos) + self.caja.spacing()
+        destino = (QBoxLayout.Direction.LeftToRight if cabe
+                   else QBoxLayout.Direction.TopToBottom)
+        if self.caja.direction() != destino:
+            self.caja.setDirection(destino)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._ajustar()
+
+    def event(self, e):
+        # un boton que cambia de ancho (el texto de las marcas A y B) avisa asi
+        if e.type() == QEvent.Type.LayoutRequest:
+            self._ajustar()
+        return super().event(e)
+
+
+# --------------------------------------------------------------------------- #
 #  Ventana principal
 # --------------------------------------------------------------------------- #
 class MainWindow(QMainWindow):
@@ -3842,6 +3994,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self.load_state()
+        self.fit_to_screen()
         self.refresh_folders(expand_roots=True)
         self.refresh_categories()
         self.refresh_images()
@@ -4001,9 +4154,8 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("E"), self, self.edit_current)
         QShortcut(QKeySequence.StandardKey.Undo, self, self.undo)
         QShortcut(QKeySequence.StandardKey.Redo, self, self.redo)
-        QShortcut(QKeySequence("Ctrl+Shift+Z"), self, self.redo)
+        extra_redo_shortcut(self, self.redo)
 
-        row = QHBoxLayout()
         b_all = QPushButton("  All")
         themed(b_all, icon="select_all")
         b_all.clicked.connect(self.view.selectAll)
@@ -4036,19 +4188,11 @@ class MainWindow(QMainWindow):
         self.b_assign = QPushButton("  Assign to selected category")
         themed(self.b_assign, icon="assign")
         self.b_assign.clicked.connect(self.assign_selected)
-        row.addWidget(b_all)
-        row.addWidget(b_none)
-        row.addSpacing(12)
-        row.addWidget(self.b_mark_a)
-        row.addWidget(self.b_mark_b)
-        row.addWidget(self.b_compare)
-        row.addWidget(self.lbl_marks)
-        row.addStretch(1)
-        row.addWidget(self.b_edit)
-        row.addWidget(self.b_export)
-        row.addSpacing(12)
-        row.addWidget(self.b_assign)
-        lay.addLayout(row)
+        self.button_row = WrapRow(
+            [b_all, b_none, 12, self.b_mark_a, self.b_mark_b, self.b_compare,
+             self.lbl_marks],
+            [self.b_edit, self.b_export, 12, self.b_assign])
+        lay.addWidget(self.button_row)
         self.update_marks()
         return w
 
@@ -4098,10 +4242,10 @@ class MainWindow(QMainWindow):
         self.cat_tree.itemDoubleClicked.connect(lambda *_: self.chk_only_cat.setChecked(True))
         lay.addWidget(self.cat_tree, 1)
 
-        hint = QLabel("Drag thumbnails onto a category.\n"
-                      "Drag a category ONTO another to nest it inside,\n"
-                      "or between two to reorder.\n"
-                      "Ctrl+1 ... Ctrl+9 assign to the first nine.")
+        hint = QLabel(keys_text("Drag thumbnails onto a category.\n"
+                                "Drag a category ONTO another to nest it inside,\n"
+                                "or between two to reorder.\n"
+                                "Ctrl+1 ... Ctrl+9 assign to the first nine."))
         themed(hint, css="color:%(dim)s; font-size:11px;")
         hint.setWordWrap(True)
         lay.addWidget(hint)
@@ -4416,7 +4560,7 @@ class MainWindow(QMainWindow):
                     pistas.append("%d here, %d including subcategories"
                                   % (propias, todas))
                 if c["name"] in atajos:
-                    pistas.append("Ctrl+%d" % atajos[c["name"]])
+                    pistas.append(keys_text("Ctrl+%d" % atajos[c["name"]]))
                 if pistas:
                     it.setToolTip(0, "\n".join(pistas))
                 if parent is None:
@@ -4637,7 +4781,12 @@ class MainWindow(QMainWindow):
         fila.setSpacing(2)
         fila.addWidget(self.b_theme)
         fila.addWidget(self.b_help)
-        barra.setCornerWidget(self.corner, Qt.Corner.TopRightCorner)
+        if MAC and barra.isNativeMenuBar():
+            # en macOS el menu va en la barra de arriba de la pantalla, que no
+            # tiene esquina para botones: van abajo a la derecha, a la vista
+            self.statusBar().addPermanentWidget(self.corner)
+        else:
+            barra.setCornerWidget(self.corner, Qt.Corner.TopRightCorner)
         self._sync_theme_ui()
 
     # ---------------- tema claro u oscuro --------------------------------- #
@@ -4663,8 +4812,8 @@ class MainWindow(QMainWindow):
         # el boton ensena a donde se va, no donde se esta
         themed(self.b_theme, icon="sun" if oscuro else "moon")
         self.b_theme.setText("  Light  " if oscuro else "  Dark  ")
-        self.b_theme.setToolTip("Switch to the %s theme (Ctrl+T)"
-                                % ("light" if oscuro else "dark"))
+        self.b_theme.setToolTip(keys_text("Switch to the %s theme (Ctrl+T)"
+                                          % ("light" if oscuro else "dark")))
 
     def show_help(self):
         if getattr(self, "_help", None) is None:
@@ -4686,7 +4835,7 @@ class MainWindow(QMainWindow):
 
     def export_library(self):
         sugerido = os.path.join(
-            self.export_dir or str(APP_DIR),
+            self.export_dir or str(DATA_DIR),
             "driloboard-library" + LIB_EXT)
         destino, _ = QFileDialog.getSaveFileName(
             self, "Export library", sugerido,
@@ -4721,7 +4870,7 @@ class MainWindow(QMainWindow):
 
     def import_library(self):
         origen, _ = QFileDialog.getOpenFileName(
-            self, "Import library", self.export_dir or str(APP_DIR),
+            self, "Import library", self.export_dir or str(DATA_DIR),
             "DriloBoard library (*%s);;JSON (*.json);;All files (*)" % LIB_EXT)
         if not origen:
             return
@@ -4780,7 +4929,7 @@ class MainWindow(QMainWindow):
             aviso += ("\n\n%d classified image(s) are not where the file says. "
                       "They stay in their categories in case you plug the drive "
                       "back in." % r["perdidas"])
-        aviso += "\n\nCtrl+Z undoes the import."
+        aviso += keys_text("\n\nCtrl+Z undoes the import.")
         QMessageBox.information(self, APP_NAME, aviso)
 
     def apply_import(self, datos: dict, raiz: str, reemplazar: bool) -> dict:
@@ -5120,7 +5269,7 @@ class MainWindow(QMainWindow):
         sel = self.selected_images() or [idx.data(PATH_ROLE)]
         m = QMenu(self)
         m.addAction("Open", lambda: self.open_viewer(idx))
-        m.addAction("Show in file manager",
+        m.addAction("Show in Finder" if MAC else "Show in file manager",
                     lambda: reveal_in_file_manager(idx.data(PATH_ROLE)))
         m.addAction("Copy path",
                     lambda: QApplication.clipboard().setText("\n".join(sel)))
@@ -5230,6 +5379,21 @@ class MainWindow(QMainWindow):
         if isinstance(g, list) and len(g) == 4:
             self.setGeometry(*g)
 
+    def fit_to_screen(self):
+        """Que la ventana quepa en la pantalla. La biblioteca viaja en un USB de
+        un monitor grande a un portatil, y la medida guardada puede no caber."""
+        pantalla = self.screen() or QApplication.primaryScreen()
+        if pantalla is None:
+            return
+        zona = pantalla.availableGeometry()
+        g = self.geometry()
+        ancho = min(g.width(), zona.width())
+        alto = min(g.height(), zona.height() - 40)   # la barra de titulo, encima
+        x = min(max(g.x(), zona.left()), zona.right() + 1 - ancho)
+        y = min(max(g.y(), zona.top() + 30), zona.bottom() + 1 - alto)
+        if (x, y, ancho, alto) != (g.x(), g.y(), g.width(), g.height()):
+            self.setGeometry(x, y, ancho, alto)
+
     def closeEvent(self, e):
         self._save_timer.stop()
         self.save_state()
@@ -5259,7 +5423,7 @@ def selftest() -> int:
         win = MainWindow()
         win.show()
         QApplication.processEvents()
-        if win.menuBar().cornerWidget(Qt.Corner.TopRightCorner) is None:
+        if not win.b_help.isVisible():
             fallos.append("falta el boton de ayuda")
         win.show_help()
         QApplication.processEvents()

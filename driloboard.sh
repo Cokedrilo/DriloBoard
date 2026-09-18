@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Linux launcher. First run creates the environment and installs PySide6.
+# Linux and macOS launcher. First run creates the environment and installs PySide6.
 cd "$(dirname "$0")" || exit 1
 if [ ! -d .venv ]; then
     python3 -m venv .venv

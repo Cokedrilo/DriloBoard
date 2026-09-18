@@ -1,6 +1,7 @@
 # DriloBoard - Image viewer and reviewer
 
 [![Download](https://img.shields.io/badge/Download-Windows%20portable%20·%2044%20MB-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.3.1-portable-win64.zip)
+[![Download](https://img.shields.io/badge/Download-macOS%20portable%20·%2062%20MB-2ea44f?style=for-the-badge&logo=apple)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.3.1-portable-macos.zip)
 [![Release](https://img.shields.io/github/v/release/Cokedrilo/DriloBoard)](https://github.com/Cokedrilo/DriloBoard/releases/latest)
 [![Licence](https://img.shields.io/github/license/Cokedrilo/DriloBoard)](LICENSE)
 
@@ -20,6 +21,10 @@ sheets, before/after comparisons.
 Nothing is installed, nothing is written to the registry, and it runs happily
 from a USB stick. Windows will warn about an unknown publisher the first time
 (the executable is not signed): *More info* → *Run anyway*.
+
+**[Download DriloBoard for Mac](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.3.1-portable-macos.zip)**
+→ unzip → open `DriloBoard.app` inside the `DriloBoard` folder. One app for
+Intel and Apple Silicon, macOS 13 or later. [First launch on a Mac](#macos).
 
 On Linux, or to run from the source: [see below](#from-source).
 
@@ -137,6 +142,34 @@ To check a copy arrived intact: `DriloBoard.exe --selftest` starts the app
 headlessly, opens the help, verifies the icons and image codecs, and exits
 with status 0 if everything is in place.
 
+<a name="macos"></a>
+
+### Prebuilt Mac package
+
+[**Download the ZIP**](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.3.1-portable-macos.zip)
+(62 MB). It unzips to a `DriloBoard` folder holding `DriloBoard.app` and a
+short read-me. Keep the app in that folder: the library and the thumbnail
+cache are created **next to the app** (never inside it), so the folder is
+portable exactly like the Windows one.
+
+The app is not notarised by Apple, so the first time macOS refuses to open it.
+Double-click it, dismiss the warning, then go to *System Settings* → *Privacy
+& Security* and click *Open Anyway*. Or run this once in Terminal:
+
+```bash
+xattr -dr com.apple.quarantine /path/to/DriloBoard
+```
+
+If macOS runs the app from a temporary read-only copy (it does that with
+freshly downloaded apps still carrying the quarantine flag), DriloBoard keeps
+the library in `~/Library/Application Support/DriloBoard` instead, so nothing
+is lost; the command above avoids it. *Help* → *About DriloBoard* shows which
+file is in use.
+
+On a Mac, every `Ctrl` shortcut below is `⌘` (`⌘1` … `⌘9`, `⌘Z`, `⌘T`…),
+redo is `⇧⌘Z`, and the **Light / Dark** and **? Help** buttons sit at the
+bottom right, since the menu lives in the screen's menu bar.
+
 <a name="from-source"></a>
 
 ### From source
@@ -151,9 +184,9 @@ python -m venv .venv
 ```
 
 Or use the launchers: `DriloBoard.bat` on Windows, `./driloboard.sh` on Linux
-(which creates the environment for you on first run).
+and macOS (which creates the environment for you on first run).
 
-The same single file runs on Windows and Linux. **Linux has not been tested in
+The same single file runs on Windows, macOS and Linux. **Linux has not been tested in
 anger** — the code is platform-agnostic and uses no Windows-only calls, but if
 you try it there, reports are welcome.
 
@@ -207,7 +240,7 @@ Constants at the top of `driloboard.py`:
 ## Development
 
 ```bash
-.venv/bin/python tests/correr_tests.py     # eleven suites, ~15 s, no windows opened
+.venv/bin/python tests/correr_tests.py     # twelve suites, ~40 s, no windows opened
 ```
 
 The suites run headless (`QT_QPA_PLATFORM=offscreen`) and use their own state
@@ -240,6 +273,18 @@ Rebuilding the Windows package:
 Delete `dist/DriloBoard/cache/` before zipping — any test run creates it. The
 application icon is generated from code, so there are no image assets to keep
 in sync.
+
+Building the Mac package, all in one go:
+
+```bash
+./build_macos.sh
+```
+
+It creates the environment if needed, draws the `.icns` icon with
+`make_icns.py`, builds `dist/DriloBoard.app`, signs it (ad hoc, or with your
+certificate via `CODESIGN_IDENTITY`), runs `--selftest` on it and leaves
+`dist/DriloBoard-<version>-portable-macos.zip`. With a universal2 Python
+(Apple's or python.org's) the app runs natively on Intel and Apple Silicon.
 
 ## Licence
 

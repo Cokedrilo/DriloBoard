@@ -44,8 +44,11 @@ print("   una ruta queda como:", rel)
 assert not os.path.isabs(rel) and "/" in rel
 assert visor.from_portable(rel, raiz) == os.path.normpath(todas[0])
 # lo que cae fuera de la raiz se queda absoluto, no se inventa nada
-fuera = visor.to_portable(r"Z:\otra\cosa.png", raiz)
-assert os.path.isabs(fuera), fuera
+for ajena in (r"Z:\otra\cosa.png", "/otra/cosa.png"):
+    fuera = visor.to_portable(ajena, raiz)
+    assert fuera == ajena and visor.is_abs_anywhere(fuera), fuera
+    # y al importar en otro sistema no se pega a la raiz nueva
+    assert visor.from_portable(ajena, raiz) == os.path.normpath(ajena)
 # sin raiz comun (unidades distintas) no revienta
 assert visor.common_root([r"C:\a\x.png", r"D:\b\y.png"]) == ""
 print("   fuera de la raiz se guarda absoluta; unidades distintas no rompen")

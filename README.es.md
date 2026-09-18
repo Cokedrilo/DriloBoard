@@ -27,10 +27,35 @@ carpeta**, así que copiándola te llevas también toda la clasificación.
 La primera vez Windows puede avisar de que el origen es desconocido (el
 ejecutable no está firmado): *Más información* → *Ejecutar de todas formas*.
 
+**Versión portable para Mac.** Descomprime
+`DriloBoard-1.3.1-portable-macos.zip`: sale una carpeta `DriloBoard` con
+`DriloBoard.app` dentro. Una sola app para Mac Intel y Apple Silicon, macOS 13
+Ventura o posterior. Igual que en Windows, la biblioteca y la caché se crean
+**en esa carpeta, junto a la app** (nunca dentro del `.app`), así que se puede
+llevar en un USB.
+
+La app no está notarizada por Apple, así que la primera vez macOS no la abre:
+doble clic, cierra el aviso, y en *Ajustes del Sistema* → *Privacidad y
+seguridad* pulsa *Abrir igualmente*. O, una sola vez, en Terminal:
+
+```
+xattr -dr com.apple.quarantine /ruta/a/la/carpeta/DriloBoard
+```
+
+Si macOS la ejecuta desde una copia temporal de solo lectura (lo hace con las
+apps recién descargadas que aún llevan la marca de cuarentena), DriloBoard
+guarda la biblioteca en `~/Library/Application Support/DriloBoard` para no
+perderla; el comando de arriba lo evita. *Help* → *About DriloBoard* dice qué
+archivo está usando.
+
+En Mac los atajos con `Ctrl` son con `⌘` (`⌘1` … `⌘9`, `⌘Z`, `⌘T`…), rehacer es
+`⇧⌘Z`, y los botones **Light / Dark** y **? Help** están abajo a la derecha,
+porque el menú va en la barra de arriba de la pantalla.
+
 **Desde el código fuente.**
 
 - Windows: doble clic en `DriloBoard.bat`.
-- Linux: `./driloboard.sh` (la primera vez crea el entorno solo).
+- Linux y macOS: `./driloboard.sh` (la primera vez crea el entorno solo).
 
 ## Volver a empaquetar
 
@@ -45,13 +70,26 @@ Deja `dist/DriloBoard/` lista para comprimir. Antes de comprimir, borra
 pinta nada en el paquete. El icono se regenera desde el
 propio código, no hay archivos de diseño sueltos.
 
+En Mac, todo de una vez:
+
+```
+./build_macos.sh
+```
+
+Crea el entorno si hace falta, genera el icono `.icns` con `make_icns.py`,
+empaqueta `dist/DriloBoard.app`, lo firma (ad hoc, o con tu certificado si
+pones `CODESIGN_IDENTITY`), pasa el `--selftest` y deja
+`dist/DriloBoard-<versión>-portable-macos.zip` con la carpeta portable y unas
+instrucciones. Si el Python es universal2 (el de Apple o el de python.org) la
+app sirve para Intel y Apple Silicon a la vez.
+
 ## Pasar las pruebas
 
 ```
 .venv\Scripts\python.exe tests\correr_tests.py
 ```
 
-Once suites que corren sin abrir ninguna ventana y usan su propio archivo de
+Doce suites que corren sin abrir ninguna ventana y usan su propio archivo de
 estado, así que no pueden tocar tu `biblioteca.json`. Cubren, entre otras cosas, el mapeo de
 coordenadas de recortes y dibujos en 14 combinaciones de transformaciones (y 9
 más con giro libre), los dos temas, el marco azul de la selección, los

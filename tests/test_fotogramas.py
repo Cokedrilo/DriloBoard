@@ -15,7 +15,7 @@ TMP.mkdir(parents=True, exist_ok=True)
 MUESTRA = APP / "tests" / "datos" / "muestra.webm"      # 3 s a 15 fps: 45 fotogramas
 
 from PySide6.QtWidgets import QApplication, QToolButton
-from PySide6.QtGui import QShortcut
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 
@@ -71,7 +71,9 @@ for nombre, tecla in esperados.items():
     b = getattr(p, nombre)
     assert isinstance(b, QToolButton) and b.isVisible(), nombre
     tip = b.toolTip()
-    assert "<b>%s</b>" % tecla in tip, "el bocadillo de %s no ensena %s: %r" % (nombre, tecla, tip)
+    # como la escribe el sistema: en macOS Ctrl+, se ve como ⌘,
+    nativa = QKeySequence(tecla).toString(QKeySequence.SequenceFormat.NativeText)
+    assert "<b>%s</b>" % nativa in tip, "el bocadillo de %s no ensena %s: %r" % (nombre, nativa, tip)
     print("   %-13s bocadillo: %s" % (nombre, tip.replace("&nbsp;", " ")))
 # y los atajos existen de verdad, con esas mismas teclas
 reales = {s.key().toString() for s in p.findChildren(QShortcut) if s.isEnabled()}

@@ -148,12 +148,16 @@ app.processEvents()
 captura = w.view.viewport().grab().toImage()
 r = w.view.visualRect(indice)
 azul = QColor(visor.theme_color("select"))
+def _cerca(c: QColor) -> bool:
+    return (abs(c.red() - azul.red()) < 40 and abs(c.green() - azul.green()) < 40
+            and abs(c.blue() - azul.blue()) < 40)
+
+
 en_marco = sum(1 for x in range(r.left() + 8, r.right() - 8)
-               if QColor(captura.pixel(x, r.top() + 2)).blue() > 200
-               and QColor(captura.pixel(x, r.top() + 2)).red() < 120)
+               if _cerca(QColor(captura.pixel(x, r.top() + 2))))
 assert en_marco > (r.width() - 16) * 0.8, \
     "en la rejilla no aparece el marco: %d de %d" % (en_marco, r.width() - 16)
-print("   en la rejilla, la seleccionada sale enmarcada en azul")
+print("   en la rejilla, la seleccionada sale enmarcada con el color de seleccion")
 
 w.close()
 print("\nTEMA OK")

@@ -51,7 +51,7 @@ a = Analysis(
     ["driloboard.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[("DriloBoard.png", ".")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

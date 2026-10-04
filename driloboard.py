@@ -292,12 +292,21 @@ PALETTE = ["#e6542f", "#f0a500", "#3fa34d", "#2d8fd5", "#8e6cd0",
 # esto es lo que pone DriloBoard por su cuenta: la rejilla, los lienzos, los
 # textos secundarios, la tinta de los iconos dibujados y el marco de seleccion.
 THEMES = {
-    "dark": {"grid": "#202020", "grid_text": "#dddddd", "canvas": "#1b1b1b",
-             "caption": "#bbbbbb", "dim": "#999999", "ink": "#c8c8c8",
-             "select": "#3d9bff"},
-    "light": {"grid": "#ffffff", "grid_text": "#1f1f1f", "canvas": "#d6d6d6",
-              "caption": "#444444", "dim": "#6e6e6e", "ink": "#3a3a3a",
-              "select": "#0067c0"},
+    "dark": {"grid": "#18191b", "grid_text": "#dddddd", "canvas": "#141516",
+             "caption": "#b4b6bb", "dim": "#8b8e95", "ink": "#c8cad0",
+             "select": "#f2a93b",
+             # interfaz: fondo, paneles, botones, bordes, texto y acento
+             "bg": "#202124", "panel": "#18191b", "raised": "#2b2c30",
+             "hover": "#35373c", "border": "#383a40", "text": "#e8e9ec",
+             "accent": "#f2a93b", "accent_hover": "#f7b95a",
+             "on_accent": "#1b1b1d", "accent_soft": "#4a3a1c"},
+    "light": {"grid": "#ffffff", "grid_text": "#1f1f1f", "canvas": "#dfe0e3",
+              "caption": "#4a4c52", "dim": "#6b6e76", "ink": "#3a3c42",
+              "select": "#d98a0b",
+              "bg": "#f1f2f4", "panel": "#ffffff", "raised": "#ffffff",
+              "hover": "#eceef1", "border": "#d3d5da", "text": "#1d1e21",
+              "accent": "#e59a1f", "accent_hover": "#d98a0b",
+              "on_accent": "#1b1b1d", "accent_soft": "#fbe7c3"},
 }
 _theme = "dark"
 
@@ -1657,7 +1666,47 @@ class ThumbDelegate(QStyledItemDelegate):
 # --------------------------------------------------------------------------- #
 #  Paneles laterales
 # --------------------------------------------------------------------------- #
-class FolderTree(QTreeWidget):
+class EmptyHint:
+    """Mezcla para listas: con la lista vacia pinta un titulo y una explicacion
+    centrados en vez de dejar una caja en blanco. `placeholder` = (titulo, texto)."""
+    placeholder: tuple | None = None
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if not self.placeholder or self.topLevelItemCount():
+            return
+        titulo, texto = self.placeholder
+        p = QPainter(self.viewport())
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        r = QRectF(self.viewport().rect()).adjusted(18, 0, -18, 0)
+        f = p.font()
+        f.setBold(True)
+        f.setPointSizeF(f.pointSizeF() + 1)
+        p.setFont(f)
+        p.setPen(QColor(theme_color("caption")))
+        caja_t = p.boundingRect(r, Qt.AlignmentFlag.AlignHCenter | Qt.TextFlag.TextWordWrap, titulo)
+        f.setBold(False)
+        f.setPointSizeF(f.pointSizeF() - 1.5)
+        p.setFont(f)
+        caja_x = p.boundingRect(QRectF(r.left(), 0, r.width(), 400),
+                                Qt.AlignmentFlag.AlignHCenter | Qt.TextFlag.TextWordWrap, texto)
+        y = max(10.0, (r.height() - caja_t.height() - 8 - caja_x.height()) / 2 - 20)
+        f.setBold(True)
+        f.setPointSizeF(f.pointSizeF() + 1.5)
+        p.setFont(f)
+        p.setPen(QColor(theme_color("caption")))
+        p.drawText(QRectF(r.left(), y, r.width(), caja_t.height() + 2),
+                   Qt.AlignmentFlag.AlignHCenter | Qt.TextFlag.TextWordWrap, titulo)
+        f.setBold(False)
+        f.setPointSizeF(f.pointSizeF() - 1.5)
+        p.setFont(f)
+        p.setPen(QColor(theme_color("dim")))
+        p.drawText(QRectF(r.left(), y + caja_t.height() + 8, r.width(), caja_x.height() + 4),
+                   Qt.AlignmentFlag.AlignHCenter | Qt.TextFlag.TextWordWrap, texto)
+        p.end()
+
+
+class FolderTree(EmptyHint, QTreeWidget):
     """Columna izquierda: carpetas soltadas desde el explorador.
 
     Con 'incluir subcarpetas' marcado, cada carpeta se despliega mostrando
@@ -1746,7 +1795,7 @@ class FolderTree(QTreeWidget):
                 for i in range(r.childCount())]
 
 
-class CategoryTree(QTreeWidget):
+class CategoryTree(EmptyHint, QTreeWidget):
     """Columna derecha: acepta imagenes soltadas desde el centro.
 
     Ademas, las propias categorias se arrastran entre si: soltar una ENCIMA de
@@ -2615,8 +2664,30 @@ DRAW_COLORS = [("Red", "#e81123"), ("Orange", "#f7630c"), ("Yellow", "#fcd116"),
                ("White", "#ffffff"), ("Black", "#000000")]
 
 
+_ICON_IMAGE: QImage | None = None
+
+
+def icon_file() -> Path:
+    """DriloBoard.png: junto al codigo, o dentro del paquete si va empaquetado."""
+    return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "DriloBoard.png"
+
+
 def app_pixmap(size: int = 256) -> QPixmap:
-    """El icono de DriloBoard: tres columnas y una marca de color encima."""
+    """El icono de DriloBoard: la imagen DriloBoard.png a ese tamano.
+
+    Si el archivo falta, se dibuja el icono de respaldo en codigo."""
+    global _ICON_IMAGE
+    if _ICON_IMAGE is None:
+        _ICON_IMAGE = QImage(str(icon_file()))
+    if _ICON_IMAGE.isNull():
+        return _fallback_pixmap(size)
+    return QPixmap.fromImage(_ICON_IMAGE.scaled(
+        size, size, Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation))
+
+
+def _fallback_pixmap(size: int) -> QPixmap:
+    """Tres columnas y una marca de color encima."""
     pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
@@ -2649,8 +2720,22 @@ def app_icon() -> QIcon:
     return ico
 
 
+# Los iconos del sistema (a color, distintos en cada SO) se sustituyen por los
+# dibujados en codigo: un solo estilo de linea en toda la aplicacion
+STD_TO_OWN = {
+    "SP_DirOpenIcon": "folder", "SP_DialogDiscardButton": "trash",
+    "SP_TrashIcon": "trash", "SP_BrowserReload": "refresh",
+    "SP_DialogSaveButton": "save", "SP_TitleBarMaxButton": "expand",
+    "SP_DialogCloseButton": "close", "SP_ArrowBack": "undo",
+    "SP_ArrowForward": "redo", "SP_DialogResetButton": "reset",
+    "SP_DialogOkButton": "ok", "SP_DialogCancelButton": "close",
+}
+
+
 def std_icon(nombre: str) -> QIcon:
-    """Icono del tema del sistema, por nombre de QStyle.StandardPixmap."""
+    """El icono de una accion estandar, en el estilo propio de la aplicacion."""
+    if nombre in STD_TO_OWN:
+        return tool_icon(STD_TO_OWN[nombre])
     estilo = QApplication.style()
     return estilo.standardIcon(getattr(QStyle.StandardPixmap, nombre))
 
@@ -2663,30 +2748,154 @@ def system_theme() -> str:
 
 
 def fusion_palette(nombre: str) -> QPalette:
-    """Paleta completa para cuando el estilo del sistema no sabe cambiar de tema."""
+    """Paleta completa de DriloBoard: la misma en macOS, Windows y Linux."""
+    t = THEMES[nombre]
     oscuro = nombre == "dark"
-    fondo, base, boton, texto, apagado = (
-        ("#202020", "#1b1b1b", "#2d2d2d", "#e6e6e6", "#7a7a7a") if oscuro else
-        ("#f3f3f3", "#ffffff", "#fbfbfb", "#1a1a1a", "#9a9a9a"))
+    apagado = t["dim"]
     pal = QPalette()
     R, G = QPalette.ColorRole, QPalette.ColorGroup
-    for rol, color in ((R.Window, fondo), (R.WindowText, texto), (R.Base, base),
-                       (R.AlternateBase, boton), (R.Button, boton),
-                       (R.ButtonText, texto), (R.Text, texto),
-                       (R.ToolTipBase, boton), (R.ToolTipText, texto),
-                       (R.PlaceholderText, apagado),
-                       (R.Highlight, THEMES[nombre]["select"]),
-                       (R.HighlightedText, "#ffffff"),
-                       (R.Link, THEMES[nombre]["select"]),
-                       (R.Light, "#3a3a3a" if oscuro else "#ffffff"),
-                       (R.Midlight, "#333333" if oscuro else "#e3e3e3"),
-                       (R.Mid, "#2a2a2a" if oscuro else "#c8c8c8"),
-                       (R.Dark, "#151515" if oscuro else "#a0a0a0"),
+    for rol, color in ((R.Window, t["bg"]), (R.WindowText, t["text"]),
+                       (R.Base, t["panel"]), (R.AlternateBase, t["raised"]),
+                       (R.Button, t["raised"]), (R.ButtonText, t["text"]),
+                       (R.Text, t["text"]), (R.ToolTipBase, t["raised"]),
+                       (R.ToolTipText, t["text"]), (R.PlaceholderText, apagado),
+                       (R.Highlight, t["accent"]), (R.HighlightedText, t["on_accent"]),
+                       (R.Link, t["accent"]),
+                       (R.Light, "#3a3c42" if oscuro else "#ffffff"),
+                       (R.Midlight, "#313338" if oscuro else "#eceef1"),
+                       (R.Mid, t["border"]),
+                       (R.Dark, "#101113" if oscuro else "#a8abb2"),
                        (R.Shadow, "#000000" if oscuro else "#707070")):
         pal.setColor(rol, QColor(color))
     for rol in (R.WindowText, R.ButtonText, R.Text):
         pal.setColor(G.Disabled, rol, QColor(apagado))
     return pal
+
+
+def ui_assets(nombre: str) -> Path:
+    """Marca de verificacion y flecha del desplegable, en el color del tema.
+
+    El QSS solo sabe de imagenes en disco, asi que se dibujan una vez por tema
+    en una carpeta temporal."""
+    t = THEMES[nombre]
+    carpeta = Path(tempfile.gettempdir()) / "driloboard-ui" / nombre
+    carpeta.mkdir(parents=True, exist_ok=True)
+    for archivo, color, forma in (("check.png", t["on_accent"], "check"),
+                                  ("chevron.png", t["dim"], "chevron")):
+        pm = QPixmap(32, 32)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        lapiz = QPen(QColor(color), 4.2)
+        lapiz.setCapStyle(Qt.PenCapStyle.RoundCap)
+        lapiz.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(lapiz)
+        if forma == "check":
+            p.drawPolyline([QPointF(8, 17), QPointF(14, 23), QPointF(24, 10)])
+        else:
+            p.drawPolyline([QPointF(9, 13), QPointF(16, 20), QPointF(23, 13)])
+        p.end()
+        pm.save(str(carpeta / archivo))
+    return carpeta
+
+
+def build_qss(nombre: str) -> str:
+    """La hoja de estilo de toda la aplicacion, a partir de los colores del tema."""
+    t = dict(THEMES[nombre])
+    t["assets"] = ui_assets(nombre).as_posix()
+    return """
+QToolTip { background:%(raised)s; color:%(text)s; border:1px solid %(border)s;
+           padding:4px 6px; border-radius:4px; }
+QStatusBar { color:%(dim)s; }
+QStatusBar::item { border:none; }
+QMenu { background:%(panel)s; border:1px solid %(border)s; border-radius:8px;
+        padding:5px; }
+QMenu::item { padding:6px 22px 6px 14px; border-radius:5px; color:%(text)s; }
+QMenu::item:selected { background:%(accent_soft)s; color:%(text)s; }
+QMenu::item:disabled { color:%(dim)s; }
+QMenu::separator { height:1px; background:%(border)s; margin:5px 8px; }
+QMenuBar { background:transparent; }
+QMenuBar::item { padding:4px 9px; border-radius:5px; background:transparent; }
+QMenuBar::item:selected { background:%(hover)s; }
+
+QPushButton { background:%(raised)s; color:%(text)s; border:1px solid %(border)s;
+              border-radius:6px; padding:5px 12px; min-height:18px; }
+QPushButton:hover { background:%(hover)s; }
+QPushButton:pressed { background:%(border)s; }
+QPushButton:disabled { color:%(dim)s; background:transparent; }
+QPushButton:default { border:1px solid %(accent)s; }
+QPushButton[primary="true"] { background:%(accent)s; color:%(on_accent)s;
+              border:1px solid %(accent)s; font-weight:600; }
+QPushButton[primary="true"]:hover { background:%(accent_hover)s; }
+QPushButton[primary="true"]:disabled { background:transparent; color:%(dim)s;
+              border:1px solid %(border)s; }
+QPushButton[flat="true"] { background:transparent; border:1px solid transparent; }
+QPushButton[flat="true"]:hover { background:%(hover)s; }
+
+QToolButton { background:transparent; border:1px solid transparent;
+              border-radius:6px; padding:3px; color:%(text)s; }
+QToolButton:hover { background:%(hover)s; }
+QToolButton:checked { background:%(accent_soft)s; border:1px solid %(accent)s; }
+QToolButton:disabled { color:%(dim)s; }
+
+QCheckBox { spacing:8px; color:%(text)s; }
+QCheckBox:disabled { color:%(dim)s; }
+QCheckBox::indicator { width:16px; height:16px; border-radius:4px;
+              border:1.5px solid %(dim)s; background:transparent; }
+QCheckBox::indicator:hover { border-color:%(accent)s; }
+QCheckBox::indicator:checked { background:%(accent)s; border-color:%(accent)s;
+              image:url(%(assets)s/check.png); }
+QCheckBox::indicator:disabled { border-color:%(border)s; }
+
+QSlider::groove:horizontal { height:4px; background:%(border)s; border-radius:2px; }
+QSlider::sub-page:horizontal { background:%(accent)s; border-radius:2px; }
+QSlider::handle:horizontal { background:%(raised)s; border:2px solid %(accent)s;
+              width:12px; height:12px; margin:-7px 0; border-radius:8px; }
+QSlider::handle:horizontal:hover { background:%(accent)s; }
+
+QScrollBar:vertical { background:transparent; width:12px; margin:2px; }
+QScrollBar:horizontal { background:transparent; height:12px; margin:2px; }
+QScrollBar::handle:vertical { background:%(border)s; border-radius:4px; min-height:30px; }
+QScrollBar::handle:horizontal { background:%(border)s; border-radius:4px; min-width:30px; }
+QScrollBar::handle:hover { background:%(dim)s; }
+QScrollBar::add-line, QScrollBar::sub-line { width:0; height:0; background:none; }
+QScrollBar::add-page, QScrollBar::sub-page { background:none; }
+
+QComboBox { background:%(raised)s; color:%(text)s; border:1px solid %(border)s;
+            border-radius:6px; padding:4px 10px; min-height:18px; }
+QComboBox:hover { background:%(hover)s; }
+QComboBox::drop-down { border:none; width:22px; }
+QComboBox::down-arrow { image:url(%(assets)s/chevron.png); width:12px; height:12px; }
+QComboBox QAbstractItemView { background:%(panel)s; color:%(text)s;
+            border:1px solid %(border)s; border-radius:6px; padding:3px;
+            selection-background-color:%(accent_soft)s; selection-color:%(text)s;
+            outline:0; }
+
+QLineEdit { background:%(panel)s; color:%(text)s; border:1px solid %(border)s;
+            border-radius:6px; padding:4px 8px;
+            selection-background-color:%(accent)s; selection-color:%(on_accent)s; }
+QLineEdit:focus { border:1px solid %(accent)s; }
+
+QTreeView, QTableView { background:%(panel)s; color:%(text)s;
+            border:1px solid %(border)s; border-radius:8px; outline:0; }
+QTreeView::item { padding:3px 2px; border-radius:4px; }
+QTreeView::item:hover { background:%(hover)s; }
+QTreeView::item:selected { background:%(accent_soft)s; color:%(text)s; }
+QListView { border:1px solid %(border)s; border-radius:8px; outline:0; }
+QHeaderView::section { background:%(bg)s; color:%(dim)s; border:none;
+            border-bottom:1px solid %(border)s; padding:6px 8px; }
+QTableView { gridline-color:%(border)s; }
+
+QSplitter::handle { background:transparent; }
+QSplitter::handle:horizontal { width:7px; }
+QSplitter::handle:vertical { height:7px; }
+QSplitter::handle:hover { background:%(border)s; }
+
+QLabel[role="section"] { color:%(dim)s; font-size:11px; font-weight:700;
+            letter-spacing:1px; padding:4px 2px 2px 2px; }
+QTextBrowser { background:%(panel)s; border:1px solid %(border)s;
+            border-radius:8px; padding:6px; }
+""" % t
 
 
 _fusion_fallback = False
@@ -2703,14 +2912,13 @@ def apply_theme(nombre: str):
     _theme = nombre if nombre in THEMES else "dark"
     app = QApplication.instance()
     oscuro = _theme == "dark"
-    if not _fusion_fallback:
-        app.styleHints().setColorScheme(Qt.ColorScheme.Dark if oscuro
-                                        else Qt.ColorScheme.Light)
-        if (app.palette().window().color().lightness() < 128) != oscuro:
-            _fusion_fallback = True
-            app.setStyle("Fusion")
-    if _fusion_fallback:
-        app.setPalette(fusion_palette(_theme))
+    if app.style().objectName().lower() != "fusion":
+        app.setStyle("Fusion")             # mismo aspecto en todos los sistemas
+    _fusion_fallback = True
+    app.styleHints().setColorScheme(Qt.ColorScheme.Dark if oscuro
+                                    else Qt.ColorScheme.Light)
+    app.setPalette(fusion_palette(_theme))
+    app.setStyleSheet(build_qss(_theme))
     for w in app.allWidgets():
         retheme_widget(w)
 
@@ -2811,6 +3019,48 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
         p.drawRect(QRectF(m, m + 1.5, M - m, M - m - 3))
     elif kind == "ellipse":
         p.drawEllipse(QRectF(m, m + 1.5, M - m, M - m - 3))
+    elif kind == "folder":
+        p.drawPolyline([QPointF(m, M - 1), QPointF(m, m + 2), QPointF(m + 5, m + 2),
+                        QPointF(m + 7, m + 4.5), QPointF(M, m + 4.5), QPointF(M, M - 1),
+                        QPointF(m, M - 1)])
+    elif kind == "trash":
+        p.drawLine(m, m + 3, M, m + 3)
+        p.drawLine(size / 2 - 2, m + 3, size / 2 - 2, m + 0.5)
+        p.drawLine(size / 2 - 2, m + 0.5, size / 2 + 2, m + 0.5)
+        p.drawLine(size / 2 + 2, m + 0.5, size / 2 + 2, m + 3)
+        p.drawPolyline([QPointF(m + 2, m + 3), QPointF(m + 3, M), QPointF(M - 3, M),
+                        QPointF(M - 2, m + 3)])
+        p.drawLine(size / 2, m + 6, size / 2, M - 3)
+    elif kind == "refresh":
+        r = QRectF(m + 1, m + 1, M - m - 2, M - m - 2)
+        p.drawArc(r, 40 * 16, 270 * 16)
+        p.drawPolyline([QPointF(M - 1, m - 0.5), QPointF(M - 1.5, m + 4),
+                        QPointF(M - 6, m + 3.5)])
+    elif kind == "save":
+        p.drawRoundedRect(QRectF(m, m, M - m, M - m), 2, 2)
+        p.drawRect(QRectF(m + 3, m, M - m - 6, 4.5))
+        p.drawRect(QRectF(m + 3, M - 6.5, M - m - 6, 6.5))
+    elif kind == "expand":
+        p.drawPolyline([QPointF(m, m + 5), QPointF(m, m), QPointF(m + 5, m)])
+        p.drawPolyline([QPointF(M - 5, M), QPointF(M, M), QPointF(M, M - 5)])
+        p.drawLine(m, m, m + 5, m + 5)
+        p.drawLine(M, M, M - 5, M - 5)
+    elif kind == "close":
+        p.drawLine(m + 1, m + 1, M - 1, M - 1)
+        p.drawLine(M - 1, m + 1, m + 1, M - 1)
+    elif kind == "ok":
+        p.drawPolyline([QPointF(m, size / 2 + 1), QPointF(size / 2 - 1.5, M - 1),
+                        QPointF(M, m + 1)])
+    elif kind in ("undo", "redo"):
+        sgn = -1 if kind == "redo" else 1
+        cx = lambda x: size / 2 + sgn * x
+        p.drawArc(QRectF(m + 1, m + 2, M - m - 2, M - m - 2),
+                  (30 if kind == "undo" else 150) * 16, (200 if kind == "undo" else -200) * 16)
+        p.drawPolyline([QPointF(cx(-7), m + 2), QPointF(cx(-7), m + 7), QPointF(cx(-2), m + 7)])
+    elif kind == "reset":
+        p.drawArc(QRectF(m + 1, m + 1, M - m - 2, M - m - 2), 60 * 16, 300 * 16)
+        p.drawPolyline([QPointF(m + 1, m - 0.5), QPointF(m + 1.5, m + 4),
+                        QPointF(m + 6, m + 3.5)])
     elif kind == "blurarea":
         p.setPen(QPen(tinta, 1.4, Qt.PenStyle.DashLine))
         p.drawRect(QRectF(m, m, M - m, M - m))
@@ -4525,11 +4775,17 @@ class MainWindow(QMainWindow):
         for n in range(1, 10):
             SK.bind(self, "assign_%d" % n, lambda i=n - 1: self.assign_to_index(i))
 
+    @staticmethod
+    def section(texto: str) -> QLabel:
+        et = QLabel(texto)
+        et.setProperty("role", "section")
+        return et
+
     def _build_left(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(6, 6, 3, 6)
-        lay.addWidget(QLabel("<b>Folders</b>"))
+        lay.addWidget(self.section("FOLDERS"))
 
         row = QHBoxLayout()
         b_add = QPushButton("  Add…")
@@ -4566,13 +4822,9 @@ class MainWindow(QMainWindow):
         self.folder_tree.itemSelectionChanged.connect(self.refresh_images)
         lay.addWidget(self.folder_tree, 1)
 
-        hint = QLabel("Drop folders here.\n"
-                      "With none selected you see them all.\n"
-                      "Picking a folder includes its subfolders.\n"
-                      "Drag folders onto each other to reorder.")
-        themed(hint, css="color:%(dim)s; font-size:11px;")
-        hint.setWordWrap(True)
-        lay.addWidget(hint)
+        self.folder_tree.placeholder = ("Drop folders here",
+            "With none selected you see them all. Picking a folder includes its "
+            "subfolders. Drag folders onto each other to reorder.")
         return w
 
     def _build_center(self) -> QWidget:
@@ -4581,6 +4833,7 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(3, 6, 3, 6)
 
         bar = QHBoxLayout()
+        bar.setSpacing(14)
         self.lbl_count = QLabel("0 images")
         bar.addWidget(self.lbl_count)
         bar.addStretch(1)
@@ -4701,6 +4954,7 @@ class MainWindow(QMainWindow):
         self.b_export.clicked.connect(self.export_selected)
         self.b_assign = QPushButton("  Assign to selected category")
         themed(self.b_assign, icon="assign")
+        self.b_assign.setProperty("primary", True)
         self.b_assign.clicked.connect(self.assign_selected)
         self.button_row = WrapRow(
             [b_all, b_none, 12, self.b_mark_a, self.b_mark_b, self.b_compare,
@@ -4714,7 +4968,7 @@ class MainWindow(QMainWindow):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(3, 6, 6, 6)
-        lay.addWidget(QLabel("<b>Categories</b>"))
+        lay.addWidget(self.section("CATEGORIES"))
 
         row = QHBoxLayout()
         b_new = QPushButton("  New")
@@ -4756,17 +5010,14 @@ class MainWindow(QMainWindow):
         self.cat_tree.itemDoubleClicked.connect(lambda *_: self.chk_only_cat.setChecked(True))
         lay.addWidget(self.cat_tree, 1)
 
-        hint = QLabel()
-        texto_hint = lambda: ("Drag thumbnails onto a category.\n"
-                              "Drag a category ONTO another to nest it inside,\n"
-                              "or between two to reorder.\n"
-                              "%s ... %s assign to the first nine."
-                              % (SK.text("assign_1"), SK.text("assign_9")))
-        hint.setText(texto_hint())
-        SK.listeners.append(lambda: hint.setText(texto_hint()))
-        themed(hint, css="color:%(dim)s; font-size:11px;")
-        hint.setWordWrap(True)
-        lay.addWidget(hint)
+        def pista():
+            self.cat_tree.placeholder = ("No categories yet",
+                "Create one with New, then drag thumbnails onto it or press "
+                "%s ... %s. Drag a category onto another to nest it."
+                % (SK.text("assign_1"), SK.text("assign_9")))
+            self.cat_tree.viewport().update()
+        pista()
+        SK.listeners.append(pista)
         return w
 
     # ---------------- orden ----------------------------------------------- #

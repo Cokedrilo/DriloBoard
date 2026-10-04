@@ -30,7 +30,7 @@ except ImportError:       # pragma: no cover
 from PySide6.QtCore import (QAbstractListModel, QByteArray, QEvent, QMimeData, QModelIndex,
                             QObject, QPointF, QRect, QRectF, QRunnable, QSize, QSizeF,
                             Qt, QThreadPool, QTimer, QUrl, Signal, Slot)
-from PySide6.QtGui import (QActionGroup, QColor, QFont, QIcon, QImage, QImageReader,
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QIcon, QImage, QImageReader,
                            QImageWriter, QKeySequence, QPainter, QPainterPath,
                            QPainterPathStroker, QPalette, QPen, QPixmap, QShortcut,
                            QTransform)
@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QBoxLayout, QChe
                                QMenu, QMessageBox, QPushButton, QSlider, QSplitter,
                                QButtonGroup, QColorDialog, QGraphicsPathItem,
                                QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionSlider,
-                               QTextBrowser,
+                               QTextBrowser, QTableWidget, QTableWidgetItem, QHeaderView, QKeySequenceEdit,
                                QToolButton,
                                QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -165,6 +165,115 @@ def keys_text(texto: str) -> str:
         return texto
     texto = texto.replace("Ctrl+Y", "⇧⌘Z")
     return re.sub(r"\bCtrl\b\+?", "⌘", texto)
+
+
+# --------------------------------------------------------------------------- #
+#  Atajos de teclado configurables
+#
+#  Cada atajo tiene un id y una tecla por defecto. Lo que cambia el usuario va
+#  a atajos.json, junto a biblioteca.json pero aparte: son preferencias de
+#  este ordenador, no parte de la clasificacion que se exporta. Todo atajo se
+#  crea con SK.bind*, que lo apunta en un registro para poder cambiarlo en
+#  caliente sin reiniciar. Deshacer, rehacer, el zoom del editor y las teclas
+#  del visor grande son los del sistema y no se tocan.
+# --------------------------------------------------------------------------- #
+SHORTCUT_DEFS = [
+    ("preview", "Show / hide the preview", "V"),
+    ("fit", "Fit the image in view", "0"),
+    ("compare", "Compare A and B", "C"),
+    ("mark_a", "Mark the image as A", "A"),
+    ("mark_b", "Mark the image as B", "B"),
+    ("edit", "Open the editor", "E"),
+    ("before", "Before / after (hold to see the original)", "Z"),
+    ("refresh", "Refresh folders", "F5"),
+    ("theme", "Switch dark / light theme", "Ctrl+T"),
+    ("help", "Open the help", "F1"),
+    ("shortcuts", "Keyboard shortcuts", "Ctrl+K"),
+    *[("assign_%d" % n, "Assign to category %d" % n, "Ctrl+%d" % n)
+      for n in range(1, 10)],
+    *[(k, "Video: " + v[1][0].lower() + v[1][1:], v[0])
+      for k, v in VIDEO_KEYS.items()],
+]
+SHORTCUT_FIXED = [
+    ("Undo", "Ctrl+Z"), ("Redo", "Ctrl+Y"),
+    ("Zoom in / out (editor)", "Ctrl++ / Ctrl+-"),
+    ("Large viewer: previous / next image", "\u2190 / \u2192"),
+    ("Large viewer: play / pause a video", "Space"),
+    ("Large viewer: full screen", "F / F11"),
+    ("Close a window", "Esc"),
+]
+SHORTCUTS_FILE = DATA_DIR / "atajos.json"
+
+
+class ShortcutRegistry:
+    def __init__(self):
+        self.defaults = {i: k for i, _t, k in SHORTCUT_DEFS}
+        self.labels = {i: t for i, t, _k in SHORTCUT_DEFS}
+        self.over: dict[str, str] = {}
+        self.items: list = []              # (id, QShortcut | QAction | HoldKey)
+        self.listeners: list = []          # se llaman al cambiar (bocadillos...)
+        self.load()
+
+    def load(self):
+        try:
+            crudo = json.loads(SHORTCUTS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if isinstance(crudo, dict):
+            self.over = {k: v for k, v in crudo.items()
+                         if k in self.defaults and isinstance(v, str)}
+
+    def seq(self, id: str) -> str:
+        return self.over.get(id, self.defaults[id])
+
+    def text(self, id: str) -> str:
+        """La tecla como se lee en este sistema, para bocadillos y ayuda."""
+        return QKeySequence(self.seq(id)).toString(
+            QKeySequence.SequenceFormat.NativeText) or "(none)"
+
+    def bind(self, owner, id: str, fn) -> QShortcut:
+        sc = QShortcut(QKeySequence(self.seq(id)), owner, fn)
+        self.items.append((id, sc))
+        return sc
+
+    def bind_action(self, action, id: str):
+        action.setShortcut(QKeySequence(self.seq(id)))
+        self.items.append((id, action))
+
+    def save(self):
+        try:
+            SHORTCUTS_FILE.write_text(json.dumps(self.over, indent=1,
+                                                 sort_keys=True), encoding="utf-8")
+        except OSError:
+            pass
+
+    def set_all(self, nuevos: dict[str, str]):
+        self.over = {i: k for i, k in nuevos.items() if k != self.defaults[i]}
+        self.save()
+        self.apply()
+
+    def apply(self):
+        vivos = []
+        for id, obj in self.items:
+            try:
+                if isinstance(obj, QShortcut):
+                    obj.setKey(QKeySequence(self.seq(id)))
+                elif isinstance(obj, QAction):
+                    obj.setShortcut(QKeySequence(self.seq(id)))
+                else:
+                    obj.set_sequence(self.seq(id))
+                vivos.append((id, obj))
+            except RuntimeError:           # el objeto ya murio con su ventana
+                pass
+        self.items = vivos
+        for f in list(self.listeners):
+            try:
+                f()
+            except RuntimeError:
+                self.listeners.remove(f)
+
+
+SK = ShortcutRegistry()
 
 
 def extra_redo_shortcut(parent, fn):
@@ -1823,10 +1932,9 @@ class MarkSlider(QSlider):
 
 def shortcut_tip(accion: str) -> str:
     """Bocadillo de un boton con su atajo de teclado debajo, en negrita."""
-    tecla, titulo = VIDEO_KEYS[accion]
+    titulo = VIDEO_KEYS[accion][1]
     # nobr: si no, Qt parte en dos lineas los bocadillos con formato
-    return "<nobr>%s&nbsp;&nbsp;<b>%s</b></nobr>" % (titulo, QKeySequence(tecla).toString(
-        QKeySequence.SequenceFormat.NativeText))
+    return "<nobr>%s&nbsp;&nbsp;<b>%s</b></nobr>" % (titulo, SK.text(accion))
 
 
 class PreviewPane(QWidget):
@@ -1936,10 +2044,15 @@ class PreviewPane(QWidget):
         self._tries = 0
         self._fps_known = False
 
+        self._video_tips = {}
+        SK.listeners.append(lambda: [b.setToolTip(shortcut_tip(a))
+                                     for a, b in self._video_tips.items()])
+
         def boton(accion, fn):
             b = QToolButton()
             b.setAutoRaise(True)
             b.setToolTip(shortcut_tip(accion))
+            self._video_tips[accion] = b
             themed(b, icon=accion)
             b.clicked.connect(fn)
             vid_lay.addWidget(b)
@@ -1980,7 +2093,7 @@ class PreviewPane(QWidget):
                            ("key_prev", lambda: self.jump_keyframe(-1)),
                            ("key_next", lambda: self.jump_keyframe(1)),
                            ("key_del", self.delete_keyframe)):
-            atajo = QShortcut(QKeySequence(VIDEO_KEYS[accion][0]), self, fn)
+            atajo = SK.bind(self, accion, fn)
             atajo.setEnabled(False)
             self._video_shortcuts.append(atajo)
         self._flash_timer = QTimer(self)
@@ -3007,6 +3120,108 @@ class CropView(QGraphicsView):
             self.cropped.emit(self.mapToScene(band).boundingRect())
 
 
+class ResetLabel(QLabel):
+    """Rotulo de un slider: un clic lo devuelve a su posicion inicial."""
+    clicked = Signal()
+
+    def __init__(self, texto: str, parent=None):
+        super().__init__(texto, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Click to reset")
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(ev)
+
+
+class ShortcutsDialog(QDialog):
+    """Guia de atajos, con las teclas editables.
+
+    Se edita en una tabla y se guarda de golpe con Save: asi se pueden
+    intercambiar dos teclas sin que una colision a medias lo impida."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Keyboard shortcuts")
+        self.resize(560, 640)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Click a shortcut and press the new keys. "
+                             "Backspace clears it."))
+        self.tabla = QTableWidget(len(SHORTCUT_DEFS) + len(SHORTCUT_FIXED), 3)
+        self.tabla.setHorizontalHeaderLabels(["Action", "Shortcut", ""])
+        self.tabla.verticalHeader().setVisible(False)
+        self.tabla.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.tabla.horizontalHeader().setStretchLastSection(False)
+        self.tabla.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
+        self.tabla.setColumnWidth(1, 170)
+        self.tabla.setColumnWidth(2, 70)
+        self.edits: dict[str, QKeySequenceEdit] = {}
+        for fila, (id, titulo, _k) in enumerate(SHORTCUT_DEFS):
+            self.tabla.setItem(fila, 0, QTableWidgetItem(titulo))
+            ed = QKeySequenceEdit(QKeySequence(SK.seq(id)))
+            ed.setMaximumSequenceLength(1)
+            self.edits[id] = ed
+            self.tabla.setCellWidget(fila, 1, ed)
+            b = QPushButton("Reset")
+            b.setToolTip("Back to %s" % (QKeySequence(SK.defaults[id]).toString(
+                QKeySequence.SequenceFormat.NativeText) or "none"))
+            b.clicked.connect(lambda _c, i=id: self.edits[i].setKeySequence(
+                QKeySequence(SK.defaults[i])))
+            self.tabla.setCellWidget(fila, 2, b)
+        base = len(SHORTCUT_DEFS)
+        for j, (titulo, tecla) in enumerate(SHORTCUT_FIXED):
+            a, b = QTableWidgetItem(titulo), QTableWidgetItem(keys_text(tecla))
+            for it in (a, b):
+                it.setFlags(Qt.ItemFlag.NoItemFlags)    # fijos: gris, sin editar
+            self.tabla.setItem(base + j, 0, a)
+            self.tabla.setItem(base + j, 1, b)
+        lay.addWidget(self.tabla, 1)
+        lay.addWidget(QLabel("The greyed-out ones are fixed."))
+        fila = QHBoxLayout()
+        b_todo = QPushButton("Reset all")
+        b_todo.clicked.connect(self.reset_all)
+        b_ok = QPushButton("Save")
+        b_ok.setDefault(True)
+        b_ok.clicked.connect(self.save)
+        b_no = QPushButton("Cancel")
+        b_no.clicked.connect(self.reject)
+        fila.addWidget(b_todo)
+        fila.addStretch(1)
+        fila.addWidget(b_no)
+        fila.addWidget(b_ok)
+        lay.addLayout(fila)
+
+    def reset_all(self):
+        for id, ed in self.edits.items():
+            ed.setKeySequence(QKeySequence(SK.defaults[id]))
+
+    def values(self) -> dict[str, str]:
+        return {i: ed.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+                for i, ed in self.edits.items()}
+
+    def save(self):
+        nuevos = self.values()
+        usadas: dict[str, str] = {}
+        choques = []
+        for id, seq in nuevos.items():
+            if not seq:
+                continue
+            if seq in usadas:
+                choques.append("%s  =  %s  /  %s" % (
+                    QKeySequence(seq).toString(QKeySequence.SequenceFormat.NativeText),
+                    SK.labels[usadas[seq]], SK.labels[id]))
+            else:
+                usadas[seq] = id
+        if choques:
+            QMessageBox.warning(self, "Shortcuts clash",
+                                "The same keys are used twice:\n\n" + "\n".join(choques))
+            return
+        SK.set_all(nuevos)
+        self.accept()
+
+
 class HoldKey(QObject):
     """Una tecla que vale mientras se mantiene pulsada (antes / despues).
 
@@ -3015,12 +3230,19 @@ class HoldKey(QObject):
     ni si la ventana no esta activa, y suelta sola si la ventana pierde el
     foco con la tecla pulsada."""
 
-    def __init__(self, tecla: str, ventana: QWidget, callback):
+    def __init__(self, id: str, ventana: QWidget, callback):
         super().__init__(ventana)
-        self.key = QKeySequence(tecla)[0].key()
         self.ventana, self.callback = ventana, callback
         self.activa = False
+        self.set_sequence(SK.seq(id))
+        SK.items.append((id, self))
         QApplication.instance().installEventFilter(self)
+
+    def set_sequence(self, texto: str):
+        combo = QKeySequence(texto)[0] if QKeySequence(texto).count() else None
+        self.key = combo.key().value if combo is not None else 0
+        self.mods = combo.keyboardModifiers() if combo is not None \
+            else Qt.KeyboardModifier.NoModifier
 
     def _set(self, valor: bool):
         if valor != self.activa:
@@ -3032,7 +3254,7 @@ class HoldKey(QObject):
         if t == QEvent.Type.WindowDeactivate and obj is self.ventana:
             self._set(False)
         elif (t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease)
-                and ev.key() == self.key and not ev.modifiers()
+                and self.key and ev.key() == self.key and ev.modifiers() == self.mods
                 and (self.activa or QApplication.activeWindow() is self.ventana)):
             if isinstance(QApplication.focusWidget(), QLineEdit):
                 return False
@@ -3100,7 +3322,8 @@ class EditorDialog(QDialog):
             b.clicked.connect(fn)
             geo.addWidget(b)
         geo.addSpacing(12)
-        geo.addWidget(QLabel("Angle"))
+        et_angle = ResetLabel("Angle")
+        geo.addWidget(et_angle)
         self.sld_angle = QSlider(Qt.Orientation.Horizontal)
         self.sld_angle.setRange(-1800, 1800)            # en decimas de grado
         self.sld_angle.setSingleStep(5)
@@ -3196,12 +3419,14 @@ class EditorDialog(QDialog):
         dibujo.addStretch(1)
 
         ajustes = QHBoxLayout()
-        ajustes.addWidget(QLabel("Brightness"))
+        et_bright = ResetLabel("Brightness")
+        ajustes.addWidget(et_bright)
         self.sld_bright = QSlider(Qt.Orientation.Horizontal)
         self.sld_bright.setRange(-100, 100)
         self.sld_bright.setFixedWidth(150)
         ajustes.addWidget(self.sld_bright)
-        ajustes.addWidget(QLabel("Contrast"))
+        et_contrast = ResetLabel("Contrast")
+        ajustes.addWidget(et_contrast)
         self.sld_contrast = QSlider(Qt.Orientation.Horizontal)
         self.sld_contrast.setRange(-100, 100)
         self.sld_contrast.setFixedWidth(150)
@@ -3213,13 +3438,18 @@ class EditorDialog(QDialog):
         color = QHBoxLayout()
         self.sld_color = {}
         for clave, nombre, lo, hi in ADJUST_SLIDERS[2:]:
-            color.addWidget(QLabel(nombre))
+            et = ResetLabel(nombre)
+            color.addWidget(et)
             sld = QSlider(Qt.Orientation.Horizontal)
             sld.setRange(lo, hi)
             sld.setFixedWidth(120)
+            et.clicked.connect(lambda s_=sld, n=nombre: self.reset_slider(s_, n))
             color.addWidget(sld)
             self.sld_color[clave] = sld
         self.sld_blur = self.sld_color["blur"]
+        et_bright.clicked.connect(lambda: self.reset_slider(self.sld_bright, "brightness"))
+        et_contrast.clicked.connect(lambda: self.reset_slider(self.sld_contrast, "contrast"))
+        et_angle.clicked.connect(lambda: self.sld_angle.setValue(0))
         color.addStretch(1)
 
         tam = QHBoxLayout()
@@ -3320,8 +3550,8 @@ class EditorDialog(QDialog):
         lay.addLayout(zoom)
         lay.addLayout(final)
 
-        QShortcut(QKeySequence("0"), self, self.fit)
-        HoldKey("Z", self, self.set_before)
+        SK.bind(self, "fit", self.fit)
+        HoldKey("before", self, self.set_before)
         QShortcut(QKeySequence.StandardKey.Undo, self, self.undo)
         QShortcut(QKeySequence.StandardKey.Redo, self, self.redo)
         extra_redo_shortcut(self, self.redo)
@@ -3697,6 +3927,13 @@ class EditorDialog(QDialog):
         self.edit["crop"] = None
         self.render_preview()
 
+    def reset_slider(self, sld: QSlider, nombre: str):
+        """Clic en el rotulo: el slider vuelve a 0, con un paso de deshacer."""
+        if sld.value() == 0:
+            return
+        self.push("reset " + nombre.lower())
+        sld.setValue(0)
+
     def on_adjust(self, *_):
         self.edit["bright"] = self.sld_bright.value()
         self.edit["contrast"] = self.sld_contrast.value()
@@ -3838,7 +4075,7 @@ includes everything below it; choose a subfolder to see only that topic.
 Empty and hidden subfolders are left out.</li>
 <li><b>Sort</b>: drag the top-level folders to order them by hand, or pick
 A → Z / Z → A. This order decides the order of the thumbnails too.</li>
-<li><i>Refresh</i> (F5) re-reads the disk if you add images while working.</li>
+<li><i>Refresh</i> (<b>[[refresh]]</b>) re-reads the disk if you add images while working.</li>
 </ul>
 
 <h3>2 · Thumbnails and preview (centre)</h3>
@@ -3878,7 +4115,7 @@ selected one. Deleting never removes an image from disk.</li>
 <li><b>They nest</b>: drag a category <i>onto</i> another to put it inside, or
 <i>between</i> two to place it at that level.</li>
 <li>To assign: drag the selected thumbnails onto a category, use the
-<i>Assign</i> button, or press <b>Ctrl+1 … Ctrl+9</b> for the first nine.</li>
+<i>Assign</i> button, or press <b>[[assign_1]] … [[assign_9]]</b> for the first nine.</li>
 <li>A parent's count includes its children, without counting an image twice.</li>
 <li><b>Show this category only</b> turns the centre into that category and
 everything nested inside it, whatever folder the images come from.</li>
@@ -3886,7 +4123,7 @@ everything nested inside it, whatever folder the images come from.</li>
 
 <h3>5 · Editing and drawing</h3>
 <ul>
-<li><i>Edit…</i> (key <b>E</b>) opens the editor: rotate, flip, crop,
+<li><i>Edit…</i> (key <b>[[edit]]</b>) opens the editor: rotate, flip, crop,
 brightness, contrast, hue, saturation, lightness, blur, black and white, and
 output size.</li>
 <li><b>Angle</b> turns the image by any number of degrees (slider, or type
@@ -3901,7 +4138,7 @@ rectangle you drag: names, faces, anything you must hide before sharing.
 Arrows and text drawn on top stay sharp, and the eraser removes the blur.</li>
 <li>Right-click ▸ Edit ▸ <i>Adjust</i> opens <b>live sliders</b> for the
 selected images.</li>
-<li><b>Hold Z</b> to see the image <b>before</b> your edits (in the preview and
+<li><b>Hold [[before]]</b> to see the image <b>before</b> your edits (in the preview and
 in the editor); release to see it after.</li>
 <li>Drawings and crops <b>follow the image</b>: rotate afterwards and they
 rotate with it.</li>
@@ -3926,20 +4163,21 @@ with the same name instead of duplicating them, and keeps your own edits.</li>
 
 <h3>Keyboard</h3>
 <table cellpadding="4">
-<tr><td><b>V</b></td><td>show / hide the preview below</td></tr>
-<tr><td><b>A</b> / <b>B</b></td><td>mark the chosen image as A or B</td></tr>
-<tr><td><b>C</b></td><td>compare A and B</td></tr>
-<tr><td><b>E</b></td><td>open the editor</td></tr>
-<tr><td><b>Z</b> (hold)</td><td>before / after: show the original</td></tr>
-<tr><td><b>0</b></td><td>fit the image in view</td></tr>
-<tr><td><b>Ctrl+1…9</b></td><td>assign to the first nine categories</td></tr>
+<tr><td><b>[[preview]]</b></td><td>show / hide the preview below</td></tr>
+<tr><td><b>[[mark_a]]</b> / <b>[[mark_b]]</b></td><td>mark the chosen image as A or B</td></tr>
+<tr><td><b>[[compare]]</b></td><td>compare A and B</td></tr>
+<tr><td><b>[[edit]]</b></td><td>open the editor</td></tr>
+<tr><td><b>[[before]]</b> (hold)</td><td>before / after: show the original</td></tr>
+<tr><td><b>[[fit]]</b></td><td>fit the image in view</td></tr>
+<tr><td><b>[[assign_1]]…[[assign_9]]</b></td><td>assign to the first nine categories</td></tr>
 <tr><td><b>Ctrl+Z</b> / <b>Ctrl+Y</b></td><td>undo / redo</td></tr>
-<tr><td><b>F5</b></td><td>re-read the folders from disk</td></tr>
-<tr><td><b>Ctrl+T</b></td><td>switch between the dark and light theme</td></tr>
-<tr><td><b>,</b> / <b>.</b></td><td>video: previous / next frame</td></tr>
-<tr><td><b>-</b> / <b>Ctrl+-</b></td><td>video: set / delete a keyframe</td></tr>
-<tr><td><b>Ctrl+,</b> / <b>Ctrl+.</b></td><td>video: previous / next keyframe</td></tr>
-<tr><td><b>F1</b></td><td>this help</td></tr>
+<tr><td><b>[[refresh]]</b></td><td>re-read the folders from disk</td></tr>
+<tr><td><b>[[theme]]</b></td><td>switch between the dark and light theme</td></tr>
+<tr><td><b>[[frame_prev]]</b> / <b>[[frame_next]]</b></td><td>video: previous / next frame</td></tr>
+<tr><td><b>[[key_add]]</b> / <b>[[key_del]]</b></td><td>video: set / delete a keyframe</td></tr>
+<tr><td><b>[[key_prev]]</b> / <b>[[key_next]]</b></td><td>video: previous / next keyframe</td></tr>
+<tr><td><b>[[help]]</b></td><td>this help</td></tr>
+<tr><td><b>[[shortcuts]]</b></td><td>keyboard shortcuts: see and <b>change</b> them (Help menu)</td></tr>
 </table>
 
 <h3>Where your things live</h3>
@@ -3950,7 +4188,7 @@ stick and your classification travels with it.</p>
 
 <h3>Dark or light</h3>
 <p>The <b>Light / Dark</b> button at the top right, <b>View ▸ theme</b> or
-<b>Ctrl+T</b> switch the whole window, editor included. DriloBoard remembers
+<b>[[theme]]</b> switch the whole window, editor included. DriloBoard remembers
 your choice; the first time it follows the system.</p>
 
 <h3>Videos</h3>
@@ -3963,12 +4201,12 @@ browsing stays silent. Use the play button and the bar under it; in the large
 window <b>Space</b> plays and pauses.</li>
 <li>Videos go into categories like images, and <i>Export…</i> copies them as
 they are. The editor and the A/B comparison are for images only.</li>
-<li><b>Frame by frame</b>: the buttons either side of play, or <b>,</b> and
-<b>.</b>, step one frame back or forward (playback pauses). The bar shows the
+<li><b>Frame by frame</b>: the buttons either side of play, or <b>[[frame_prev]]</b> and
+<b>[[frame_next]]</b>, step one frame back or forward (playback pauses). The bar shows the
 frame number.</li>
 <li><b>Keyframes</b> mark the frames you care about, saved with the library:
-<b>-</b> sets one on the current frame, <b>Ctrl+,</b> and <b>Ctrl+.</b> jump
-to the previous or next one, <b>Ctrl+-</b> deletes it. They appear as amber
+<b>[[key_add]]</b> sets one on the current frame, <b>[[key_prev]]</b> and
+<b>[[key_next]]</b> jump to the previous or next one, <b>[[key_del]]</b> deletes it. They appear as amber
 diamonds above the time bar, and <b>Ctrl+Z</b> undoes them. Hover over any
 button to see its shortcut.</li>
 </ul>
@@ -3977,7 +4215,9 @@ button to see its shortcut.</li>
 
 def help_html() -> str:
     """La guia con los atajos y las carpetas de este sistema."""
-    html = keys_text(HELP_HTML)
+    # [[id]] se cambia por la tecla que tenga ahora ese atajo
+    html = re.sub(r"\[\[(\w+)\]\]", lambda m: SK.text(m.group(1)), HELP_HTML)
+    html = keys_text(html)
     if MAC:
         html = (html.replace("the file manager", "the Finder")
                 .replace("Everything is inside the program's own folder",
@@ -4014,7 +4254,7 @@ class AdjustPanel(QDialog):
         self.valores: dict[str, QLabel] = {}
         for clave, nombre, lo, hi in ADJUST_SLIDERS:
             fila = QHBoxLayout()
-            et = QLabel(nombre)
+            et = ResetLabel(nombre)
             et.setFixedWidth(80)
             sld = QSlider(Qt.Orientation.Horizontal)
             sld.setRange(lo, hi)
@@ -4023,7 +4263,7 @@ class AdjustPanel(QDialog):
             val = QLabel(str(base[clave]))
             val.setFixedWidth(36)
             sld.valueChanged.connect(lambda v, c=clave: self.changed(c, v))
-            sld.mouseDoubleClickEvent = lambda e, c=clave: self.sliders[c].setValue(0)
+            et.clicked.connect(lambda c=clave: self.sliders[c].setValue(0))
             fila.addWidget(et)
             fila.addWidget(sld, 1)
             fila.addWidget(val)
@@ -4123,7 +4363,7 @@ class ImageViewer(QDialog):
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, self.close)
         QShortcut(QKeySequence("F"), self, self._toggle_full)
         QShortcut(QKeySequence("F11"), self, self._toggle_full)
-        QShortcut(QKeySequence("0"), self, self.pane.fit)
+        SK.bind(self, "fit", self.pane.fit)
         if compare_pair:
             self.pane.compare(compare_pair[0], compare_pair[1], opacity)
         else:
@@ -4283,8 +4523,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Drop folders on the left-hand column to begin")
 
         for n in range(1, 10):
-            QShortcut(QKeySequence("Ctrl+%d" % n), self,
-                      lambda i=n - 1: self.assign_to_index(i))
+            SK.bind(self, "assign_%d" % n, lambda i=n - 1: self.assign_to_index(i))
 
     def _build_left(self) -> QWidget:
         w = QWidget()
@@ -4301,13 +4540,15 @@ class MainWindow(QMainWindow):
         b_del.clicked.connect(self.remove_folders)
         b_upd = QPushButton("  Refresh")
         themed(b_upd, std="SP_BrowserReload")
-        b_upd.setToolTip("Re-read the folders from disk (F5)")
+        b_upd.setToolTip("Re-read the folders from disk (%s)" % SK.text("refresh"))
         b_upd.clicked.connect(self.rescan)
         row.addWidget(b_add)
         row.addWidget(b_del)
         row.addWidget(b_upd)
         lay.addLayout(row)
-        QShortcut(QKeySequence("F5"), self, self.rescan)
+        SK.bind(self, "refresh", self.rescan)
+        SK.listeners.append(lambda: b_upd.setToolTip(keys_text(
+            "Re-read the folders from disk (%s)" % SK.text("refresh"))))
 
         orden = QHBoxLayout()
         orden.addWidget(QLabel("Sort:"))
@@ -4405,7 +4646,7 @@ class MainWindow(QMainWindow):
         self.preview = PreviewPane()
         self.preview.edit_for = self.preview_edit_of
         self._before = False
-        HoldKey("Z", self, self.set_before)
+        HoldKey("before", self, self.set_before)
         self.preview.marks_for = self.marks_of
         self.preview.on_marks_changed = self.set_video_marks
         self.preview.openBig.connect(self.open_viewer_current)
@@ -4419,12 +4660,12 @@ class MainWindow(QMainWindow):
         self.center_split.setCollapsible(0, False)
         lay.addWidget(self.center_split, 1)
         self.apply_icon_size(160)
-        QShortcut(QKeySequence("V"), self, self.chk_preview.toggle)
-        QShortcut(QKeySequence("0"), self, self.preview.fit)
-        QShortcut(QKeySequence("C"), self, self.compare_selected)
-        QShortcut(QKeySequence("A"), self, lambda: self.mark_image("A"))
-        QShortcut(QKeySequence("B"), self, lambda: self.mark_image("B"))
-        QShortcut(QKeySequence("E"), self, self.edit_current)
+        SK.bind(self, "preview", self.chk_preview.toggle)
+        SK.bind(self, "fit", self.preview.fit)
+        SK.bind(self, "compare", self.compare_selected)
+        SK.bind(self, "mark_a", lambda: self.mark_image("A"))
+        SK.bind(self, "mark_b", lambda: self.mark_image("B"))
+        SK.bind(self, "edit", self.edit_current)
         QShortcut(QKeySequence.StandardKey.Undo, self, self.undo)
         QShortcut(QKeySequence.StandardKey.Redo, self, self.redo)
         extra_redo_shortcut(self, self.redo)
@@ -4515,10 +4756,14 @@ class MainWindow(QMainWindow):
         self.cat_tree.itemDoubleClicked.connect(lambda *_: self.chk_only_cat.setChecked(True))
         lay.addWidget(self.cat_tree, 1)
 
-        hint = QLabel(keys_text("Drag thumbnails onto a category.\n"
-                                "Drag a category ONTO another to nest it inside,\n"
-                                "or between two to reorder.\n"
-                                "Ctrl+1 ... Ctrl+9 assign to the first nine."))
+        hint = QLabel()
+        texto_hint = lambda: ("Drag thumbnails onto a category.\n"
+                              "Drag a category ONTO another to nest it inside,\n"
+                              "or between two to reorder.\n"
+                              "%s ... %s assign to the first nine."
+                              % (SK.text("assign_1"), SK.text("assign_9")))
+        hint.setText(texto_hint())
+        SK.listeners.append(lambda: hint.setText(texto_hint()))
         themed(hint, css="color:%(dim)s; font-size:11px;")
         hint.setWordWrap(True)
         lay.addWidget(hint)
@@ -4833,7 +5078,7 @@ class MainWindow(QMainWindow):
                     pistas.append("%d here, %d including subcategories"
                                   % (propias, todas))
                 if c["name"] in atajos:
-                    pistas.append(keys_text("Ctrl+%d" % atajos[c["name"]]))
+                    pistas.append(SK.text("assign_%d" % atajos[c["name"]]))
                 if pistas:
                     it.setToolTip(0, "\n".join(pistas))
                 if parent is None:
@@ -5016,7 +5261,7 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         a = m.addAction("Refresh folders", self.rescan)
         themed(a, std="SP_BrowserReload")
-        a.setShortcut(QKeySequence("F5"))
+        SK.bind_action(a, "refresh")
         m.addSeparator()
         m.addAction("Quit", self.close)
 
@@ -5030,11 +5275,13 @@ class MainWindow(QMainWindow):
             grupo.addAction(a)
         v.addSeparator()
         a = v.addAction("Switch theme", self.toggle_theme)
-        a.setShortcut(QKeySequence("Ctrl+T"))
+        SK.bind_action(a, "theme")
 
         h = barra.addMenu("&Help")
         a = h.addAction("How DriloBoard works…", self.show_help)
-        a.setShortcut(QKeySequence("F1"))
+        SK.bind_action(a, "help")
+        a = h.addAction("Keyboard shortcuts\u2026", self.show_shortcuts)
+        SK.bind_action(a, "shortcuts")
         h.addSeparator()
         h.addAction("About DriloBoard…", self.about)
 
@@ -5061,6 +5308,7 @@ class MainWindow(QMainWindow):
         else:
             barra.setCornerWidget(self.corner, Qt.Corner.TopRightCorner)
         self._sync_theme_ui()
+        SK.listeners.append(self._sync_theme_ui)
 
     # ---------------- tema claro u oscuro --------------------------------- #
     @staticmethod
@@ -5085,8 +5333,11 @@ class MainWindow(QMainWindow):
         # el boton ensena a donde se va, no donde se esta
         themed(self.b_theme, icon="sun" if oscuro else "moon")
         self.b_theme.setText("  Light  " if oscuro else "  Dark  ")
-        self.b_theme.setToolTip(keys_text("Switch to the %s theme (Ctrl+T)"
-                                          % ("light" if oscuro else "dark")))
+        self.b_theme.setToolTip("Switch to the %s theme (%s)"
+                                % ("light" if oscuro else "dark", SK.text("theme")))
+
+    def show_shortcuts(self):
+        ShortcutsDialog(self).exec()
 
     def show_help(self):
         if getattr(self, "_help", None) is None:

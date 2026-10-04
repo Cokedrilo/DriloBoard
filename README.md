@@ -85,7 +85,7 @@ category only* turns the centre into that category and everything below it,
 whatever folder the images came from.
 
 **Non-destructive editor**
-Rotate, flip, crop, brightness, contrast, black and white, output size.
+Rotate, flip, crop, brightness, contrast, blur, black and white, output size.
 **Rotate by any angle** too — slider or exact degrees, with a grid to
 straighten by eye; drawings and crops follow the turn. Plus
 **drawing tools** like a snipping tool — pen, highlighter, line, arrow,
@@ -179,6 +179,7 @@ Needs Python 3.10+.
 ```bash
 python -m venv .venv
 .venv/bin/python -m pip install PySide6-Essentials    # .venv\Scripts\ on Windows
+.venv/bin/python -m pip install numpy             # hue / saturation / lightness
 .venv/bin/python -m pip install PySide6-Addons        # optional: video playback
 .venv/bin/python driloboard.py
 ```

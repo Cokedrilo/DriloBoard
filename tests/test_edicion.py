@@ -361,3 +361,39 @@ print("recortar sobre una imagen redimensionada cae donde toca")
 
 ed.done(0)
 print("\nEDICION OK")
+
+# --- desenfoque ---------------------------------------------------------------
+_s = QImage(80, 80, QImage.Format.Format_RGB32)
+_s.fill(QColor("black"))
+_p = QPainter(_s); _p.fillRect(40, 0, 40, 80, QColor("white")); _p.end()
+_b = visor.apply_edit(_s, dict(visor.empty_edit(), blur=8))
+assert _b.size() == _s.size()
+assert 0 < QColor(_b.pixel(40, 40)).red() < 255, "el borde debe quedar suavizado"
+assert visor.is_empty_edit(dict(visor.empty_edit(), blur=0))
+assert not visor.is_empty_edit(dict(visor.empty_edit(), blur=3))
+print("blur OK")
+
+# --- tono / saturacion / luz ---------------------------------------------------
+_r = QImage(10, 10, QImage.Format.Format_RGB32); _r.fill(QColor(200, 40, 40))
+if visor.np is not None:
+    _g = QColor(visor.apply_edit(_r, dict(visor.empty_edit(), hue=120)).pixel(5, 5))
+    assert _g.green() > _g.red() and _g.green() > _g.blue(), "120 grados: rojo -> verde"
+    _m = QColor(visor.apply_edit(_r, dict(visor.empty_edit(), sat=-100)).pixel(5, 5))
+    assert abs(_m.red() - _m.green()) < 3 and abs(_m.green() - _m.blue()) < 3, "sat -100 = gris"
+    assert QColor(visor.apply_edit(_r, dict(visor.empty_edit(), light=100)).pixel(5, 5)).red() == 255
+    assert QColor(visor.apply_edit(_r, dict(visor.empty_edit(), light=-100)).pixel(5, 5)).red() == 0
+    assert visor.apply_edit(_r, dict(visor.empty_edit(), hue=0, sat=0)) is _r
+print("hsl OK")
+
+# --- desenfoque de zona -------------------------------------------------------
+_z = QImage(100, 100, QImage.Format.Format_RGB32); _z.fill(QColor("black"))
+_pp = QPainter(_z); _pp.fillRect(50, 0, 50, 100, QColor("white")); _pp.end()
+_f = {"tipo": "difuminar", "puntos": [[30, 30], [70, 70]], "color": "#000", "grosor": 4}
+_o = visor.apply_edit(_z, dict(visor.empty_edit(), draw=[_f]))
+assert 0 < QColor(_o.pixel(50, 50)).red() < 255, "dentro de la zona el borde se difumina"
+assert _o.pixel(10, 10) == _z.pixel(10, 10) and _o.pixel(90, 90) == _z.pixel(90, 90), "fuera no cambia"
+assert _z.pixel(50, 50) == QColor("white").rgb(), "el original no se toca"
+# sigue a la imagen: girar 90 grados mueve la zona con ella
+_o2 = visor.apply_edit(_z, dict(visor.empty_edit(), rot=90, draw=[_f]))
+assert 0 < QColor(_o2.pixel(50, 50)).green() < 255
+print("zone blur OK")

@@ -22,6 +22,11 @@ import tempfile
 from collections import OrderedDict, deque
 from pathlib import Path
 
+try:                      # sin numpy el color (tono/saturacion/luz) no se aplica
+    import numpy as np
+except ImportError:       # pragma: no cover
+    np = None
+
 from PySide6.QtCore import (QAbstractListModel, QByteArray, QEvent, QMimeData, QModelIndex,
                             QObject, QPointF, QRect, QRectF, QRunnable, QSize, QSizeF,
                             Qt, QThreadPool, QTimer, QUrl, Signal, Slot)
@@ -35,7 +40,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QBoxLayout, QChe
                                QFileDialog, QFrame, QGraphicsItem, QGraphicsPixmapItem,
                                QGraphicsScene,
                                QGraphicsView, QHBoxLayout, QInputDialog, QLabel,
-                               QListView, QMainWindow,
+                               QLineEdit, QListView, QMainWindow,
                                QMenu, QMessageBox, QPushButton, QSlider, QSplitter,
                                QButtonGroup, QColorDialog, QGraphicsPathItem,
                                QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionSlider,
@@ -379,13 +384,23 @@ def normalize_cats(cats: list, counter=None) -> list:
 #  solo se escribe en disco al exportar una copia.
 #
 #  Orden de la receta: girar un angulo libre -> recortar -> rotar 90 ->
-#  voltear -> gris -> brillo y contraste -> redimensionar. El recorte va en
+#  voltear -> gris -> brillo y contraste -> tono/saturacion/luz -> desenfoque -> redimensionar. El recorte va en
 #  coordenadas del original ya enderezado (sin angulo, las del ORIGINAL), asi
 #  que rotar 90 o voltear despues no lo invalida.
 # --------------------------------------------------------------------------- #
+# (clave de la receta, rotulo, minimo, maximo): los usan el editor y el panel
+ADJUST_SLIDERS = [("bright", "Brightness", -100, 100),
+                  ("contrast", "Contrast", -100, 100),
+                  ("hue", "Hue", -180, 180),
+                  ("sat", "Saturation", -100, 100),
+                  ("light", "Lightness", -100, 100),
+                  ("blur", "Blur", 0, 50)]
+
+
 def empty_edit() -> dict:
     return {"crop": None, "rot": 0, "angle": 0, "flip_h": False, "flip_v": False,
-            "gray": False, "bright": 0, "contrast": 0, "resize": None,
+            "gray": False, "bright": 0, "contrast": 0, "blur": 0, "hue": 0, "sat": 0, "light": 0,
+            "resize": None,
             "draw": []}
 
 
@@ -484,7 +499,7 @@ def shape_path(forma: dict) -> QPainterPath:
     elif tipo == "linea":
         path.moveTo(pts[0])
         path.lineTo(pts[-1])
-    elif tipo == "rect":
+    elif tipo in ("rect", "difuminar"):
         path.addRect(QRectF(pts[0], pts[-1]).normalized())
     elif tipo == "elipse":
         path.addEllipse(QRectF(pts[0], pts[-1]).normalized())
@@ -505,6 +520,8 @@ def shape_path(forma: dict) -> QPainterPath:
 
 
 def paint_shape(p: QPainter, forma: dict):
+    if forma.get("tipo") == "difuminar":     # no se dibuja: se aplica a la imagen
+        return
     color = QColor(forma.get("color", "#e6542f"))
     color.setAlpha(int(forma.get("alpha", 255)))
     if forma.get("tipo") == "texto":
@@ -526,10 +543,36 @@ def paint_shape(p: QPainter, forma: dict):
     p.drawPath(shape_path(forma))
 
 
+def blur_regions(img: QImage, formas: list, t: QTransform) -> QImage:
+    """Desenfoca las zonas marcadas con la herramienta Blur area.
+
+    Se aplican antes que el resto de dibujos, sobre la imagen ya editada, asi
+    que una flecha o un texto encima de la zona se quedan nitidos."""
+    zonas = [f for f in formas if f.get("tipo") == "difuminar" and f.get("puntos")]
+    if not zonas:
+        return img
+    if img.format() not in (QImage.Format.Format_ARGB32, QImage.Format.Format_RGB32):
+        img = img.convertToFormat(QImage.Format.Format_ARGB32)
+    else:
+        img = QImage(img)
+    for f in zonas:
+        a, b = f["puntos"][0], f["puntos"][-1]
+        r = t.mapRect(QRectF(QPointF(*a), QPointF(*b)).normalized()) \
+             .toAlignedRect().intersected(img.rect())
+        if r.width() < 2 or r.height() < 2:
+            continue
+        parte = _blur(img.copy(r), max(4, min(r.width(), r.height()) // 6))
+        p = QPainter(img)
+        p.drawImage(r.topLeft(), parte)
+        p.end()
+    return img
+
+
 def draw_annotations(img: QImage, edit: dict | None, src_w: int, src_h: int) -> QImage:
     formas = (edit or {}).get("draw") or []
     if not formas or img.isNull():
         return img
+    img = blur_regions(img, formas, source_to_display_transform(edit, src_w, src_h))
     if img.format() not in (QImage.Format.Format_ARGB32,
                             QImage.Format.Format_RGB32,
                             QImage.Format.Format_ARGB32_Premultiplied):
@@ -561,6 +604,9 @@ def edit_signature(edit: dict | None) -> str:
         # sin giro libre la firma queda como antes de existir el angulo, y las
         # miniaturas ya cacheadas de ediciones viejas siguen valiendo
         del d["angle"]
+    for k in ("blur", "hue", "sat", "light"):
+        if not d.get(k):
+            d.pop(k, None)           # idem: las ediciones viejas conservan su firma
     return json.dumps(d, sort_keys=True)
 
 
@@ -575,6 +621,50 @@ def _brightness_contrast(img: QImage, bright: int, contrast: int) -> QImage:
     # en RGB32 el cuarto byte se ignora al pintar, asi que traducirlo es inocuo
     return QImage(datos, img.width(), img.height(), img.bytesPerLine(),
                   QImage.Format.Format_RGB32).copy()
+
+
+def _hsl_adjust(img: QImage, hue: int, sat: int, light: int) -> QImage:
+    """Tono (-180..180 grados), saturacion y luz (-100..100) de golpe.
+
+    Tono y saturacion son una sola matriz 3x3 sobre RGB; la luz mezcla hacia
+    blanco o negro. Todo vectorizado: pixel a pixel en Python no vale."""
+    if np is None:
+        return img
+    img = img.convertToFormat(QImage.Format.Format_RGB32)
+    w, h = img.width(), img.height()
+    a = np.frombuffer(bytes(img.constBits()), np.uint8).reshape(h, -1, 4).copy()
+    rgb = a[:, :w, 2::-1].astype(np.float32)          # la memoria es B,G,R,A
+    s = 1.0 + sat / 100.0
+    lum = np.array([[0.213, 0.715, 0.072]] * 3, np.float32)
+    msat = s * np.eye(3, dtype=np.float32) + (1 - s) * lum
+    c, n = math.cos(math.radians(hue)), math.sin(math.radians(hue))
+    mhue = np.array([
+        [.213 + c * .787 - n * .213, .715 - c * .715 - n * .715, .072 - c * .072 + n * .928],
+        [.213 - c * .213 + n * .143, .715 + c * .285 + n * .140, .072 - c * .072 - n * .283],
+        [.213 - c * .213 - n * .787, .715 - c * .715 + n * .715, .072 + c * .928 + n * .072],
+    ], np.float32)
+    out = rgb @ (mhue @ msat).T
+    if light > 0:
+        out += (255 - out) * (light / 100.0)
+    elif light < 0:
+        out *= 1 + light / 100.0
+    a[:, :w, :3] = np.clip(out, 0, 255).astype(np.uint8)[:, :, ::-1]
+    return QImage(a.tobytes(), w, h, a.shape[1] * 4,
+                  QImage.Format.Format_RGB32).copy()
+
+
+def _blur(img: QImage, radio: int) -> QImage:
+    """Desenfoque barato: encoger y volver a ampliar suavizado (en Python pixel
+    a pixel no vale). El radio va en pixeles de la imagen decodificada."""
+    w, h = img.width(), img.height()
+    f = 1 + radio
+    pw, ph = max(1, w // f), max(1, h // f)
+    if (pw, ph) == (w, h):
+        return img
+    peq = img.scaled(pw, ph, Qt.AspectRatioMode.IgnoreAspectRatio,
+                     Qt.TransformationMode.SmoothTransformation)
+    return peq.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio,
+                      Qt.TransformationMode.SmoothTransformation)
 
 
 def apply_edit(img: QImage, edit: dict | None) -> QImage:
@@ -601,7 +691,8 @@ def apply_edit(img: QImage, edit: dict | None) -> QImage:
     # gris, brillo y contraste trabajan sin transparencia: se aparta y se
     # devuelve despues, o las esquinas de una imagen girada saldrian negras
     alfa = None
-    if ((edit.get("gray") or edit.get("bright") or edit.get("contrast"))
+    color = (edit.get("hue") or edit.get("sat") or edit.get("light")) and np
+    if ((edit.get("gray") or edit.get("bright") or edit.get("contrast") or color)
             and img.hasAlphaChannel()):
         alfa = img.convertToFormat(QImage.Format.Format_Alpha8)
     if edit.get("gray"):
@@ -610,9 +701,14 @@ def apply_edit(img: QImage, edit: dict | None) -> QImage:
     if edit.get("bright") or edit.get("contrast"):
         img = _brightness_contrast(img, edit.get("bright", 0),
                                    edit.get("contrast", 0))
+    if color:
+        img = _hsl_adjust(img, edit.get("hue", 0), edit.get("sat", 0),
+                          edit.get("light", 0))
     if alfa is not None:
         img = img.convertToFormat(QImage.Format.Format_ARGB32)
         img.setAlphaChannel(alfa)
+    if edit.get("blur"):
+        img = _blur(img, int(edit["blur"]))
     rs = edit.get("resize")
     if rs and rs[0] > 0 and rs[1] > 0 and (img.width(), img.height()) != tuple(rs):
         img = img.scaled(rs[0], rs[1], Qt.AspectRatioMode.IgnoreAspectRatio,
@@ -633,6 +729,8 @@ def scaled_edit(edit: dict | None, k: float) -> dict | None:
     if e.get("crop"):
         x, y, w, h = e["crop"]
         e["crop"] = [int(x * k), int(y * k), max(1, int(w * k)), max(1, int(h * k))]
+    if e.get("blur"):                     # el desenfoque encoge con la imagen
+        e["blur"] = int(round(e["blur"] * k))
     if e.get("draw"):                     # los dibujos encogen con la imagen
         e["draw"] = [dict(f, puntos=[[x * k, y * k] for x, y in f.get("puntos", [])],
                           grosor=max(0.1, f.get("grosor", 4) * k))
@@ -2394,7 +2492,8 @@ class FullRenderTask(QRunnable):
             self.token, apply_edit(self.src, scaled_edit(self.edit, self.scale)))
 
 
-DRAW_TOOLS = ("trazo", "rotulador", "linea", "flecha", "rect", "elipse", "texto")
+DRAW_TOOLS = ("trazo", "rotulador", "linea", "flecha", "rect", "elipse", "texto",
+              "difuminar")
 
 # Los 8 del arco iris mas blanco y negro
 DRAW_COLORS = [("Red", "#e81123"), ("Orange", "#f7630c"), ("Yellow", "#fcd116"),
@@ -2599,6 +2698,16 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
         p.drawRect(QRectF(m, m + 1.5, M - m, M - m - 3))
     elif kind == "ellipse":
         p.drawEllipse(QRectF(m, m + 1.5, M - m, M - m - 3))
+    elif kind == "blurarea":
+        p.setPen(QPen(tinta, 1.4, Qt.PenStyle.DashLine))
+        p.drawRect(QRectF(m, m, M - m, M - m))
+        p.setPen(Qt.PenStyle.NoPen)
+        for i in range(3):
+            for j in range(3):
+                c = QColor(tinta)
+                c.setAlpha(60 + 60 * ((i + j) % 3))
+                p.setBrush(c)
+                p.drawRect(QRectF(m + 2 + i * 3.6, m + 2 + j * 3.6, 3.6, 3.6))
     elif kind == "text":
         p.drawLine(m + 1, m + 1, M - 1, m + 1)
         p.drawLine(size / 2, m + 1, size / 2, M)
@@ -2898,6 +3007,41 @@ class CropView(QGraphicsView):
             self.cropped.emit(self.mapToScene(band).boundingRect())
 
 
+class HoldKey(QObject):
+    """Una tecla que vale mientras se mantiene pulsada (antes / despues).
+
+    Filtro a nivel de aplicacion: si no, una lista que busca por letra o un
+    visor que ya usa la tecla se la quedarian. No actua si se esta escribiendo
+    ni si la ventana no esta activa, y suelta sola si la ventana pierde el
+    foco con la tecla pulsada."""
+
+    def __init__(self, tecla: str, ventana: QWidget, callback):
+        super().__init__(ventana)
+        self.key = QKeySequence(tecla)[0].key()
+        self.ventana, self.callback = ventana, callback
+        self.activa = False
+        QApplication.instance().installEventFilter(self)
+
+    def _set(self, valor: bool):
+        if valor != self.activa:
+            self.activa = valor
+            self.callback(valor)
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        if t == QEvent.Type.WindowDeactivate and obj is self.ventana:
+            self._set(False)
+        elif (t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease)
+                and ev.key() == self.key and not ev.modifiers()
+                and (self.activa or QApplication.activeWindow() is self.ventana)):
+            if isinstance(QApplication.focusWidget(), QLineEdit):
+                return False
+            if not ev.isAutoRepeat():
+                self._set(t == QEvent.Type.KeyPress)
+            return True
+        return False
+
+
 class EditorDialog(QDialog):
     """Editor no destructivo: monta una receta, no toca el archivo."""
 
@@ -2907,6 +3051,7 @@ class EditorDialog(QDialog):
         self.edit = dict(empty_edit(), **(edit or {}))
         self._undo: list = []
         self._redo: list = []
+        self._before = False                   # Z mantenida: se ve el original
         self.src_full: QImage | None = None    # el original entero, cuando llegue
         self.full_scale = 1.0
         self.render_scale = 1.0                # escala de lo que se ve ahora
@@ -2999,6 +3144,8 @@ class EditorDialog(QDialog):
                 ("rect", "rect", "Rectangle", "Rectangle"),
                 ("elipse", "ellipse", "Ellipse", "Ellipse"),
                 ("texto", "text", "Text", "Click and type"),
+                ("difuminar", "blurarea", "Blur area",
+                 "Drag a rectangle to blur what is inside (names, faces\u2026)"),
                 ("goma", "eraser", "Eraser", "Remove the drawing you click on"),
                 ("recortar", "crop", "Crop", "Drag a rectangle over the image")):
             b = QToolButton()
@@ -3062,6 +3209,18 @@ class EditorDialog(QDialog):
         self.chk_gray = QCheckBox("Black and white")
         ajustes.addWidget(self.chk_gray)
         ajustes.addStretch(1)
+
+        color = QHBoxLayout()
+        self.sld_color = {}
+        for clave, nombre, lo, hi in ADJUST_SLIDERS[2:]:
+            color.addWidget(QLabel(nombre))
+            sld = QSlider(Qt.Orientation.Horizontal)
+            sld.setRange(lo, hi)
+            sld.setFixedWidth(120)
+            color.addWidget(sld)
+            self.sld_color[clave] = sld
+        self.sld_blur = self.sld_color["blur"]
+        color.addStretch(1)
 
         tam = QHBoxLayout()
         tam.addWidget(QLabel("Output size:"))
@@ -3156,11 +3315,13 @@ class EditorDialog(QDialog):
         lay.addLayout(geo)
         lay.addLayout(dibujo)
         lay.addLayout(ajustes)
+        lay.addLayout(color)
         lay.addLayout(tam)
         lay.addLayout(zoom)
         lay.addLayout(final)
 
         QShortcut(QKeySequence("0"), self, self.fit)
+        HoldKey("Z", self, self.set_before)
         QShortcut(QKeySequence.StandardKey.Undo, self, self.undo)
         QShortcut(QKeySequence.StandardKey.Redo, self, self.redo)
         extra_redo_shortcut(self, self.redo)
@@ -3173,6 +3334,10 @@ class EditorDialog(QDialog):
         self.sld_bright.setValue(self.edit["bright"])
         self.sld_contrast.setValue(self.edit["contrast"])
         self.chk_gray.setChecked(self.edit["gray"])
+        for clave, sld in self.sld_color.items():
+            sld.setValue(self.edit[clave])
+            sld.sliderPressed.connect(lambda c=clave: self.push(c))
+            sld.valueChanged.connect(self.on_adjust)
         self.sld_bright.sliderPressed.connect(lambda: self.push("brightness"))
         self.sld_contrast.sliderPressed.connect(lambda: self.push("contrast"))
         self.sld_bright.valueChanged.connect(self.on_adjust)
@@ -3232,7 +3397,8 @@ class EditorDialog(QDialog):
         if self.src_full is None:
             return
         self._pool.start(FullRenderTask(self._render_token, self.src_full,
-                                        self.edit, self.full_scale, self._signals))
+                                        self.view_edit(), self.full_scale,
+                                        self._signals))
 
     @Slot(int, QImage)
     def on_rendered(self, token: int, img: QImage):
@@ -3252,7 +3418,7 @@ class EditorDialog(QDialog):
 
         self.item.setPixmap(QPixmap.fromImage(img))
         self.scene.setSceneRect(self.item.boundingRect())
-        ancho_final = edited_size(self.edit, *self.full_size)[0] or 1
+        ancho_final = edited_size(self.view_edit(), *self.full_size)[0] or 1
         self.render_scale = (img.width() or 1) / ancho_final
 
         if antes_pct is not None:
@@ -3304,7 +3470,8 @@ class EditorDialog(QDialog):
     def sync_widgets(self):
         """Pone los controles al dia sin volver a disparar el render."""
         for wgt, val in ((self.sld_bright, self.edit["bright"]),
-                         (self.sld_contrast, self.edit["contrast"])):
+                         (self.sld_contrast, self.edit["contrast"]),
+                         *((sld, self.edit[c]) for c, sld in self.sld_color.items())):
             wgt.blockSignals(True)
             wgt.setValue(val)
             wgt.blockSignals(False)
@@ -3501,7 +3668,9 @@ class EditorDialog(QDialog):
             visible = dict(f, puntos=[[p.x() * k, p.y() * k]
                                       for p in (t.map(QPointF(x, y))
                                                 for x, y in f["puntos"])])
-            if f["tipo"] == "texto":
+            if f["tipo"] == "difuminar":
+                toca = shape_path(visible).contains(punto)
+            elif f["tipo"] == "texto":
                 x, y = visible["puntos"][0]
                 alto = max(8.0, f.get("grosor", 4) * 5 * k)
                 zona = QRectF(x - alto, y - alto, alto * 12, alto * 1.6)
@@ -3532,6 +3701,8 @@ class EditorDialog(QDialog):
         self.edit["bright"] = self.sld_bright.value()
         self.edit["contrast"] = self.sld_contrast.value()
         self.edit["gray"] = self.chk_gray.isChecked()
+        for clave, sld in self.sld_color.items():
+            self.edit[clave] = sld.value()
         self.render_preview(reajustar=False)      # no mover el zoom por un slider
 
     def on_spin(self, v: int, otro: QSpinBox, es_ancho: bool):
@@ -3566,6 +3737,20 @@ class EditorDialog(QDialog):
         self.render_preview()
 
     # --- pintado -----------------------------------------------------------
+    def view_edit(self) -> dict:
+        """Lo que se ve: la receta, o la imagen original mientras se mantiene Z."""
+        return empty_edit() if self._before else self.edit
+
+    def set_before(self, activo: bool):
+        if activo == self._before or self.item.pixmap().isNull():
+            return
+        antes = edited_size(self.view_edit(), *self.full_size)
+        self._before = activo
+        cambia = antes != edited_size(self.view_edit(), *self.full_size)
+        self.render_preview(reajustar=cambia)
+        self.setWindowTitle(("Edit  \u00b7  " + os.path.basename(self.path))
+                            + ("   \u00b7   BEFORE (original)" if activo else ""))
+
     def render_preview(self, reajustar: bool = True):
         """reajustar=False al mover brillo o contraste: no toca el zoom.
 
@@ -3574,7 +3759,7 @@ class EditorDialog(QDialog):
         """
         self._render_token += 1         # invalida cualquier render en marcha
         primera = self.item.pixmap().isNull()
-        img = apply_edit(self.src, scaled_edit(self.edit, self.scale))
+        img = apply_edit(self.src, scaled_edit(self.view_edit(), self.scale))
         self.set_pixmap(img, mantener_vista=not (primera or reajustar))
         if primera or reajustar:
             self.fit()          # al abrir y al cambiar el encuadre
@@ -3702,7 +3887,8 @@ everything nested inside it, whatever folder the images come from.</li>
 <h3>5 · Editing and drawing</h3>
 <ul>
 <li><i>Edit…</i> (key <b>E</b>) opens the editor: rotate, flip, crop,
-brightness, contrast, black and white, and output size.</li>
+brightness, contrast, hue, saturation, lightness, blur, black and white, and
+output size.</li>
 <li><b>Angle</b> turns the image by any number of degrees (slider, or type
 the exact value). A grid appears while you turn, to straighten a photo by
 eye. The uncovered corners stay transparent, and turn white when you export
@@ -3710,6 +3896,13 @@ to JPG. Crop afterwards to trim them.</li>
 <li><b>Drawing tools</b> like a snipping tool: pen, highlighter, line, arrow,
 rectangle, ellipse and text, in ten colours. The <b>eraser removes the whole
 stroke you click on</b> — each one is an object, not pixels.</li>
+<li><b>Blur area</b> (in the drawing tools) blurs whatever is inside the
+rectangle you drag: names, faces, anything you must hide before sharing.
+Arrows and text drawn on top stay sharp, and the eraser removes the blur.</li>
+<li>Right-click ▸ Edit ▸ <i>Adjust</i> opens <b>live sliders</b> for the
+selected images.</li>
+<li><b>Hold Z</b> to see the image <b>before</b> your edits (in the preview and
+in the editor); release to see it after.</li>
 <li>Drawings and crops <b>follow the image</b>: rotate afterwards and they
 rotate with it.</li>
 <li>Right-click ▸ <i>Edit</i> rotates or flips <b>every selected image at
@@ -3737,6 +3930,7 @@ with the same name instead of duplicating them, and keeps your own edits.</li>
 <tr><td><b>A</b> / <b>B</b></td><td>mark the chosen image as A or B</td></tr>
 <tr><td><b>C</b></td><td>compare A and B</td></tr>
 <tr><td><b>E</b></td><td>open the editor</td></tr>
+<tr><td><b>Z</b> (hold)</td><td>before / after: show the original</td></tr>
 <tr><td><b>0</b></td><td>fit the image in view</td></tr>
 <tr><td><b>Ctrl+1…9</b></td><td>assign to the first nine categories</td></tr>
 <tr><td><b>Ctrl+Z</b> / <b>Ctrl+Y</b></td><td>undo / redo</td></tr>
@@ -3793,6 +3987,83 @@ def help_html() -> str:
     elif not sys.platform.startswith("win"):
         html = html.replace("cache\\", "cache/")
     return html
+
+
+class AdjustPanel(QDialog):
+    """Sliders en tiempo real sobre las imagenes seleccionadas.
+
+    No es modal: se queda abierto mientras miras la vista previa y las
+    miniaturas. Cada slider escribe solo su propio valor en la receta de cada
+    imagen (las demas ediciones de cada una se respetan), con un breve retardo
+    para no repintar miniaturas a cada pixel del arrastre."""
+
+    def __init__(self, win, paths: list[str]):
+        super().__init__(win)
+        self.setWindowTitle("Adjust %d image(s)" % len(paths))
+        self.setWindowFlag(Qt.WindowType.Tool, True)
+        self.win, self.paths = win, paths
+        self._pendientes: dict[str, int] = {}
+        self._undo_hecho = False
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(40)
+        self._timer.timeout.connect(self.flush)
+        base = dict(empty_edit(), **(win.edits.get(paths[0]) or {}))
+        lay = QVBoxLayout(self)
+        self.sliders: dict[str, QSlider] = {}
+        self.valores: dict[str, QLabel] = {}
+        for clave, nombre, lo, hi in ADJUST_SLIDERS:
+            fila = QHBoxLayout()
+            et = QLabel(nombre)
+            et.setFixedWidth(80)
+            sld = QSlider(Qt.Orientation.Horizontal)
+            sld.setRange(lo, hi)
+            sld.setValue(base[clave])
+            sld.setMinimumWidth(220)
+            val = QLabel(str(base[clave]))
+            val.setFixedWidth(36)
+            sld.valueChanged.connect(lambda v, c=clave: self.changed(c, v))
+            sld.mouseDoubleClickEvent = lambda e, c=clave: self.sliders[c].setValue(0)
+            fila.addWidget(et)
+            fila.addWidget(sld, 1)
+            fila.addWidget(val)
+            lay.addLayout(fila)
+            self.sliders[clave], self.valores[clave] = sld, val
+        if np is None:
+            aviso = QLabel("Hue, saturation and lightness need numpy installed.")
+            lay.addWidget(aviso)
+        botones = QHBoxLayout()
+        b_reset = QPushButton("Reset")
+        b_reset.clicked.connect(self.reset)
+        b_cerrar = QPushButton("Close")
+        b_cerrar.clicked.connect(self.close)
+        botones.addStretch(1)
+        botones.addWidget(b_reset)
+        botones.addWidget(b_cerrar)
+        lay.addLayout(botones)
+
+    def changed(self, clave: str, valor: int):
+        self.valores[clave].setText(str(valor))
+        self._pendientes[clave] = valor
+        self._timer.start()
+
+    def reset(self):
+        for sld in self.sliders.values():
+            sld.setValue(0)
+        self.flush()
+
+    def flush(self):
+        if not self._pendientes:
+            return
+        if not self._undo_hecho:             # toda la sesion es un paso de deshacer
+            self.win.push_undo("adjust (%d images)" % len(self.paths))
+            self._undo_hecho = True
+        cambios, self._pendientes = self._pendientes, {}
+        self.win.apply_adjust(self.paths, cambios)
+
+    def closeEvent(self, ev):
+        self.flush()
+        super().closeEvent(ev)
 
 
 class HelpDialog(QDialog):
@@ -4132,7 +4403,9 @@ class MainWindow(QMainWindow):
         self.view.selectionModel().selectionChanged.connect(self.on_selection_changed)
 
         self.preview = PreviewPane()
-        self.preview.edit_for = self.edit_of
+        self.preview.edit_for = self.preview_edit_of
+        self._before = False
+        HoldKey("Z", self, self.set_before)
         self.preview.marks_for = self.marks_of
         self.preview.on_marks_changed = self.set_video_marks
         self.preview.openBig.connect(self.open_viewer_current)
@@ -5074,6 +5347,21 @@ class MainWindow(QMainWindow):
     def edit_of(self, path: str | None) -> dict | None:
         return self.edits.get(path) if path else None
 
+    def preview_edit_of(self, path: str | None) -> dict | None:
+        """Como edit_of, pero sin ediciones mientras se mantiene Z."""
+        return None if self._before else self.edit_of(path)
+
+    def set_before(self, activo: bool):
+        """Antes / despues: con Z pulsada la vista previa ensena el original."""
+        self._before = activo
+        pv = self.preview
+        if pv.comparing:
+            pv.compare(pv.path, pv.path_b, pv.sld_opacity.value())
+        elif pv.path and not is_video(pv.path):
+            pv.show_path(pv.path, immediate=True)
+        self.statusBar().showMessage("BEFORE \u2014 original, no edits (release Z)"
+                                     if activo else "", 0)
+
     def is_edited(self, path: str | None) -> bool:
         return bool(path) and not is_empty_edit(self.edits.get(path))
 
@@ -5112,6 +5400,28 @@ class MainWindow(QMainWindow):
             self.set_edit(path, d.edit)
             self.statusBar().showMessage(
                 "Edit saved (the original file was not touched).", 6000)
+
+    def open_adjust(self):
+        sel = [p for p in self.selected_images() if not is_video(p)]
+        if not sel:
+            self.statusBar().showMessage("Pick an image first.", 4000)
+            return
+        if getattr(self, "_adjust", None):
+            self._adjust.close()
+        self._adjust = AdjustPanel(self, sel)
+        self._adjust.show()
+
+    def apply_adjust(self, paths: list[str], cambios: dict):
+        for p in paths:
+            anterior = self.edits.get(p)
+            e = dict(empty_edit(), **(anterior or {}))
+            e.update(cambios)
+            drop_thumb_cache(p, anterior)
+            if is_empty_edit(e):
+                self.edits.pop(p, None)
+            else:
+                self.edits[p] = e
+        self.refresh_edited(paths)
 
     def quick_edit(self, cambio: str):
         """Rotar o voltear de golpe todo lo seleccionado, sin abrir el editor."""
@@ -5296,6 +5606,8 @@ class MainWindow(QMainWindow):
             ed.addAction("Rotate 90 right", lambda: self.quick_edit("derecha"))
             ed.addAction("Flip horizontally", lambda: self.quick_edit("flip_h"))
             ed.addAction("Flip vertically", lambda: self.quick_edit("flip_v"))
+            ed.addSeparator()
+            ed.addAction("Adjust (live sliders)\u2026", self.open_adjust)
             if any(self.is_edited(p) for p in sel):
                 ed.addSeparator()
                 ed.addAction("Remove the edits", lambda: self.quick_edit("reset"))

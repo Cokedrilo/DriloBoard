@@ -20,7 +20,7 @@ if [ ! -x "$PY" ]; then
     python3 -m venv .venv
     "$PY" -m pip install --upgrade pip
 fi
-"$PY" -m pip install --quiet PySide6-Essentials PySide6-Addons pyinstaller
+"$PY" -m pip install --quiet PySide6-Essentials PySide6-Addons numpy pyinstaller
 
 VERSION=$("$PY" -c "import re;print(re.search(r'^VERSION = \"([^\"]+)\"', open('driloboard.py', encoding='utf-8').read(), re.M).group(1))")
 

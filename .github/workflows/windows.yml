@@ -1,0 +1,91 @@
+# Construye el paquete portable de Windows y lo sube a la release.
+#
+# Solo: al publicar una release en GitHub, se anade su
+# DriloBoard-<version>-portable-win64.zip.
+# A mano, para una release ya publicada:
+#   gh workflow run windows.yml -f tag=v1.4.1
+# Desde un Mac no se puede: PyInstaller solo empaqueta para el sistema en el
+# que corre.
+name: Windows package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v1.4.1"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      # el codigo de la version que se publica...
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          path: src
+      # ...y el LEEME de este mismo workflow, que puede ser mas nuevo
+      - uses: actions/checkout@v4
+        with:
+          path: ci
+          sparse-checkout: windows
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Environment
+        shell: bash
+        working-directory: src
+        run: |
+          python -m venv .venv
+          .venv/Scripts/python.exe -m pip install --upgrade pip
+          # Addons trae el video; sin el, --selftest falla
+          .venv/Scripts/python.exe -m pip install PySide6-Essentials PySide6-Addons numpy pyinstaller
+
+      - name: Tests
+        shell: bash
+        working-directory: src
+        run: .venv/Scripts/python.exe tests/correr_tests.py
+
+      - name: Build
+        shell: bash
+        working-directory: src
+        run: .venv/Scripts/python.exe -m PyInstaller DriloBoard.spec --noconfirm
+
+      - name: Selftest
+        shell: pwsh
+        working-directory: src
+        run: |
+          # el exe no tiene consola: lo que cuenta es el codigo de salida
+          $p = Start-Process -FilePath dist\DriloBoard\DriloBoard.exe -ArgumentList '--selftest' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "selftest failed: $($p.ExitCode)" }
+          # cualquier ejecucion crea estas; no pintan nada en el paquete
+          Remove-Item -Recurse -Force dist\DriloBoard\cache, dist\DriloBoard\biblioteca.json -ErrorAction SilentlyContinue
+
+      - name: Zip
+        shell: pwsh
+        working-directory: src
+        run: |
+          $v = (Select-String -Path driloboard.py -Pattern '^VERSION = "([^"]+)"').Matches[0].Groups[1].Value
+          if ("v$v" -ne $env:TAG) { throw "driloboard.py says $v but the tag is $env:TAG" }
+          $leeme = (Get-Content ..\ci\windows\LEEME.txt -Raw).Replace('{VERSION}', $v)
+          Set-Content -Path dist\DriloBoard\LEEME.txt -Value $leeme -NoNewline -Encoding ascii
+          Copy-Item README.es.md, LICENSE, THIRD-PARTY-NOTICES.md dist\DriloBoard\
+          $zip = "DriloBoard-$v-portable-win64.zip"
+          Compress-Archive -Path dist\DriloBoard\* -DestinationPath $zip
+          "ZIP=$zip" >> $env:GITHUB_ENV
+
+      - name: Upload to the release
+        shell: bash
+        working-directory: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$ZIP" --clobber --repo "$GITHUB_REPOSITORY"

@@ -1,0 +1,56 @@
+DriloBoard {VERSION} - portable
+============================
+
+No hay que instalar nada. Copia esta carpeta donde quieras (disco duro, USB,
+carpeta de red) y ejecuta DriloBoard.exe.
+
+Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
+como funciona todo. El manual en espanol esta en README.es.md.
+
+Novedades de la 1.4:
+
+  - GIF animados: salen con un distintivo GIF y se animan en la vista previa
+    y en la ventana grande. Debajo, pausa, fotograma a fotograma ( ,  y  . )
+    y una barra de fotogramas. Espacio = play / pausa en la ventana grande.
+    Export copia tal cual un GIF sin editar, asi que sigue animado.
+  - Nota y comentario por archivo: panel "Grade & comment" debajo de las
+    categorias. Nota de 0 a 10 (con decimales) y un comentario libre, para
+    imagenes, GIF y videos. Tecla N para ir a la nota. La nota sale en la
+    miniatura (roja, ambar o verde); un bocadillo indica que hay comentario.
+    Se deshacen con Ctrl+Z y viajan con Library > Export library.
+  - "Copy comment" copia el texto del comentario al portapapeles.
+  - Ocultar notas y comentarios de golpe (por ejemplo para proyectar en
+    clase): casilla "Grades" encima de las miniaturas, menu View o Ctrl+G.
+    No se borra nada.
+  - Panel de ajustes en vivo: clic derecho > Edit > Adjust. Brillo, contraste,
+    tono, saturacion, luz y desenfoque sobre las imagenes elegidas.
+  - "Blur area" en las herramientas de dibujo: difumina nombres o caras.
+  - Manten pulsada la Z para ver la imagen antes de tus ediciones.
+  - Atajos de teclado editables: Help > Keyboard shortcuts (Ctrl+K).
+  - Icono nuevo e interfaz mas limpia.
+
+Todo lo tuyo vive dentro de esta misma carpeta:
+
+  biblioteca.json   carpetas, categorias, ediciones, dibujos, notas y ajustes
+  atajos.json       los atajos de teclado que hayas cambiado
+  cache\            miniaturas ya generadas (se puede borrar sin miedo)
+
+Para actualizar desde una version anterior, copia tu biblioteca.json (y
+atajos.json si lo tienes) a la carpeta nueva: todo sigue igual.
+
+Copiando la carpeta entera te llevas tambien toda la clasificacion. Para
+llevartela a otro ordenador donde las imagenes esten en otra ruta, usa el menu
+Library > Export library, que guarda las rutas de forma que se pueden reapuntar
+al importar.
+
+IMPORTANTE: DriloBoard nunca modifica tus imagenes ni tus videos. Los
+recortes, giros, dibujos, notas y comentarios se guardan como instrucciones
+en la biblioteca. Para obtener archivos ya editados usa el boton Export.
+
+La interfaz esta en ingles. El manual (README.es.md) esta en espanol.
+
+Licencias: DriloBoard es MIT (LICENSE). El paquete incluye Qt (PySide6) y
+FFmpeg bajo LGPL, y Python; los detalles estan en THIRD-PARTY-NOTICES.md.
+
+Comprobar que la copia esta bien:  DriloBoard.exe --selftest
+(no abre nada; devuelve codigo 0 si todo esta en su sitio, video incluido)

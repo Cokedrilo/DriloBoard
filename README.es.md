@@ -83,6 +83,16 @@ pones `CODESIGN_IDENTITY`), pasa el `--selftest` y deja
 instrucciones. Si el Python es universal2 (el de Apple o el de python.org) la
 app sirve para Intel y Apple Silicon a la vez.
 
+**Windows sin tener un PC con Windows.** Al publicar una release en GitHub,
+el workflow `.github/workflows/windows.yml` la construye en una máquina
+Windows de GitHub: pasa las pruebas, empaqueta, comprueba el `--selftest` y
+sube `DriloBoard-<versión>-portable-win64.zip` a la release, con el LEEME de
+`windows/LEEME.txt`. Para una release ya publicada, a mano:
+
+```
+gh workflow run windows.yml -f tag=v1.4.1
+```
+
 ## Pasar las pruebas
 
 ```

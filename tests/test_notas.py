@@ -160,6 +160,62 @@ assert QApplication.focusWidget() in (w.spn_grade, w.spn_grade.findChild(visor.Q
 assert "note" in dict((i, k) for i, _t, k in visor.SHORTCUT_DEFS)
 print("   N lleva a la casilla de la nota")
 
+print("\n6b. NOTA DESDE LA VISTA PREVIA Y LA VENTANA GRANDE")
+caja = pv.notes_box
+assert caja is not None and caja.isVisible() and pv.b_notes.isChecked(), \
+    "la barra de nota de la vista previa deberia verse"
+w.view.setCurrentIndex(w.model.index(2))
+assert caja.path == p2 and caja.spn.value() < 0
+caja.spn.setValue(7.25)
+caja.txt.setPlainText("desde la vista previa")
+caja.commit()
+assert w.notes[p2] == {"grade": 7.25, "comment": "desde la vista previa"}, w.notes[p2]
+assert w.spn_grade.value() == 7.25 and w.txt_comment.toPlainText() == "desde la vista previa", \
+    "el panel de la derecha no se entero"
+assert espera(lambda: "Grade 7.25" in pv.caption.text())
+pasos = len(w._undo)
+w.undo()
+assert p2 not in w.notes and caja.spn.value() < 0 and caja.path == p2, \
+    "deshacer no llego a la barra de la vista previa"
+w.redo()
+assert w.notes[p2]["grade"] == 7.25 and caja.spn.value() == 7.25
+
+v = visor.ImageViewer(w.model.paths(), 0, w)
+v.show()
+v.activateWindow()
+app.processEvents()
+vb = v.pane.notes_box
+assert vb is not None and vb in w.note_editors and vb.isVisible()
+assert vb.path == p0 and vb.spn.value() == w.notes[p0]["grade"]
+v.step(1)                                   # flecha: la barra sigue al archivo
+assert vb.path == p1 and vb.spn.value() == 4.0, (vb.path, vb.spn.value())
+# escribir en el comentario no pasa de imagen ni reproduce
+vb.txt.setFocus()
+app.processEvents()
+QTest.keyClicks(vb.txt, "ok f")
+QTest.keyClick(vb.txt, Qt.Key.Key_Space)
+QTest.keyClick(vb.txt, Qt.Key.Key_Left)
+QTest.keyClick(vb.txt, Qt.Key.Key_Right)
+app.processEvents()
+assert v.i == 1, "una tecla del comentario cambio de imagen"
+assert not v.isFullScreen(), "la F del comentario puso pantalla completa"
+assert vb.txt.toPlainText() == "ok f ", repr(vb.txt.toPlainText())
+v.pane.b_notes.click()                      # la barra se cierra (y se recuerda)
+assert not vb.isVisible() and w.viewer_notes is False
+assert w.notes[p1]["comment"] == "ok f", "cerrar la barra deberia guardar lo escrito"
+v.pane.open_notes()                         # N: la abre y va a la nota
+assert vb.isVisible() and w.viewer_notes is True
+vb.spn.setValue(5)
+v.close()                                   # al cerrar guarda y se va de la lista
+app.processEvents()
+assert w.notes[p1]["grade"] == 5.0, w.notes[p1]
+assert vb not in w.note_editors
+w.commit_note()                             # sin restos del editor cerrado
+assert w.notes[p1]["grade"] == 5.0
+print("   barra en la vista previa y en la ventana grande, enlazadas con el panel")
+w.store_note(p1, {"grade": 4.0})            # como estaban, para lo que sigue
+w.store_note(p2, {})
+
 print("\n7. OCULTAR NOTAS Y COMENTARIOS")
 w.view.setCurrentIndex(w.model.index(0))
 assert espera(lambda: "Grade" in pv.caption.text())
@@ -167,6 +223,8 @@ w.txt_comment.setFocus()
 w.chk_notes.setChecked(False)               # la casilla
 assert not w.show_notes and not w.act_notes.isChecked(), "el menu no siguio a la casilla"
 assert not w.note_panel.isVisible(), "el panel deberia esconderse"
+assert not pv.notes_box.isVisible() and not pv.b_notes.isVisible(), \
+    "la barra de la vista previa deberia esconderse"
 assert QApplication.focusWidget() is not w.txt_comment, "se quedo escribiendo en un panel oculto"
 assert w.model.data(w.model.index(0), Qt.ItemDataRole.ToolTipRole) == p0, "el bocadillo ensena la nota"
 assert w.visible_note_of(p0) is None and w.note_of(p0), "ocultar no deberia borrar nada"

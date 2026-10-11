@@ -99,11 +99,12 @@ gh workflow run windows.yml -f tag=v1.4.1
 .venv\Scripts\python.exe tests\correr_tests.py
 ```
 
-Quince suites que corren sin abrir ninguna ventana y usan su propio archivo de
+Diecisiete suites que corren sin abrir ninguna ventana y usan su propio archivo de
 estado, así que no pueden tocar tu `biblioteca.json`. Cubren, entre otras cosas, el mapeo de
 coordenadas de recortes y dibujos en 14 combinaciones de transformaciones (y 9
 más con giro libre), los dos temas, el marco azul de la selección, los
-vídeos y sus fotogramas clave, los GIF animados, las notas y comentarios, y
+vídeos con sus fotogramas clave y el bucle, los GIF animados, las notas y
+comentarios y su exportación a PDF, CSV y Word, y
 —dos veces, contrastando marca de tiempo y tamaño— que ni editar ni exportar
 modifican el archivo original.
 
@@ -194,6 +195,13 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
     «◆ Keyframe» avisa cuando estás encima de una. Se guardan con la
     biblioteca (también al exportarla) y se deshacen con `Ctrl+Z`, sin que el
     vídeo vuelva al principio.
+  - **Bucle**: el botón de bucle (o `L`) repite el vídeo entero. Para repetir
+    solo un **tramo**, ve a su primer fotograma y pulsa `I`, luego al último y
+    pulsa `O`: el tramo se pinta en azul sobre la barra de tiempo y la
+    reproducción da vueltas dentro de él. `Shift+L` quita el tramo. El botón
+    de bucle se mantiene al pasar de un vídeo a otro; el tramo es de cada
+    vídeo y no se guarda.
+  - La barra de tiempo va a todo el ancho y los botones, debajo.
   - Cada botón enseña su atajo en un bocadillo al dejar el ratón encima.
   - Desde el código fuente hace falta `pip install PySide6-Addons`; sin él la
     casilla sale desactivada y lo explica. La versión portable ya lo lleva.
@@ -256,6 +264,20 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
 - `Ctrl+Z` deshace notas y comentarios como todo lo demás (por pausas al
   escribir, no letra a letra), y viajan con *Export library…*. Al importar
   fundiendo, tu nota y tu comentario no se pisan: solo se rellena lo que falte.
+- **Desde el reproductor**: la vista previa y el visor grande llevan debajo de
+  la imagen la misma barra de nota y comentario, que sigue al archivo que ves
+  (también al pasar con `←` `→` en el visor grande). El botón *Grade*, junto a
+  *Fit*, la muestra u oculta, y se recuerda; en el visor grande, `N` la abre y
+  te lleva a la nota. Escribir en ella no pasa de imagen ni reproduce.
+- **Exportar a un documento**: *Library* ▸ *Export grades and comments…* (o
+  *Export to a document…* debajo del panel). Entran los archivos **que ves en la
+  rejilla** y que tienen nota o comentario, en el mismo orden; elige el formato
+  al guardar:
+  - **PDF con miniaturas**: para leer o imprimir, con la media arriba.
+  - **Hoja de cálculo (CSV)**: carpeta, archivo, nota, comentario y ruta, una
+    fila por archivo. Con el sistema en español usa `;` y coma decimal, que es
+    lo que espera Excel.
+  - **Word (.docx)**: como el PDF, pero editable.
 - **Ocultarlas**: quita la casilla *Grades* (junto a *Names*), o *View* ▸
   *Show grades and comments*, o `Ctrl+G`. Desaparecen de las miniaturas, los
   bocadillos, el pie de la vista previa, el visor grande y el panel; útil para

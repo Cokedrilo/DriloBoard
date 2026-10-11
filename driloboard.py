@@ -9,6 +9,8 @@ El estado se guarda en biblioteca.json, junto a este script.
 from __future__ import annotations
 
 import copy
+import csv
+import datetime
 import hashlib
 import html
 import json
@@ -20,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from collections import OrderedDict, deque
 from pathlib import Path
 
@@ -28,10 +31,13 @@ try:                      # sin numpy el color (tono/saturacion/luz) no se aplic
 except ImportError:       # pragma: no cover
     np = None
 
-from PySide6.QtCore import (QAbstractListModel, QByteArray, QEvent, QMimeData, QModelIndex,
+from PySide6.QtCore import (QAbstractListModel, QBuffer, QByteArray, QEvent, QLocale,
+                            QMarginsF, QMimeData, QModelIndex,
                             QObject, QPointF, QRect, QRectF, QRunnable, QSize, QSizeF,
                             Qt, QThreadPool, QTimer, QUrl, Signal, Slot)
-from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QIcon, QImage, QImageReader,
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices, QFont, QIcon,
+                           QImage, QImageReader, QPageLayout, QPageSize, QPdfWriter,
+                           QTextDocument,
                            QImageWriter, QKeySequence, QPainter, QPainterPath,
                            QPainterPathStroker, QPalette, QPen, QPixmap, QShortcut,
                            QTextCursor, QTransform)
@@ -156,7 +162,12 @@ VIDEO_KEYS = {
     "key_prev": ("Ctrl+,", "Go to previous keyframe"),
     "key_next": ("Ctrl+.", "Go to next keyframe"),
     "key_del": ("Ctrl+-", "Delete keyframe"),
+    "loop": ("L", "Loop playback"),
+    "loop_in": ("I", "Loop from this frame"),
+    "loop_out": ("O", "Loop up to this frame"),
+    "loop_clear": ("Shift+L", "Clear the loop range"),
 }
+LOOP_COLOR = "#2d8fd5"               # el tramo en bucle, sobre la barra de tiempo
 
 MAC = sys.platform == "darwin"
 
@@ -965,6 +976,268 @@ def export_edited(path: str, edit: dict | None, destino: str):
         return True, destino
     except Exception as e:
         return False, str(e)
+
+
+# --------------------------------------------------------------------------- #
+#  Notas y comentarios a un documento: PDF con miniaturas, hoja de calculo
+#  (CSV) o Word (.docx). El .docx se escribe a mano, sin dependencias: es un
+#  zip con unos pocos XML.
+# --------------------------------------------------------------------------- #
+NOTES_THUMB = 200                    # lado de las miniaturas del documento, en px
+
+
+def notes_rows(paths: list[str], notes: dict) -> list[dict]:
+    """Los archivos con nota o comentario, en el orden dado."""
+    filas = []
+    for p in paths:
+        n = notes.get(p)
+        if n:
+            filas.append({"path": p, "name": os.path.basename(p),
+                          "folder": os.path.basename(os.path.dirname(p)),
+                          "grade": n.get("grade"), "comment": n.get("comment", "")})
+    return filas
+
+
+def notes_summary(filas: list[dict]) -> str:
+    notas = [f["grade"] for f in filas if f["grade"] is not None]
+    texto = "%d file%s" % (len(filas), "" if len(filas) == 1 else "s")
+    if notas:
+        texto += "  ·  %d graded  ·  average %s" % (
+            len(notas), format_grade(round(sum(notas) / len(notas), 2)))
+    return texto
+
+
+def report_thumb(path: str, edit: dict | None, lado: int = NOTES_THUMB) -> QImage:
+    """La miniatura de un archivo para el documento, con sus ediciones.
+
+    Sale de la cache si ya esta (asi tambien los videos); si no, se decodifica
+    reducida. Siempre sobre blanco: las esquinas que deja un giro libre no
+    deben salir negras en el PDF.
+    """
+    cache = thumb_cache_file(path, edit_signature(edit))
+    img = QImage(str(cache)) if cache.exists() else QImage()
+    if img.isNull() and not is_video(path):
+        reader = QImageReader(path)
+        reader.setAutoTransform(True)
+        tam = reader.size()
+        k = 1.0
+        if tam.isValid() and max(tam.width(), tam.height()) > 2 * lado:
+            menor = tam.scaled(QSize(2 * lado, 2 * lado), Qt.AspectRatioMode.KeepAspectRatio)
+            reader.setScaledSize(menor)
+            k = menor.width() / tam.width()
+        img = apply_edit(reader.read(), scaled_edit(edit, k))
+    if img.isNull():
+        # un video aun sin miniatura, o un archivo que ya no esta: un hueco gris
+        img = QImage(lado, lado * 3 // 4, QImage.Format.Format_RGB32)
+        img.fill(QColor("#9a9ca1"))
+        if is_video(path):
+            pt = QPainter(img)
+            pt.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            pt.setPen(Qt.PenStyle.NoPen)
+            pt.setBrush(QColor("white"))
+            c = QPointF(img.width() / 2, img.height() / 2)
+            pt.drawPolygon([c + QPointF(-12, -16), c + QPointF(-12, 16), c + QPointF(16, 0)])
+            pt.end()
+    if img.width() > lado or img.height() > lado:
+        img = img.scaled(lado, lado, Qt.AspectRatioMode.KeepAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+    fondo = QImage(img.size(), QImage.Format.Format_RGB32)
+    fondo.fill(QColor("white"))
+    pt = QPainter(fondo)
+    pt.drawImage(0, 0, img)
+    pt.end()
+    return fondo
+
+
+def write_notes_csv(filas: list[dict], destino: str):
+    """Para Excel o Numbers. Con coma decimal (espanol) el separador es ';',
+    que es lo que esa hoja de calculo espera; si no, ','."""
+    coma = QLocale().decimalPoint() == ","
+    with open(destino, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f, delimiter=";" if coma else ",")
+        w.writerow(["Folder", "File", "Grade", "Comment", "Path"])
+        for r in filas:
+            g = "" if r["grade"] is None else format_grade(r["grade"])
+            w.writerow([r["folder"], r["name"], g.replace(".", ",") if coma else g,
+                        r["comment"], r["path"]])
+
+
+def notes_html(filas: list[dict], titulo: str, subtitulo: str, thumbs: list[QImage]) -> str:
+    """El documento en el HTML que entiende QTextDocument, para el PDF."""
+    def celda_nota(g):
+        if g is None:
+            return "<td align='center' style='color:#999999'>\u2014</td>"
+        return ("<td align='center' bgcolor='%s' style='color:white; font-weight:bold; "
+                "font-size:13pt'>%s</td>" % (grade_color(g), format_grade(g)))
+    filas_html = []
+    for i, (r, img) in enumerate(zip(filas, thumbs)):
+        k = min(1.0, 110 / max(img.width(), img.height(), 1))
+        filas_html.append(
+            "<tr><td width='120' align='center'><img src='thumb:%d' width='%d' height='%d'></td>"
+            "<td width='150'><b>%s</b><br><span style='color:#777777'>%s</span></td>%s"
+            "<td>%s</td></tr>"
+            % (i, img.width() * k, img.height() * k, html.escape(r["name"]),
+               html.escape(r["folder"]), celda_nota(r["grade"]),
+               html.escape(r["comment"]).replace("\n", "<br>")))
+    return ("<h2 style='margin-bottom:0'>%s</h2><p style='color:#555555'>%s</p>"
+            "<table width='100%%' cellspacing='0' cellpadding='6' border='1' "
+            "style='border-color:#cccccc; border-collapse:collapse'>"
+            "<thead><tr style='background:#eeeeee'><th>&nbsp;</th><th align='left'>File</th>"
+            "<th width='60'>Grade</th><th align='left'>Comment</th></tr></thead>%s</table>"
+            % (html.escape(titulo), html.escape(subtitulo), "".join(filas_html)))
+
+
+def write_notes_pdf(filas: list[dict], destino: str, titulo: str, subtitulo: str,
+                    thumbs: list[QImage]):
+    writer = QPdfWriter(destino)
+    writer.setTitle(titulo)
+    writer.setCreator(APP_NAME)
+    writer.setPageLayout(QPageLayout(QPageSize(QPageSize.PageSizeId.A4),
+                                     QPageLayout.Orientation.Portrait,
+                                     QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter))
+    doc = QTextDocument()           # print_ ya deja sus 2 cm de margen y el numero de pagina
+    f = QFont()
+    f.setPointSize(10)
+    doc.setDefaultFont(f)
+    for i, img in enumerate(thumbs):
+        doc.addResource(int(QTextDocument.ResourceType.ImageResource),
+                        QUrl("thumb:%d" % i), img)
+    doc.setHtml(notes_html(filas, titulo, subtitulo, thumbs))
+    doc.print_(writer)
+
+
+def _png_bytes(img: QImage) -> bytes:
+    buf = QBuffer()
+    buf.open(QBuffer.OpenModeFlag.WriteOnly)
+    img.save(buf, "PNG")
+    return bytes(buf.data())
+
+
+def write_notes_docx(filas: list[dict], destino: str, titulo: str, subtitulo: str,
+                     thumbs: list[QImage]):
+    """Un .docx minimo: titulo, una linea de resumen y una tabla con la
+    miniatura, el archivo, la nota (en su color) y el comentario."""
+    def x(t):
+        return html.escape(t, quote=False)
+
+    def parrafo(texto, negrita=False, tam=None, color=None, centro=False, relleno=None):
+        props = '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>'
+        if negrita:
+            props += "<w:b/>"
+        if color:
+            props += '<w:color w:val="%s"/>' % color
+        if tam:
+            props += '<w:sz w:val="%d"/>' % tam
+        trozos = []
+        for n, linea in enumerate(texto.split("\n")):
+            if n:
+                trozos.append("<w:r><w:br/></w:r>")
+            trozos.append('<w:r><w:rPr>%s</w:rPr><w:t xml:space="preserve">%s</w:t></w:r>'
+                          % (props, x(linea)))
+        ppr = '<w:pPr><w:spacing w:after="0"/>%s</w:pPr>' % ('<w:jc w:val="center"/>' if centro else "")
+        return "<w:p>%s%s</w:p>" % (ppr, "".join(trozos))
+
+    def celda(ancho, contenido, relleno=None, centro_v=True):
+        tcpr = '<w:tcW w:w="%d" w:type="dxa"/>' % ancho
+        if relleno:
+            tcpr += '<w:shd w:val="clear" w:color="auto" w:fill="%s"/>' % relleno
+        if centro_v:
+            tcpr += '<w:vAlign w:val="center"/>'
+        return "<w:tc><w:tcPr>%s</w:tcPr>%s</w:tc>" % (tcpr, contenido)
+
+    def imagen(n, img):
+        emu_px = 9525                                   # 1 px a 96 ppp
+        k = min(1.0, 110 / max(img.width(), img.height(), 1))
+        cx, cy = int(img.width() * k * emu_px), int(img.height() * k * emu_px)
+        return (
+            '<w:p><w:pPr><w:spacing w:after="0"/><w:jc w:val="center"/></w:pPr><w:r><w:drawing>'
+            '<wp:inline distT="0" distB="0" distL="0" distR="0">'
+            '<wp:extent cx="%d" cy="%d"/><wp:docPr id="%d" name="Picture %d"/>'
+            '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+            '<pic:pic><pic:nvPicPr><pic:cNvPr id="%d" name="image%d.png"/><pic:cNvPicPr/></pic:nvPicPr>'
+            '<pic:blipFill><a:blip r:embed="rIdImg%d"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+            '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="%d" cy="%d"/></a:xfrm>'
+            '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>'
+            '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>'
+            % (cx, cy, n, n, n, n, n, cx, cy))
+
+    anchos = (1900, 2300, 1000, 4438)                  # en veinteavos de punto: 17 cm
+    cab = "".join(celda(a, parrafo(t, negrita=True), relleno="EEEEEE")
+                  for a, t in zip(anchos, ("", "File", "Grade", "Comment")))
+    filas_xml = ['<w:tr><w:trPr><w:tblHeader/></w:trPr>%s</w:tr>' % cab]
+    for n, (r, img) in enumerate(zip(filas, thumbs), 1):
+        g = r["grade"]
+        nota = (celda(anchos[2], parrafo("\u2014", color="999999", centro=True)) if g is None
+                else celda(anchos[2], parrafo(format_grade(g), negrita=True, tam=26,
+                                              color="FFFFFF", centro=True),
+                           relleno=grade_color(g).lstrip("#").upper()))
+        filas_xml.append(
+            '<w:tr><w:trPr><w:cantSplit/></w:trPr>%s%s%s%s</w:tr>'
+            % (celda(anchos[0], imagen(n, img)),
+               celda(anchos[1], parrafo(r["name"], negrita=True) + parrafo(r["folder"], color="777777")),
+               nota, celda(anchos[3], parrafo(r["comment"]), centro_v=False)))
+    borde = '<w:%s w:val="single" w:sz="4" w:space="0" w:color="BBBBBB"/>'
+    # el orden de los hijos de tblPr lo fija el esquema, y Word lo exige
+    tabla = ('<w:tbl><w:tblPr><w:tblW w:w="%d" w:type="dxa"/>'
+             '<w:tblBorders>%s</w:tblBorders><w:tblLayout w:type="fixed"/>'
+             '<w:tblCellMar><w:top w:w="60" w:type="dxa"/><w:left w:w="80" w:type="dxa"/>'
+             '<w:bottom w:w="60" w:type="dxa"/><w:right w:w="80" w:type="dxa"/></w:tblCellMar>'
+             '</w:tblPr><w:tblGrid>%s</w:tblGrid>%s</w:tbl>'
+             % (sum(anchos), "".join(borde % b for b in ("top", "left", "bottom", "right",
+                                                          "insideH", "insideV")),
+                "".join('<w:gridCol w:w="%d"/>' % a for a in anchos), "".join(filas_xml)))
+    cuerpo = (parrafo(titulo, negrita=True, tam=36) + parrafo(subtitulo, color="555555")
+              + "<w:p/>" + tabla +
+              '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="850" w:right="850" '
+              'w:bottom="850" w:left="850" w:header="425" w:footer="425" w:gutter="0"/></w:sectPr>')
+    documento = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+        'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+        '<w:body>%s</w:body></w:document>' % cuerpo)
+    tipos = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Default Extension="png" ContentType="image/png"/>'
+        '<Override PartName="/word/document.xml" ContentType="application/'
+        'vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        '<Override PartName="/docProps/core.xml" '
+        'ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>')
+    raiz = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+        'relationships/officeDocument" Target="word/document.xml"/>'
+        '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/'
+        'relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>')
+    rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">%s'
+            '</Relationships>' % "".join(
+                '<Relationship Id="rIdImg%d" Type="http://schemas.openxmlformats.org/'
+                'officeDocument/2006/relationships/image" Target="media/image%d.png"/>' % (n, n)
+                for n in range(1, len(filas) + 1)))
+    ahora = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    core = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/'
+            'metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" '
+            'xmlns:dcterms="http://purl.org/dc/terms/" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+            '<dc:title>%s</dc:title><dc:creator>%s</dc:creator>'
+            '<dcterms:created xsi:type="dcterms:W3CDTF">%s</dcterms:created>'
+            '</cp:coreProperties>' % (x(titulo), APP_NAME, ahora))
+    with zipfile.ZipFile(destino, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", tipos)
+        z.writestr("_rels/.rels", raiz)
+        z.writestr("word/document.xml", documento)
+        z.writestr("word/_rels/document.xml.rels", rels)
+        z.writestr("docProps/core.xml", core)
+        for n, img in enumerate(thumbs, 1):
+            z.writestr("word/media/image%d.png" % n, _png_bytes(img))
 
 
 # --------------------------------------------------------------------------- #
@@ -2078,10 +2351,15 @@ class MarkSlider(QSlider):
     def __init__(self, parent=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
         self.marks: list[int] = []          # ms
+        self.loop_range = None              # (desde, hasta) en ms, o None
         self.setMinimumHeight(22)
 
     def set_marks(self, marks: list[int]):
         self.marks = list(marks)
+        self.update()
+
+    def set_loop_range(self, rango):
+        self.loop_range = rango
         self.update()
 
     def mark_x(self, ms: int) -> float:
@@ -2100,10 +2378,21 @@ class MarkSlider(QSlider):
 
     def paintEvent(self, e):
         super().paintEvent(e)
-        if not self.marks or self.maximum() <= self.minimum():
+        if (not self.marks and not self.loop_range) or self.maximum() <= self.minimum():
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if self.loop_range:
+            # el tramo en bucle: una banda azul con sus corchetes
+            x0, x1 = (self.mark_x(ms) for ms in self.loop_range)
+            azul = QColor(LOOP_COLOR)
+            banda = QColor(azul)
+            banda.setAlpha(70)
+            p.fillRect(QRectF(x0, 3, max(1.0, x1 - x0), self.height() - 6), banda)
+            p.setPen(QPen(azul, 2))
+            for x, d in ((x0, 3), (x1, -3)):
+                p.drawPolyline([QPointF(x + d, 3), QPointF(x, 3),
+                                QPointF(x, self.height() - 3), QPointF(x + d, self.height() - 3)])
         ambar = QColor(KEYFRAME_COLOR)
         p.setPen(QPen(ambar.darker(140), 1))
         p.setBrush(ambar)
@@ -2263,6 +2552,165 @@ class GifPlayer(QObject):
         self.go(self.index + delta)
 
 
+class NoteEditor(QWidget):
+    """Nota (0-10) y comentario de un archivo.
+
+    Hay uno en la columna derecha y otro debajo de cada visor (la vista previa
+    y la ventana grande). Todos guardan a traves de la ventana principal
+    (host.store_note), que lleva el deshacer y avisa a los demas editores que
+    ensenen el mismo archivo. compact: una sola fila, para debajo de un visor.
+    """
+
+    def __init__(self, host, compact: bool = False, parent=None):
+        super().__init__(parent)
+        self.host = host
+        self.compact = compact
+        self.path: str | None = None
+        self._loading = False
+        self.say = lambda texto: host.statusBar().showMessage(texto, 3000)
+
+        self.spn = QDoubleSpinBox()
+        # un paso por debajo de 0 es "sin nota": se ve como una raya
+        self.spn.setRange(-0.5, GRADE_MAX)
+        self.spn.setDecimals(2)
+        self.spn.setSingleStep(0.5)
+        self.spn.setSpecialValueText("—")
+        self.spn.setValue(-0.5)
+        self.spn.setToolTip("From 0 to %s, decimals allowed. Arrow down "
+                            "below 0 (or Clear) for no grade." % format_grade(GRADE_MAX))
+        self.spn.valueChanged.connect(self._typed)
+        self.spn.editingFinished.connect(self.commit)
+
+        self.txt = QPlainTextEdit()
+        self.txt.setPlaceholderText("Comment…")
+        self.txt.setTabChangesFocus(True)
+        self.txt.textChanged.connect(self._typed)
+        self.txt.textChanged.connect(self._sync_copy)
+
+        self.b_clear = QPushButton("Clear")
+        self.b_clear.setToolTip("Remove the grade and the comment of this file")
+        self.b_clear.clicked.connect(self.clear)
+        self.b_copy = QPushButton("" if compact else "  Copy comment")
+        themed(self.b_copy, icon="copy")
+        self.b_copy.setToolTip("Copy the text of the comment to the clipboard")
+        self.b_copy.clicked.connect(self.copy)
+
+        self.lbl_file = QLabel("")
+        themed(self.lbl_file, css="color:%(dim)s; font-size:11px;")
+        if compact:
+            # debajo de un visor: todo en una fila, el comentario en dos lineas
+            lay = QHBoxLayout(self)
+            lay.setContentsMargins(6, 3, 6, 3)
+            lay.addWidget(QLabel("Grade"))
+            lay.addWidget(self.spn)
+            lay.addWidget(QLabel("/ %s" % format_grade(GRADE_MAX)))
+            lay.addSpacing(6)
+            self.txt.setFixedHeight(48)
+            lay.addWidget(self.txt, 1)
+            col = QVBoxLayout()
+            col.setSpacing(2)
+            col.addWidget(self.b_copy)
+            col.addWidget(self.b_clear)
+            lay.addLayout(col)
+            self.lbl_file.hide()
+        else:
+            lay = QVBoxLayout(self)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.addWidget(self.lbl_file)
+            row = QHBoxLayout()
+            row.addWidget(QLabel("Grade"))
+            row.addWidget(self.spn)
+            row.addWidget(QLabel("/ %s" % format_grade(GRADE_MAX)))
+            row.addStretch(1)
+            row.addWidget(self.b_clear)
+            lay.addLayout(row)
+            self.txt.setFixedHeight(96)
+            lay.addWidget(self.txt)
+            fila = QHBoxLayout()
+            fila.addStretch(1)
+            fila.addWidget(self.b_copy)
+            lay.addLayout(fila)
+
+        # se guarda al dejar de escribir un momento: un paso de deshacer por
+        # pausa, no uno por letra
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(800)
+        self.timer.timeout.connect(self.commit)
+        host.note_editors.append(self)
+        self.load(None)
+
+    def load(self, path: str | None):
+        """Ensena lo guardado de 'path', sin guardar nada."""
+        self.timer.stop()
+        self.path = path
+        n = self.host.note_of(path) or {}
+        self._loading = True
+        self.spn.setValue(n.get("grade", -0.5))
+        self.txt.setPlainText(n.get("comment", ""))
+        self.txt.moveCursor(QTextCursor.MoveOperation.End)   # para seguir escribiendo
+        self._loading = False
+        for wd in (self.spn, self.txt, self.b_clear):
+            wd.setEnabled(path is not None)
+        self._sync_copy()
+        self.lbl_file.setText(os.path.basename(path) if path
+                              else "Choose a file to grade or comment on it")
+        self.lbl_file.setToolTip(path or "")
+
+    def set_path(self, path: str | None):
+        """Pasa a otro archivo, guardando antes lo escrito en el anterior."""
+        if path != self.path:
+            self.commit()
+            self.load(path)
+
+    def detach(self):
+        """Se suelta sin guardar (deshacer, importar): lo que ensena ya no vale."""
+        self.timer.stop()
+        self.path = None
+
+    def _typed(self, *_):
+        if not self._loading:
+            self.timer.start()
+
+    def value(self) -> dict:
+        nueva = {}
+        g = self.spn.value()
+        if g >= 0:
+            nueva["grade"] = round(g, 2)
+        comentario = self.txt.toPlainText().rstrip()
+        if comentario.strip():
+            nueva["comment"] = comentario
+        return nueva
+
+    def commit(self):
+        """Pasa a la biblioteca lo escrito, si ha cambiado."""
+        self.timer.stop()
+        if self.path:
+            self.host.store_note(self.path, self.value(), self)
+
+    def clear(self):
+        self._loading = True
+        self.spn.setValue(-0.5)
+        self.txt.clear()
+        self._loading = False
+        self.commit()
+
+    def _sync_copy(self):
+        self.b_copy.setEnabled(self.path is not None
+                               and bool(self.txt.toPlainText().strip()))
+
+    def copy(self):
+        """El comentario tal cual se ve, aunque aun no se haya guardado."""
+        texto = self.txt.toPlainText().strip()
+        if texto:
+            QApplication.clipboard().setText(texto)
+            self.say("Comment copied to the clipboard.")
+
+    def focus_grade(self):
+        self.spn.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.spn.selectAll()
+
+
 class PreviewPane(QWidget):
     """Visor de una imagen. Se usa incrustado (abajo del centro) y en ventana.
 
@@ -2323,6 +2771,16 @@ class PreviewPane(QWidget):
         bar = QHBoxLayout()
         bar.setContentsMargins(0, 0, 0, 0)
         bar.addWidget(self.caption, 1)
+        # nota y comentario de lo que se ve: la barra la pone attach_notes
+        self.notes_box = None
+        self.on_notes_toggled = lambda visible: None
+        self.b_notes = QPushButton("  Grade")
+        themed(self.b_notes, icon="rename")
+        self.b_notes.setCheckable(True)
+        self.b_notes.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.b_notes.toggled.connect(self._on_notes_button)
+        self.b_notes.hide()
+        bar.addWidget(self.b_notes)
         b_fit = QPushButton("Fit")
         themed(b_fit, icon="fit")
         b_fit.setToolTip("Fit the image in the panel (key 0)")
@@ -2369,8 +2827,12 @@ class PreviewPane(QWidget):
         self.video_item = None
         self.showing_video = False
         self.video_bar = QWidget()
-        vid_lay = QHBoxLayout(self.video_bar)
-        vid_lay.setContentsMargins(6, 2, 6, 2)
+        # dos filas: la barra de tiempo a todo el ancho y, debajo, los botones.
+        # En una sola fila, con el bucle, a la barra no le quedaba sitio
+        vid_col = QVBoxLayout(self.video_bar)
+        vid_col.setContentsMargins(6, 2, 6, 2)
+        vid_col.setSpacing(0)
+        vid_lay = QHBoxLayout()
         # fotograma a fotograma y fotogramas clave: estado del paso en curso
         self.marks_for = lambda path: []            # los rellena la ventana principal
         self.on_marks_changed = lambda path, marks, desc: None
@@ -2409,16 +2871,34 @@ class PreviewPane(QWidget):
                                 "Keyframes are marked above the bar.")
         self.sld_pos.sliderMoved.connect(self._on_seek)
         self.sld_pos.valueChanged.connect(self._on_seek_click)
-        vid_lay.addWidget(self.sld_pos, 1)
+        vid_col.addWidget(self.sld_pos)
+        vid_col.addLayout(vid_lay)
         self.lbl_time = QLabel("0:00 / 0:00")
         themed(self.lbl_time, css="color:%(caption)s;")
+        vid_lay.addSpacing(4)
         vid_lay.addWidget(self.lbl_time)
+        vid_lay.addStretch(1)
         self.lbl_key = QLabel("")
         self.lbl_key.setMinimumWidth(78)
         self.lbl_key.setStyleSheet("color:%s; font-weight:bold;" % KEYFRAME_COLOR)
         vid_lay.addWidget(self.lbl_key)
         self.b_key_add = boton("key_add", self.set_keyframe)
         self.b_key_del = boton("key_del", self.delete_keyframe)
+        vid_lay.addSpacing(8)
+        # bucle: el video entero o, con un tramo marcado, solo ese tramo. El
+        # boton de bucle se mantiene al pasar de video; el tramo, no
+        self.loop_on = False
+        self.loop_in = None                         # ms, o None
+        self.loop_out = None
+        self.b_loop = boton("loop", lambda: None)
+        self.b_loop.setCheckable(True)
+        self.b_loop.toggled.connect(self.set_loop)
+        self.b_loop_in = boton("loop_in", self.set_loop_in)
+        self.b_loop_out = boton("loop_out", self.set_loop_out)
+        self.b_loop_clear = boton("loop_clear", self.clear_loop_range)
+        self.lbl_loop = QLabel("")
+        self.lbl_loop.setStyleSheet("color:%s; font-weight:bold;" % LOOP_COLOR)
+        vid_lay.addWidget(self.lbl_loop)
         vid_lay.addSpacing(8)
 
         # los atajos, activos solo mientras hay un video puesto
@@ -2428,14 +2908,19 @@ class PreviewPane(QWidget):
                            ("key_add", self.set_keyframe),
                            ("key_prev", lambda: self.jump_keyframe(-1)),
                            ("key_next", lambda: self.jump_keyframe(1)),
-                           ("key_del", self.delete_keyframe)):
+                           ("key_del", self.delete_keyframe),
+                           ("loop", lambda: self.b_loop.toggle()),
+                           ("loop_in", self.set_loop_in),
+                           ("loop_out", self.set_loop_out),
+                           ("loop_clear", self.clear_loop_range)):
             atajo = SK.bind(self, accion, fn)
             atajo.setEnabled(False)
             self._video_shortcuts.append(atajo)
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
         self._flash_timer.setInterval(2500)
-        self._flash_timer.timeout.connect(lambda: self.showing_video and self._caption_video())
+        self._flash_timer.timeout.connect(
+            lambda: self._caption_video() if self.showing_video else self.refresh_note())
 
         self.b_mute = QToolButton()
         self.b_mute.setAutoRaise(True)
@@ -2454,7 +2939,8 @@ class PreviewPane(QWidget):
         # sin foco: las flechas y el espacio siguen siendo de la rejilla y del visor
         for w in (self.b_play, self.sld_pos, self.b_mute, self.sld_vol, self.b_key_prev,
                   self.b_frame_prev, self.b_frame_next, self.b_key_next, self.b_key_add,
-                  self.b_key_del):
+                  self.b_key_del, self.b_loop, self.b_loop_in, self.b_loop_out,
+                  self.b_loop_clear):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.video_bar.hide()
 
@@ -2496,6 +2982,7 @@ class PreviewPane(QWidget):
         lay.addWidget(self.gif_bar)
         lay.addWidget(self.cmp_bar)
         lay.addLayout(bar)
+        self._lay = lay
 
         self._timer = QTimer(self)          # evita cargar cada imagen al pasar
         self._timer.setSingleShot(True)     # rapido con las flechas
@@ -2504,6 +2991,55 @@ class PreviewPane(QWidget):
 
     def _on_zoom(self):
         self._fitted = False
+
+    # --- nota y comentario -------------------------------------------------
+    def attach_notes(self, host, visible: bool):
+        """Pone debajo del visor la barra de nota y comentario de lo que se ve."""
+        self.notes_box = NoteEditor(host, compact=True, parent=self)
+        self.notes_box.pane = self
+        self.notes_box.say = self.flash
+        self._lay.insertWidget(self._lay.count() - 1, self.notes_box)
+        self.b_notes.setToolTip("Show or hide the grade and comment of this file (%s)"
+                                % SK.text("note"))
+        self.b_notes.blockSignals(True)
+        self.b_notes.setChecked(visible)
+        self.b_notes.blockSignals(False)
+        self.notes_box.load(self.note_path())
+        self.sync_notes_ui()
+
+    def note_path(self) -> str | None:
+        """El archivo de la barra de notas: el que se ve (al comparar, ninguno)."""
+        return None if self.comparing else self.path
+
+    def sync_notes_ui(self):
+        """Barra y boton segun esten ocultas o no las notas en la ventana principal."""
+        if self.notes_box is None:
+            return
+        todas = self.notes_box.host.show_notes
+        self.b_notes.setVisible(todas)
+        visible = todas and self.b_notes.isChecked()
+        if not visible:
+            foco = QApplication.focusWidget()
+            if foco is not None and self.notes_box.isAncestorOf(foco):
+                self.notes_box.commit()
+                self.view.setFocus()
+        self.notes_box.setVisible(visible)
+
+    def _on_notes_button(self, visible: bool):
+        self.sync_notes_ui()
+        self.on_notes_toggled(visible)
+
+    def open_notes(self):
+        """Tecla N en un visor: abre la barra si estaba cerrada y va a la nota."""
+        if self.notes_box is None:
+            return
+        if not self.notes_box.host.show_notes:
+            self.flash("Grades and comments are hidden (%s)" % SK.text("show_notes"))
+            return
+        if self.note_path() is None:
+            return
+        self.b_notes.setChecked(True)
+        self.notes_box.focus_grade()
 
     def _show_caption(self, texto: str):
         """El pie de un archivo ya abierto, con su nota y su comentario detras."""
@@ -2531,6 +3067,8 @@ class PreviewPane(QWidget):
         self.path = path
         self._tokens[0] += 1                # invalida lo que estuviera cargando
         self._timer.stop()
+        if self.notes_box is not None:
+            self.notes_box.set_path(path)
         self._caption_base = ""
         self.caption.setToolTip("")
         if path is None:
@@ -2648,6 +3186,7 @@ class PreviewPane(QWidget):
         self.player.playbackStateChanged.connect(self._on_state)
         self.player.errorOccurred.connect(self._on_video_error)
         self.player.metaDataChanged.connect(self._on_metadata)
+        self.player.mediaStatusChanged.connect(self._on_media_status)
         self.video_item.videoSink().videoFrameChanged.connect(self._on_video_frame)
         self._on_volume(self.sld_vol.value())
 
@@ -2672,7 +3211,9 @@ class PreviewPane(QWidget):
         for atajo in self._video_shortcuts:
             atajo.setEnabled(True)
         self.refresh_marks()
+        self.loop_in = self.loop_out = None
         self.player.setSource(QUrl.fromLocalFile(path))
+        self._apply_loop()
         self.player.pause()
         self._caption_video()
 
@@ -2713,6 +3254,8 @@ class PreviewPane(QWidget):
         if fin > inicio and not self._fps_known:
             self._frame_us = fin - inicio        # sin fps en el archivo: el fotograma lo dice
         self._frame_start_us = inicio
+        if self._loop_jump(inicio):
+            return
         if self._want_us is not None:
             error = inicio - self._want_us
             if abs(error) <= self._frame_us * 0.3 or self._tries >= 3:
@@ -2839,6 +3382,96 @@ class PreviewPane(QWidget):
         self.b_key_prev.setEnabled(antes)
         self.b_key_next.setEnabled(despues)
 
+    # --- bucle ---------------------------------------------------------------
+    def has_loop_range(self) -> bool:
+        return self.loop_in is not None or self.loop_out is not None
+
+    def loop_bounds(self) -> tuple[int, int]:
+        """El tramo en ms; sin marcar un extremo, el principio o el final."""
+        fin = self.player.duration() if self.player is not None else 0
+        return (self.loop_in or 0,
+                self.loop_out if self.loop_out is not None else fin)
+
+    def _apply_loop(self):
+        """El video entero lo repite el propio reproductor, sin saltos; un tramo,
+        _loop_jump a cada fotograma."""
+        if self.player is not None:
+            entero = self.loop_on and not self.has_loop_range()
+            self.player.setLoops(QMediaPlayer.Loops.Infinite if entero else 1)
+        self._refresh_loop_ui()
+
+    def set_loop(self, on: bool):
+        self.loop_on = bool(on)
+        if self.b_loop.isChecked() != self.loop_on:
+            self.b_loop.blockSignals(True)
+            self.b_loop.setChecked(self.loop_on)
+            self.b_loop.blockSignals(False)
+        self._apply_loop()
+        if self.showing_video:
+            self.flash(("Loop on" + (" (range)" if self.has_loop_range() else ""))
+                       if self.loop_on else "Loop off")
+
+    def set_loop_in(self):
+        if not self.showing_video:
+            return
+        ms = int(round(self.current_frame_us() / 1000))
+        if self.loop_out is not None and ms >= self.loop_out:
+            self.loop_out = None                    # un final antes del principio no vale
+        self.loop_in = ms
+        self.set_loop(True)
+        self.flash("Loop from frame %d" % self.frame_index())
+
+    def set_loop_out(self):
+        if not self.showing_video:
+            return
+        # hasta el final de este fotograma, que se vea entero
+        ms = int(round((self.current_frame_us() + self._frame_us) / 1000))
+        if self.loop_in is not None and ms <= self.loop_in:
+            self.loop_in = None
+        self.loop_out = ms
+        self.set_loop(True)
+        self.flash("Loop up to frame %d" % self.frame_index())
+
+    def clear_loop_range(self):
+        if not self.showing_video or not self.has_loop_range():
+            return
+        self.loop_in = self.loop_out = None
+        self._apply_loop()
+        self.flash("Loop range cleared" + (": looping the whole video" if self.loop_on else ""))
+
+    def _loop_jump(self, inicio_us: float) -> bool:
+        """Reproduciendo un tramo en bucle, al llegar a su final vuelve al principio."""
+        if not (self.loop_on and self.has_loop_range() and self.is_playing()):
+            return False
+        desde, hasta = self.loop_bounds()
+        if inicio_us + self._frame_us / 2 >= hasta * 1000:
+            self.player.setPosition(desde)
+            return True
+        return False
+
+    def _on_media_status(self, estado):
+        # un tramo que acaba donde el video: el final del archivo tambien vuelve
+        if (estado == QMediaPlayer.MediaStatus.EndOfMedia and self.loop_on
+                and self.has_loop_range() and self.showing_video):
+            self.player.setPosition(self.loop_bounds()[0])
+            self.player.play()
+
+    def _refresh_loop_ui(self):
+        rango = self.has_loop_range()
+        self.b_loop_clear.setEnabled(rango)
+        if rango and self.player is not None and self.player.duration() > 0:
+            desde, hasta = self.loop_bounds()
+            self.sld_pos.set_loop_range((desde, hasta))
+            f = self._frame_us or 40000
+            self.lbl_loop.setText("⟲ %d–%d" % (int(round(desde * 1000 / f)),
+                                               max(0, int(round(hasta * 1000 / f)) - 1)))
+            self.lbl_loop.setToolTip("Looping frames %s; %s clears the range"
+                                     % (self.lbl_loop.text()[2:], SK.text("loop_clear")))
+        else:
+            self.sld_pos.set_loop_range(None)
+            self.lbl_loop.setText("⟲" if self.loop_on else "")
+            self.lbl_loop.setToolTip("Looping the whole video" if self.loop_on else "")
+
     def is_playing(self) -> bool:
         return (self.player is not None and self.player.playbackState()
                 == QMediaPlayer.PlaybackState.PlayingState)
@@ -2854,7 +3487,11 @@ class PreviewPane(QWidget):
             self.player.pause()
             return
         self._want_us = None
-        if self.player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia:
+        if self.loop_on and self.has_loop_range():
+            desde, hasta = self.loop_bounds()
+            if not desde <= self.player.position() < hasta - self._frame_us / 1000:
+                self.player.setPosition(desde)  # fuera del tramo: a su principio
+        elif self.player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia:
             self.player.setPosition(0)          # al final, vuelve a empezar
         self.player.play()
 
@@ -2881,6 +3518,7 @@ class PreviewPane(QWidget):
         self.sld_pos.blockSignals(True)
         self.sld_pos.setRange(0, max(0, ms))
         self.sld_pos.blockSignals(False)
+        self._refresh_loop_ui()
         self._on_position(self.player.position())
         if self.showing_video:
             self._caption_video()
@@ -2939,6 +3577,8 @@ class PreviewPane(QWidget):
         self._timer.stop()
         self.stop_video()
         self.stop_gif()                         # se compara su primer fotograma
+        if self.notes_box is not None:
+            self.notes_box.set_path(None)       # dos archivos: la nota no es de ninguno
         self.comparing = True
         self.path, self.path_b = path_a, path_b
         self.loaded_path = self.loaded_path_b = None
@@ -3682,6 +4322,35 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
         else:
             p.drawLine(QPointF(M - 6, size / 2 - 3), QPointF(M, size / 2 + 3))
             p.drawLine(QPointF(M, size / 2 - 3), QPointF(M - 6, size / 2 + 3))
+    elif kind == "loop":
+        # flecha en circulo
+        c = size / 2
+        r = (M - m) / 2 - 0.5
+        p.drawArc(QRectF(c - r, c - r, 2 * r, 2 * r), 100 * 16, 290 * 16)
+        p.setBrush(tinta)
+        p.setPen(Qt.PenStyle.NoPen)
+        x, y = c - r * math.cos(math.radians(80)) + 1.5, c - r * math.sin(math.radians(80))
+        p.drawPolygon([QPointF(x - 1, y - 4), QPointF(x + 4.5, y), QPointF(x - 1, y + 4)])
+    elif kind in ("loop_in", "loop_out", "loop_clear"):
+        azul = QColor(LOOP_COLOR)
+        p.setPen(QPen(azul, 2.0))
+        izq, der = m + 2, M - 2
+        if kind in ("loop_in", "loop_clear"):          # [
+            p.drawPolyline([QPointF(izq + 3, m + 1), QPointF(izq, m + 1),
+                            QPointF(izq, M - 1), QPointF(izq + 3, M - 1)])
+        if kind in ("loop_out", "loop_clear"):         # ]
+            p.drawPolyline([QPointF(der - 3, m + 1), QPointF(der, m + 1),
+                            QPointF(der, M - 1), QPointF(der - 3, M - 1)])
+        p.setPen(lapiz)
+        p.setBrush(tinta)
+        c = size / 2
+        if kind == "loop_in":                          # [ ▶
+            p.drawPolygon([QPointF(c - 1, c - 4), QPointF(c - 1, c + 4), QPointF(c + 5, c)])
+        elif kind == "loop_out":                       # ◀ ]
+            p.drawPolygon([QPointF(c + 1, c - 4), QPointF(c + 1, c + 4), QPointF(c - 5, c)])
+        else:                                          # [ x ]
+            p.drawLine(QPointF(c - 3, c - 3), QPointF(c + 3, c + 3))
+            p.drawLine(QPointF(c + 3, c - 3), QPointF(c - 3, c + 3))
     elif kind == "angle":
         p.drawLine(m, M, M, M)
         p.drawLine(m, M, M - 2, m + 1)
@@ -4801,6 +5470,16 @@ grade box; <b>Tab</b> goes on to the comment. They are saved as you type.
 <li>The grade shows on the thumbnail, red below 5, amber up to 7, green from
 there; a speech bubble means there is a comment. Hover over the thumbnail to
 read it. The preview and the large window show both under the image.</li>
+<li><b>Grade while you watch</b>: the preview and the large window have the same
+grade and comment bar under the image, which follows the file you are on —
+also when you change image with ← → in the large window. The <i>Grade</i>
+button next to <i>Fit</i> shows or hides it; in the large window
+<b>[[note]]</b> opens it and goes to the grade.</li>
+<li><b>Library ▸ Export grades and comments…</b> (or <i>Export to a
+document…</i> under the panel) writes the files <b>you see in the grid</b>, in
+the same order, that have a grade or a comment: a <b>PDF</b> with thumbnails,
+a <b>spreadsheet</b> (CSV, for Excel or Numbers) or a <b>Word</b> document. The
+PDF and Word list the average grade at the top.</li>
 <li>Arrow down below 0, or <i>Clear</i>, removes the grade. Ctrl+Z undoes
 grades and comments, and they travel with <b>Export library…</b>.</li>
 <li>Untick <b>Grades</b> above the thumbnails (or <b>View ▸ Show grades and
@@ -4893,6 +5572,8 @@ with the same name instead of duplicating them, and keeps your own edits.</li>
 <tr><td><b>[[frame_prev]]</b> / <b>[[frame_next]]</b></td><td>video: previous / next frame</td></tr>
 <tr><td><b>[[key_add]]</b> / <b>[[key_del]]</b></td><td>video: set / delete a keyframe</td></tr>
 <tr><td><b>[[key_prev]]</b> / <b>[[key_next]]</b></td><td>video: previous / next keyframe</td></tr>
+<tr><td><b>[[loop]]</b></td><td>video: loop on / off</td></tr>
+<tr><td><b>[[loop_in]]</b> / <b>[[loop_out]]</b> / <b>[[loop_clear]]</b></td><td>video: loop from / up to this frame, clear the fragment</td></tr>
 <tr><td><b>[[help]]</b></td><td>this help</td></tr>
 <tr><td><b>[[shortcuts]]</b></td><td>keyboard shortcuts: see and <b>change</b> them (Help menu)</td></tr>
 </table>
@@ -4926,6 +5607,12 @@ frame number.</li>
 <b>[[key_next]]</b> jump to the previous or next one, <b>[[key_del]]</b> deletes it. They appear as amber
 diamonds above the time bar, and <b>Ctrl+Z</b> undoes them. Hover over any
 button to see its shortcut.</li>
+<li><b>Loop</b>: the loop button (<b>[[loop]]</b>) repeats the whole video.
+To loop just a <b>fragment</b>, go to its first frame and press
+<b>[[loop_in]]</b>, then to its last and press <b>[[loop_out]]</b>: the
+fragment turns blue on the time bar and playback goes round it.
+<b>[[loop_clear]]</b> clears the fragment. The loop button stays on from one
+video to the next; the fragment belongs to the video you set it on.</li>
 </ul>
 """
 
@@ -5065,6 +5752,15 @@ class ImageViewer(QDialog):
             self.pane.edit_for = parent.edit_of
         if hasattr(parent, "visible_note_of"):
             self.pane.note_for = parent.visible_note_of
+        if hasattr(parent, "note_editors"):
+            # nota y comentario tambien aqui, en la barra de debajo
+            self.pane.attach_notes(parent, parent.viewer_notes)
+
+            def recordar(visible):
+                parent.viewer_notes = visible
+                parent.touch()
+            self.pane.on_notes_toggled = recordar
+            SK.bind(self, "note", self.pane.open_notes)
         # los fotogramas clave son de la biblioteca: se leen y se guardan en la
         # ventana principal, y Ctrl+Z los deshace tambien desde aqui
         if hasattr(parent, "marks_of"):
@@ -5101,6 +5797,11 @@ class ImageViewer(QDialog):
     def done(self, r):
         self.pane.stop_video()                  # que no siga sonando al cerrar
         self.pane.stop_gif()
+        if self.pane.notes_box is not None:     # lo escrito se guarda, y el editor se va
+            self.pane.notes_box.commit()
+            self.pane.notes_box.detach()
+            host = self.pane.notes_box.host
+            host.note_editors = [e for e in host.note_editors if e is not self.pane.notes_box]
         super().done(r)
 
     def step(self, d: int):
@@ -5201,9 +5902,10 @@ class MainWindow(QMainWindow):
         self.edits: dict[str, dict] = {}             # ruta -> receta de edicion
         self.video_marks: dict[str, list[int]] = {}  # ruta de video -> ms clave
         self.notes: dict[str, dict] = {}             # ruta -> {grade, comment}
-        self._note_path: str | None = None           # el archivo que ensena el panel
-        self._note_loading = False
+        self.note_editors: list = []                 # los editores de notas abiertos
         self.show_notes = True                       # verlas u ocultarlas (Ctrl+G)
+        self.preview_notes = True                    # barra de nota bajo la vista previa
+        self.viewer_notes = True                     # y en la ventana grande
         self.export_dir = ""
         self._undo: list = []
         self._redo: list = []
@@ -5381,6 +6083,8 @@ class MainWindow(QMainWindow):
         self.preview = PreviewPane()
         self.preview.edit_for = self.preview_edit_of
         self.preview.note_for = self.visible_note_of
+        self.preview.attach_notes(self, self.preview_notes)
+        self.preview.on_notes_toggled = self._remember_preview_notes
         self._before = False
         HoldKey("before", self, self.set_before)
         self.preview.marks_for = self.marks_of
@@ -5513,56 +6217,19 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.section("GRADE & COMMENT"))
-        self.lbl_note_file = QLabel("")
-        themed(self.lbl_note_file, css="color:%(dim)s; font-size:11px;")
-        lay.addWidget(self.lbl_note_file)
-
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Grade"))
-        self.spn_grade = QDoubleSpinBox()
-        # un paso por debajo de 0 es "sin nota": se ve como una raya
-        self.spn_grade.setRange(-0.5, GRADE_MAX)
-        self.spn_grade.setDecimals(2)
-        self.spn_grade.setSingleStep(0.5)
-        self.spn_grade.setSpecialValueText("\u2014")
-        self.spn_grade.setValue(-0.5)
-        self.spn_grade.setToolTip("From 0 to %s, decimals allowed. Arrow down "
-                                  "below 0 (or Clear) for no grade." % format_grade(GRADE_MAX))
-        self.spn_grade.valueChanged.connect(self._note_typed)
-        self.spn_grade.editingFinished.connect(self.commit_note)
-        row.addWidget(self.spn_grade)
-        row.addWidget(QLabel("/ %s" % format_grade(GRADE_MAX)))
-        row.addStretch(1)
-        self.b_note_clear = QPushButton("Clear")
-        self.b_note_clear.setToolTip("Remove the grade and the comment of this file")
-        self.b_note_clear.clicked.connect(self.clear_note)
-        row.addWidget(self.b_note_clear)
-        lay.addLayout(row)
-
-        self.txt_comment = QPlainTextEdit()
-        self.txt_comment.setPlaceholderText("Comment…")
-        self.txt_comment.setTabChangesFocus(True)
-        self.txt_comment.setFixedHeight(96)
-        self.txt_comment.textChanged.connect(self._note_typed)
-        self.txt_comment.textChanged.connect(self._sync_copy_button)
-        lay.addWidget(self.txt_comment)
-
-        fila = QHBoxLayout()
-        fila.addStretch(1)
-        self.b_copy_comment = QPushButton("  Copy comment")
-        themed(self.b_copy_comment, icon="copy")
-        self.b_copy_comment.setToolTip("Copy the text of the comment to the clipboard")
-        self.b_copy_comment.clicked.connect(self.copy_comment)
-        fila.addWidget(self.b_copy_comment)
-        lay.addLayout(fila)
-
-        # se guarda al dejar de escribir un momento: un paso de deshacer por
-        # pausa, no uno por letra
-        self._note_timer = QTimer(self)
-        self._note_timer.setSingleShot(True)
-        self._note_timer.setInterval(800)
-        self._note_timer.timeout.connect(self.commit_note)
-        self.load_note_panel(None)
+        self.note_editor = NoteEditor(self)
+        lay.addWidget(self.note_editor)
+        self.b_export_notes = QPushButton("  Export to a document…")
+        themed(self.b_export_notes, std="SP_DialogSaveButton")
+        self.b_export_notes.setToolTip("PDF, spreadsheet or Word with the grades and comments "
+                                       "of the files in view")
+        self.b_export_notes.clicked.connect(self.export_notes)
+        lay.addWidget(self.b_export_notes)
+        # nombres cortos, de cuando el panel era parte de la ventana
+        ed = self.note_editor
+        self.spn_grade, self.txt_comment = ed.spn, ed.txt
+        self.b_note_clear, self.b_copy_comment = ed.b_clear, ed.b_copy
+        self.lbl_note_file, self._note_timer = ed.lbl_file, ed.timer
         return w
 
     # ---------------- nota y comentario ----------------------------------- #
@@ -5588,30 +6255,29 @@ class MainWindow(QMainWindow):
         foco = QApplication.focusWidget()
         if not on and foco is not None and self.note_panel.isAncestorOf(foco):
             self.view.setFocus()                # que no se quede escribiendo a ciegas
+        for e in self.live_note_editors():
+            pane = getattr(e, "pane", None)
+            if pane is not None:
+                pane.sync_notes_ui()
         self.view.viewport().update()
         self.preview.refresh_note()
+        self.touch()
+
+    def _remember_preview_notes(self, visible: bool):
+        self.preview_notes = visible
         self.touch()
 
     def _sync_notes_tip(self):
         self.chk_notes.setToolTip("Show or hide grades and comments everywhere (%s). "
                                   "Hiding them deletes nothing." % SK.text("show_notes"))
 
+    @property
+    def _note_path(self) -> str | None:
+        return self.note_editor.path
+
     def load_note_panel(self, path: str | None):
-        """Ensena en el panel lo guardado de 'path', sin guardar nada."""
-        self._note_timer.stop()
-        self._note_path = path
-        n = (self.notes.get(path) or {}) if path else {}
-        self._note_loading = True
-        self.spn_grade.setValue(n.get("grade", -0.5))
-        self.txt_comment.setPlainText(n.get("comment", ""))
-        self.txt_comment.moveCursor(QTextCursor.MoveOperation.End)   # para seguir escribiendo
-        self._note_loading = False
-        for wd in (self.spn_grade, self.txt_comment, self.b_note_clear):
-            wd.setEnabled(path is not None)
-        self._sync_copy_button()
-        self.lbl_note_file.setText(os.path.basename(path) if path
-                                   else "Choose a file to grade or comment on it")
-        self.lbl_note_file.setToolTip(path or "")
+        """Ensena en el panel de la derecha lo guardado de 'path'."""
+        self.note_editor.load(path)
 
     def note_target(self) -> str | None:
         """El archivo del panel: el que tiene el foco en la rejilla."""
@@ -5620,28 +6286,36 @@ class MainWindow(QMainWindow):
 
     def sync_note_panel(self, *_):
         """El panel sigue al archivo elegido en la rejilla."""
-        path = self.note_target()
-        if path != self._note_path:
-            self.commit_note()
-            self.load_note_panel(path)
+        self.note_editor.set_path(self.note_target())
 
-    def _note_typed(self, *_):
-        if not self._note_loading:
-            self._note_timer.start()
+    def live_note_editors(self) -> list:
+        vivos = []
+        for e in self.note_editors:
+            try:
+                e.isVisible()               # el de una ventana grande ya cerrada, fuera
+                vivos.append(e)
+            except RuntimeError:
+                pass
+        self.note_editors = vivos
+        return vivos
 
     def commit_note(self):
-        """Pasa a la biblioteca lo escrito en el panel, si ha cambiado."""
-        self._note_timer.stop()
-        path = self._note_path
-        if not path:
-            return
-        nueva = {}
-        g = self.spn_grade.value()
-        if g >= 0:
-            nueva["grade"] = round(g, 2)
-        comentario = self.txt_comment.toPlainText().rstrip()
-        if comentario.strip():
-            nueva["comment"] = comentario
+        """Guarda lo escrito y aun pendiente en cualquier editor de notas."""
+        for e in self.live_note_editors():
+            e.commit()
+
+    def detach_note_editors(self):
+        for e in self.live_note_editors():
+            e.detach()
+
+    def reload_note_editors(self):
+        """Tras deshacer o importar: cada editor vuelve a ensenar su archivo."""
+        for e in self.live_note_editors():
+            pane = getattr(e, "pane", None)
+            e.load(pane.note_path() if pane is not None else self.note_target())
+
+    def store_note(self, path: str, nueva: dict, origen=None):
+        """Lo que guarda un editor: un paso de deshacer, y los demas se enteran."""
         vieja = self.notes.get(path) or {}
         if nueva == vieja:
             return
@@ -5651,26 +6325,87 @@ class MainWindow(QMainWindow):
             self.notes[path] = nueva
         else:
             self.notes.pop(path, None)
+        for e in self.live_note_editors():
+            if e is not origen and e.path == path:
+                e.load(path)
         self.refresh_note_views()
 
-    def _sync_copy_button(self):
-        self.b_copy_comment.setEnabled(self._note_path is not None
-                                       and bool(self.txt_comment.toPlainText().strip()))
-
     def copy_comment(self):
-        """El comentario tal cual se ve en el panel, aunque aun no se haya guardado."""
-        texto = self.txt_comment.toPlainText().strip()
-        if not texto:
+        self.note_editor.copy()
+
+    def view_title(self) -> str:
+        """Lo que hay en la rejilla, en pocas palabras: para el documento."""
+        if self.chk_only_cat.isChecked() and self.current_category():
+            return self.current_category()["name"]
+        nombres = [os.path.basename(os.path.normpath(f)) for f in self.selected_folders()]
+        if not nombres:
+            return "DriloBoard"
+        return ", ".join(nombres[:3]) + (" +%d" % (len(nombres) - 3) if len(nombres) > 3 else "")
+
+    NOTES_FORMATS = (("PDF with thumbnails (*.pdf)", ".pdf"),
+                     ("Spreadsheet, CSV (*.csv)", ".csv"),
+                     ("Word document (*.docx)", ".docx"))
+
+    def export_notes(self):
+        """Nota y comentario de lo que se ve en la rejilla, a un documento."""
+        self.commit_note()
+        filas = notes_rows(self.model.paths(), self.notes)
+        if not filas:
+            QMessageBox.information(
+                self, APP_NAME, "None of the files in view has a grade or a comment.\n\n"
+                "The document lists the files you see in the grid, in the same order: "
+                "choose the folder or the category first.")
             return
-        QApplication.clipboard().setText(texto)
-        self.statusBar().showMessage("Comment copied to the clipboard.", 3000)
+        nombre = re.sub(r'[\\/:*?"<>|]+', "-", "Grades - %s" % self.view_title()).strip()
+        destino, filtro = QFileDialog.getSaveFileName(
+            self, "Export grades and comments",
+            os.path.join(self.export_dir or str(Path.home()), nombre + ".pdf"),
+            ";;".join(f for f, _ in self.NOTES_FORMATS))
+        if not destino:
+            return
+        ext = os.path.splitext(destino)[1].lower()
+        if ext not in (e for _, e in self.NOTES_FORMATS):
+            ext = dict(self.NOTES_FORMATS).get(filtro, ".pdf")
+            destino += ext
+        try:
+            self.write_notes(filas, destino)
+        except (OSError, zipfile.BadZipFile) as e:
+            QMessageBox.warning(self, APP_NAME, "Could not write the document:\n%s" % e)
+            return
+        self.export_dir = os.path.dirname(destino)
+        self.touch()
+        caja = QMessageBox(self)
+        caja.setWindowTitle(APP_NAME)
+        caja.setText("Grades and comments of %s saved to:\n%s"
+                     % (notes_summary(filas), destino))
+        b_abrir = caja.addButton("Open", QMessageBox.ButtonRole.AcceptRole)
+        caja.addButton(QMessageBox.StandardButton.Close)
+        caja.exec()
+        if caja.clickedButton() is b_abrir:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(destino))
+
+    def write_notes(self, filas: list[dict], destino: str):
+        """Sin dialogos, para que las pruebas usen este mismo camino."""
+        ext = os.path.splitext(destino)[1].lower()
+        if ext == ".csv":
+            write_notes_csv(filas, destino)
+            return
+        titulo = "Grades and comments"
+        subtitulo = "%s   ·   %s   ·   %s" % (self.view_title(),
+                                              datetime.date.today().isoformat(),
+                                              notes_summary(filas))
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            thumbs = [report_thumb(f["path"], self.edits.get(f["path"])) for f in filas]
+            if ext == ".docx":
+                write_notes_docx(filas, destino, titulo, subtitulo, thumbs)
+            else:
+                write_notes_pdf(filas, destino, titulo, subtitulo, thumbs)
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def clear_note(self):
-        self._note_loading = True
-        self.spn_grade.setValue(-0.5)
-        self.txt_comment.clear()
-        self._note_loading = False
-        self.commit_note()
+        self.note_editor.clear()
 
     def refresh_note_views(self):
         self.view.viewport().update()
@@ -5685,8 +6420,7 @@ class MainWindow(QMainWindow):
         if self._note_path is None:
             self.statusBar().showMessage("Choose a file first.", 4000)
             return
-        self.spn_grade.setFocus(Qt.FocusReason.ShortcutFocusReason)
-        self.spn_grade.selectAll()
+        self.note_editor.focus_grade()
 
     # ---------------- orden ----------------------------------------------- #
     def _order_combo(self, on_change) -> QComboBox:
@@ -6179,6 +6913,9 @@ class MainWindow(QMainWindow):
         a = m.addAction("Import library…", self.import_library)
         themed(a, std="SP_DirOpenIcon")
         m.addSeparator()
+        a = m.addAction("Export grades and comments…", self.export_notes)
+        a.setToolTip("PDF, spreadsheet or Word with the grades and comments of the files in view")
+        m.addSeparator()
         a = m.addAction("Refresh folders", self.rescan)
         themed(a, std="SP_BrowserReload")
         SK.bind_action(a, "refresh")
@@ -6393,8 +7130,8 @@ class MainWindow(QMainWindow):
         folders, cats, edits = read_export(datos, raiz)
         marcas = read_export_marks(datos, raiz)
         notas = read_export_notes(datos, raiz)
-        self.commit_note()                   # lo escrito, antes; y el panel se suelta
-        self._note_path = None
+        self.commit_note()                   # lo escrito, antes; y los editores se sueltan
+        self.detach_note_editors()
         self.push_undo("import library")     # se puede deshacer con Ctrl+Z
         saltadas = 0
         if reemplazar:
@@ -6437,7 +7174,7 @@ class MainWindow(QMainWindow):
         self.refresh_folders(expand_roots=True)
         self.refresh_categories()
         self.refresh_images()
-        self.load_note_panel(self.note_target())
+        self.reload_note_editors()
         self.model.invalidate(self.model.paths())
         self.touch()
         perdidas = sum(1 for c, _ in iter_cats(self.categories)
@@ -6468,8 +7205,7 @@ class MainWindow(QMainWindow):
     def restore(self, snap: dict):
         # el panel se suelta antes: lo que ensena es de antes de restaurar y
         # al cambiar de imagen se guardaria encima
-        self._note_timer.stop()
-        self._note_path = None
+        self.detach_note_editors()
         visibles = list(self.model.paths())
         # tras deshacer sueles querer repetir sobre lo mismo: no se pierde
         antes = set(self.selected_images())
@@ -6486,7 +7222,7 @@ class MainWindow(QMainWindow):
         self.refresh_images()
         self.model.invalidate(set(visibles) | set(self.model.paths()))
         self.reselect(antes, actual)
-        self.load_note_panel(self.note_target())
+        self.reload_note_editors()
         self.view.viewport().update()
         if self.preview.comparing:
             self.preview.compare(self.preview.path, self.preview.path_b,
@@ -6863,6 +7599,8 @@ class MainWindow(QMainWindow):
             "video_marks": self.video_marks,
             "notes": self.notes,
             "show_notes": self.show_notes,
+            "preview_notes": self.preview_notes,
+            "viewer_notes": self.viewer_notes,
         }
         try:
             tmp = STATE_FILE.with_suffix(".tmp")
@@ -6897,6 +7635,9 @@ class MainWindow(QMainWindow):
         self.chk_videos.blockSignals(False)
         self.set_show_videos(self.chk_videos.isChecked())
         self.chk_names.setChecked(bool(data.get("show_names", True)))
+        self.viewer_notes = bool(data.get("viewer_notes", True))
+        self.preview_notes = bool(data.get("preview_notes", True))
+        self.preview.b_notes.setChecked(self.preview_notes)
         self.set_show_notes(bool(data.get("show_notes", True)))
         self.slider.setValue(int(data.get("icon", 160)))
         if isinstance(data.get("splitter"), list):

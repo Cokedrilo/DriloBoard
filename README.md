@@ -76,6 +76,10 @@ allowed) and a free **comment** — images, GIFs and videos alike. The grade
 shows on the thumbnail, coloured red / amber / green; a speech bubble means
 there is a comment, which you can read by hovering; *Copy comment* puts it on
 the clipboard. Press `N` to jump to the grade box. Saved as you type, undoable, and carried by *Export library…*.
+The same grade and comment bar sits under the preview and the large window,
+so you can grade while you watch. *Library ▸ Export grades and comments…*
+writes the files in view to a **PDF with thumbnails**, a **spreadsheet (CSV)**
+or a **Word document**.
 Untick *Grades* (or `Ctrl+G`) to hide them all — handy before projecting in
 class; nothing is deleted.
 
@@ -113,6 +117,7 @@ webm, mkv, avi… — join the grid with a ▶ badge and their duration. They pl
 in the preview and the large window, opening paused so browsing stays silent,
 and they go into categories and export like images. The editor and the A/B
 comparison stay image-only.
+**Loop** the whole video, or just a fragment marked with `I` and `O`.
 Step **frame by frame** and set **keyframes** on the frames that matter: they
 show as amber diamonds on the time bar, jump from one to the next, are saved
 with the library and undo with `Ctrl+Z`. Every button shows its shortcut when
@@ -221,6 +226,8 @@ you try it there, reports are welcome.
 | `,` / `.` | video or GIF: previous / next frame |
 | `-` / `Ctrl+-` | video: set / delete a keyframe |
 | `Ctrl+,` / `Ctrl+.` | video: previous / next keyframe |
+| `L` | video: loop on / off |
+| `I` / `O` / `Shift+L` | video: loop from / up to this frame, clear the fragment |
 | `F1` | help |
 
 There is a **? Help** button in the top-right corner with a full guide that

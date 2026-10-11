@@ -1,7 +1,7 @@
 # DriloBoard - Image viewer and reviewer
 
-[![Download](https://img.shields.io/badge/Download-Windows%20portable%20·%2044%20MB-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.4.1-portable-win64.zip)
-[![Download](https://img.shields.io/badge/Download-macOS%20portable%20·%2062%20MB-2ea44f?style=for-the-badge&logo=apple)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.4.1-portable-macos.zip)
+[![Download](https://img.shields.io/badge/Download-Windows%20portable%20·%2058%20MB-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.4.1-portable-win64.zip)
+[![Download](https://img.shields.io/badge/Download-macOS%20portable%20·%2035%20MB-2ea44f?style=for-the-badge&logo=apple)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.4.1-portable-macos.zip)
 [![Release](https://img.shields.io/github/v/release/Cokedrilo/DriloBoard)](https://github.com/Cokedrilo/DriloBoard/releases/latest)
 [![Licence](https://img.shields.io/github/license/Cokedrilo/DriloBoard)](LICENSE)
 
@@ -141,7 +141,7 @@ overwrites your own edits.
 ### Prebuilt Windows package
 
 [**Download the ZIP**](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.4.1-portable-win64.zip)
-(44 MB) — or browse every version under
+(58 MB) — or browse every version under
 [Releases](https://github.com/Cokedrilo/DriloBoard/releases). Unpack it
 anywhere: hard disk, USB stick, network share.
 
@@ -158,7 +158,7 @@ with status 0 if everything is in place.
 ### Prebuilt Mac package
 
 [**Download the ZIP**](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.4.1-portable-macos.zip)
-(62 MB). It unzips to a `DriloBoard` folder holding `DriloBoard.app` and a
+(35 MB). It unzips to a `DriloBoard` folder holding `DriloBoard.app` and a
 short read-me. Keep the app in that folder: the library and the thumbnail
 cache are created **next to the app** (never inside it), so the folder is
 portable exactly like the Windows one.

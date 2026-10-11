@@ -85,6 +85,8 @@ or a **Word document**.
 Untick *Grades* (or `Ctrl+G`) to hide them all — handy before projecting in
 class; nothing is deleted.
 
+![Grading a GIF in the large window, with a loop fragment on the frame bar](docs/grades.png)
+
 **A/B comparison**
 Mark one image as **A** and another as **B** — the marks stay put while you
 browse other folders — and the two are overlaid with an **opacity slider** to
@@ -125,7 +127,7 @@ show as amber diamonds on the time bar, jump from one to the next, are saved
 with the library and undo with `Ctrl+Z`. Every button shows its shortcut when
 you hover over it.
 
-![A video on a keyframe, with keyframes marked on the time bar, in the light theme](docs/video.png)
+![A video on a keyframe, with keyframes and a loop fragment on the time bar and its grade below, in the light theme](docs/video.png)
 
 **Dark or light**
 The **Light / Dark** button in the top-right corner, *View ▸ theme* or

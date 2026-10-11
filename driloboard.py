@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import html
 import json
 import math
 import ntpath
@@ -33,15 +34,16 @@ from PySide6.QtCore import (QAbstractListModel, QByteArray, QEvent, QMimeData, Q
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QIcon, QImage, QImageReader,
                            QImageWriter, QKeySequence, QPainter, QPainterPath,
                            QPainterPathStroker, QPalette, QPen, QPixmap, QShortcut,
-                           QTransform)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QBoxLayout, QCheckBox,
+                           QTextCursor, QTransform)
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QBoxLayout, QCheckBox,
                                QComboBox,
                                QDialog, QDoubleSpinBox, QStyleOptionViewItem,
                                QFileDialog, QFrame, QGraphicsItem, QGraphicsPixmapItem,
                                QGraphicsScene,
                                QGraphicsView, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QListView, QMainWindow,
-                               QMenu, QMessageBox, QPushButton, QSlider, QSplitter,
+                               QMenu, QMessageBox, QPlainTextEdit, QPushButton,
+                               QSizePolicy, QSlider, QSplitter,
                                QButtonGroup, QColorDialog, QGraphicsPathItem,
                                QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionSlider,
                                QTextBrowser, QTableWidget, QTableWidgetItem, QHeaderView, QKeySequenceEdit,
@@ -138,6 +140,11 @@ DURATION_ROLE = int(Qt.ItemDataRole.UserRole) + 2     # ms de un video, o None
 VIDEO_EXTS = {".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".wmv", ".mpg",
               ".mpeg", ".ogv", ".3gp", ".flv", ".mts", ".m2ts"}
 VIDEO_THUMB_TIMEOUT_MS = 8000        # un video que no da fotograma en este tiempo, falla
+# Los GIF son imagenes (salen siempre), pero en la vista previa y en el visor
+# grande se animan, con su barra de fotogramas
+GIF_EXTS = {".gif"}
+GIF_CACHE_MB = 300                   # fotogramas de un GIF guardados ya decodificados
+GRADE_MAX = 10.0                     # las notas van de 0 a 10
 KEYFRAME_COLOR = "#f0a500"           # los fotogramas clave, en la barra y en los botones
 
 # Atajos del reproductor. Van en los bocadillos de los botones y en la ayuda,
@@ -184,6 +191,8 @@ SHORTCUT_DEFS = [
     ("mark_a", "Mark the image as A", "A"),
     ("mark_b", "Mark the image as B", "B"),
     ("edit", "Open the editor", "E"),
+    ("note", "Grade / comment the image", "N"),
+    ("show_notes", "Show / hide grades and comments", "Ctrl+G"),
     ("before", "Before / after (hold to see the original)", "Z"),
     ("refresh", "Refresh folders", "F5"),
     ("theme", "Switch dark / light theme", "Ctrl+T"),
@@ -198,7 +207,7 @@ SHORTCUT_FIXED = [
     ("Undo", "Ctrl+Z"), ("Redo", "Ctrl+Y"),
     ("Zoom in / out (editor)", "Ctrl++ / Ctrl+-"),
     ("Large viewer: previous / next image", "\u2190 / \u2192"),
-    ("Large viewer: play / pause a video", "Space"),
+    ("Large viewer: play / pause a video or GIF", "Space"),
     ("Large viewer: full screen", "F / F11"),
     ("Close a window", "Esc"),
 ]
@@ -346,6 +355,10 @@ def supported_exts() -> set[str]:
 
 def is_video(path: str | None) -> bool:
     return bool(path) and os.path.splitext(path)[1].lower() in VIDEO_EXTS
+
+
+def is_gif(path: str | None) -> bool:
+    return bool(path) and os.path.splitext(path)[1].lower() in GIF_EXTS
 
 
 def format_duration(ms: int | None) -> str:
@@ -1013,15 +1026,52 @@ def clean_video_marks(crudo) -> dict[str, list[int]]:
     return limpio
 
 
+def clean_notes(crudo) -> dict[str, dict]:
+    """Notas y comentarios leidos de un json: {ruta: {grade, comment}}.
+
+    La nota va de 0 a GRADE_MAX con dos decimales como mucho; lo que no
+    cuadra se ignora, y un archivo sin nota ni comentario no se guarda."""
+    limpio = {}
+    if isinstance(crudo, dict):
+        for p, n in crudo.items():
+            if not isinstance(p, str) or not isinstance(n, dict):
+                continue
+            d = {}
+            g = n.get("grade")
+            if isinstance(g, (int, float)) and not isinstance(g, bool) \
+                    and 0 <= g <= GRADE_MAX:
+                d["grade"] = round(float(g), 2)
+            c = n.get("comment")
+            if isinstance(c, str) and c.strip():
+                d["comment"] = c.rstrip()
+            if d:
+                limpio[p] = d
+    return limpio
+
+
+def format_grade(g: float) -> str:
+    """8.0 -> 8, 7.5 -> 7.5, 6.25 -> 6.25."""
+    return ("%.2f" % g).rstrip("0").rstrip(".")
+
+
+def grade_color(g: float) -> str:
+    """Rojo si no llega a la mitad, ambar hasta el 7 de 10, verde de ahi arriba."""
+    k = g / GRADE_MAX
+    return "#d64541" if k < 0.5 else "#e09400" if k < 0.7 else "#3fa34d"
+
+
 def build_export(folders: list, categories: list, edits: dict,
                  extras: dict | None = None,
-                 video_marks: dict | None = None) -> dict:
+                 video_marks: dict | None = None,
+                 notes: dict | None = None) -> dict:
     video_marks = video_marks or {}
+    notes = notes or {}
     todas = list(folders)
     for c, _ in iter_cats(categories):
         todas.extend(c["images"])
     todas.extend(edits)
     todas.extend(video_marks)
+    todas.extend(notes)
     raiz = common_root(todas)
 
     def cats(lista):
@@ -1035,6 +1085,8 @@ def build_export(folders: list, categories: list, edits: dict,
          "edits": {to_portable(p, raiz): e for p, e in edits.items()}}
     if video_marks:
         d["video_marks"] = {to_portable(p, raiz): m for p, m in video_marks.items()}
+    if notes:
+        d["notes"] = {to_portable(p, raiz): n for p, n in notes.items()}
     d.update(extras or {})
     return d
 
@@ -1043,6 +1095,12 @@ def read_export_marks(data: dict, raiz: str) -> dict[str, list[int]]:
     """Los fotogramas clave de un archivo exportado, con rutas de este equipo."""
     return {from_portable(p, raiz): m
             for p, m in clean_video_marks(data.get("video_marks")).items()}
+
+
+def read_export_notes(data: dict, raiz: str) -> dict[str, dict]:
+    """Las notas y comentarios de un archivo exportado, con rutas de este equipo."""
+    return {from_portable(p, raiz): n
+            for p, n in clean_notes(data.get("notes")).items()}
 
 
 def read_export(data: dict, raiz: str):
@@ -1346,6 +1404,7 @@ class ThumbModel(QAbstractListModel):
         self.icon = 160
         self.show_names = True
         self.edit_for = lambda path: None       # lo rellena la ventana principal
+        self.note_for = lambda path: None
         self.pool = QThreadPool()
         self.pool.setMaxThreadCount(max(2, (os.cpu_count() or 4) - 1))
         self.signals = ThumbSignals()
@@ -1426,7 +1485,16 @@ class ThumbModel(QAbstractListModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return os.path.basename(path) if self.show_names else ""
         if role == Qt.ItemDataRole.ToolTipRole:
-            return path
+            nota = self.note_for(path)
+            if not nota:
+                return path
+            # texto enriquecido: asi Qt parte las lineas largas del comentario
+            partes = [html.escape(path)]
+            if "grade" in nota:
+                partes.append("<b>Grade %s</b>" % format_grade(nota["grade"]))
+            if "comment" in nota:
+                partes.append(html.escape(nota["comment"]).replace("\n", "<br>"))
+            return "<p style='white-space:pre-wrap'>%s</p>" % "<br>".join(partes)
         if role == PATH_ROLE:
             return path
         if role == DURATION_ROLE:
@@ -1558,24 +1626,83 @@ MARK_COLORS = {"A": "#2d8fd5", "B": "#e6542f"}
 class ThumbDelegate(QStyledItemDelegate):
     """Anade a la miniatura los puntos de sus categorias y la marca A o B."""
 
-    def __init__(self, colors_for, mark_of, is_edited, parent=None):
+    def __init__(self, colors_for, mark_of, is_edited, parent=None,
+                 note_of=lambda path: None):
         super().__init__(parent)
         self.colors_for = colors_for
         self.mark_of = mark_of
         self.is_edited = is_edited
+        self.note_of = note_of
 
     PAD = 6             # aire para los marcos: el azul por fuera, el verde dentro
 
     @staticmethod
-    def _video_badge(painter, opt, index):
-        """Triangulo de play y duracion, abajo a la izquierda del fotograma."""
+    def _picture_rect(opt, index) -> QRectF:
+        """Donde cae la miniatura dentro de la celda."""
         pm = index.data(Qt.ItemDataRole.DecorationRole)
         ancho = pm.width() if isinstance(pm, QPixmap) and not pm.isNull() else 0
         alto = pm.height() if ancho else opt.decorationSize.height()
         ancho = ancho or opt.decorationSize.width()
         # el fotograma va centrado en horizontal y pegado arriba de la celda
         x0 = opt.rect.left() + (opt.rect.width() - ancho) / 2
-        y1 = opt.rect.top() + 3 + alto
+        return QRectF(x0, opt.rect.top() + 3, ancho, alto)
+
+    @staticmethod
+    def _gif_badge(painter, opt, index):
+        """Un rotulo GIF abajo a la izquierda, como el ▶ de los videos."""
+        r = ThumbDelegate._picture_rect(opt, index)
+        f = painter.font()
+        f.setPixelSize(10)
+        f.setBold(True)
+        painter.setFont(f)
+        caja = QRectF(r.left() + 5, r.bottom() - 21, 30, 16)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 170))
+        painter.drawRoundedRect(caja, 4, 4)
+        painter.setPen(QColor("white"))
+        painter.drawText(caja, Qt.AlignmentFlag.AlignCenter, "GIF")
+
+    @staticmethod
+    def _note_badge(painter, opt, index, nota: dict):
+        """La nota abajo a la derecha, en su color; un bocadillo si hay comentario."""
+        r = ThumbDelegate._picture_rect(opt, index)
+        x = r.right() - 5
+        if "grade" in nota:
+            texto = format_grade(nota["grade"])
+            f = painter.font()
+            f.setPixelSize(12)
+            f.setBold(True)
+            painter.setFont(f)
+            w = max(22, painter.fontMetrics().horizontalAdvance(texto) + 10)
+            caja = QRectF(x - w, r.bottom() - 24, w, 19)
+            painter.setPen(QPen(QColor(255, 255, 255, 220), 1))
+            painter.setBrush(QColor(grade_color(nota["grade"])))
+            painter.drawRoundedRect(caja, 5, 5)
+            painter.setPen(QColor("white"))
+            painter.drawText(caja, Qt.AlignmentFlag.AlignCenter, texto)
+            x = caja.left() - 4
+        if "comment" in nota:
+            caja = QRectF(x - 20, r.bottom() - 24, 20, 19)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 170))
+            painter.drawRoundedRect(caja, 4, 4)
+            # bocadillo blanco con su piquito y tres lineas de texto
+            globo = QRectF(caja.left() + 4, caja.top() + 3, 12, 9)
+            painter.setBrush(QColor("white"))
+            painter.drawRoundedRect(globo, 2, 2)
+            painter.drawPolygon([QPointF(globo.left() + 2.5, globo.bottom() - 0.5),
+                                 QPointF(globo.left() + 6.5, globo.bottom() - 0.5),
+                                 QPointF(globo.left() + 2.5, globo.bottom() + 3.5)])
+            painter.setPen(QPen(QColor(0, 0, 0, 170), 1))
+            for dy in (2.5, 4.5, 6.5):
+                painter.drawLine(QPointF(globo.left() + 2.5, globo.top() + dy),
+                                 QPointF(globo.right() - 2.5, globo.top() + dy))
+
+    @staticmethod
+    def _video_badge(painter, opt, index):
+        """Triangulo de play y duracion, abajo a la izquierda del fotograma."""
+        r = ThumbDelegate._picture_rect(opt, index)
+        x0, y1 = r.left(), r.bottom()
         texto = format_duration(index.data(DURATION_ROLE)) \
             if index.data(DURATION_ROLE) is not None else ""
         f = painter.font()
@@ -1647,6 +1774,11 @@ class ThumbDelegate(QStyledItemDelegate):
 
         if is_video(path):
             self._video_badge(painter, opt, index)
+        elif is_gif(path):
+            self._gif_badge(painter, opt, index)
+        nota = self.note_of(path)
+        if nota:
+            self._note_badge(painter, opt, index, nota)
 
         mark = self.mark_of(path)
         if mark:
@@ -1880,11 +2012,16 @@ class CategoryTree(EmptyHint, QTreeWidget):
 class ZoomView(QGraphicsView):
     """QGraphicsView con zoom de rueda."""
     zoomed = Signal()
+    resized = Signal()
 
     def wheelEvent(self, e):
         f = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
         self.scale(f, f)
         self.zoomed.emit()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.resized.emit()
 
 
 MAX_PIXELS = 80_000_000     # tope de seguridad: evita quedarse sin memoria
@@ -1986,6 +2123,146 @@ def shortcut_tip(accion: str) -> str:
     return "<nobr>%s&nbsp;&nbsp;<b>%s</b></nobr>" % (titulo, SK.text(accion))
 
 
+class GifPlayer(QObject):
+    """Los fotogramas de un GIF animado, a demanda y ya con la edicion puesta.
+
+    QMovie no sirve: al saltar a un fotograma ya visto devolvia otro. Aqui se
+    leen en orden con QImageReader (que ya los da compuestos, a tamano
+    completo) y se guardan hasta GIF_CACHE_MB; si no caben todos, volver
+    atras relee desde el principio, que en un GIF es rapido.
+    """
+    frameShown = Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.path: str | None = None
+        self.count = 0
+        self.size = QSize()                 # tamano original del GIF
+        self.reduced = False
+        self.index = -1
+        self.image = QImage()               # el fotograma que se ve
+        self.playing = False
+        self._reader = None
+        self._next = 0                      # el que daria el lector ahora
+        self._frames: dict[int, QImage] = {}
+        self._delays: dict[int, int] = {}
+        self._bytes = 0
+        self._edit = None
+        self._k = 1.0
+        self._scaled = QSize()
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(lambda: self.go(self.index + 1))
+
+    def open(self, path: str, max_side: int, edit: dict | None) -> bool:
+        """False si no es un GIF animado: entonces se ensena como imagen fija."""
+        self.close()
+        r = QImageReader(path)
+        if not r.supportsAnimation() or r.imageCount() < 2:
+            return False
+        full = r.size()
+        self._k, self._scaled, self.reduced = 1.0, QSize(), False
+        if full.isValid():
+            if max_side and max(full.width(), full.height()) > max_side:
+                self._scaled = full.scaled(QSize(max_side, max_side),
+                                           Qt.AspectRatioMode.KeepAspectRatio)
+            elif full.width() * full.height() > MAX_PIXELS:
+                k = (MAX_PIXELS / (full.width() * full.height())) ** 0.5
+                self._scaled = QSize(max(1, int(full.width() * k)),
+                                     max(1, int(full.height() * k)))
+            if self._scaled.isValid():
+                self._k = self._scaled.width() / full.width()
+                self.reduced = True
+        self.path, self.count, self.size, self._edit = path, r.imageCount(), full, edit
+        self._rewind()
+        return self.go(0)
+
+    def close(self):
+        self._timer.stop()
+        self.playing = False
+        self.path, self._reader = None, None
+        self.count, self.index = 0, -1
+        self.image = QImage()
+        self._drop_cache()
+
+    def set_edit(self, edit: dict | None):
+        """Otra edicion: lo guardado ya no vale; se sigue en el mismo fotograma."""
+        if self.path is None:
+            return
+        self._edit = edit
+        self._drop_cache()
+        self._rewind()
+        self.go(max(0, self.index), reprogramar=False)
+
+    def _drop_cache(self):
+        self._frames.clear()
+        self._bytes = 0
+
+    def _rewind(self):
+        self._reader = QImageReader(self.path)
+        if self._scaled.isValid():
+            self._reader.setScaledSize(self._scaled)
+        self._next = 0
+
+    def _frame(self, i: int) -> QImage:
+        if i in self._frames:
+            return self._frames[i]
+        if i < self._next:
+            self._rewind()                  # no estaba guardado: se relee
+        img = QImage()
+        while self._next <= i:
+            crudo = self._reader.read()
+            if crudo.isNull():
+                break
+            n = self._next
+            self._next += 1
+            self._delays[n] = self._reader.nextImageDelay()
+            cabe = self._bytes + crudo.sizeInBytes() <= GIF_CACHE_MB * 1024 * 1024
+            if n == i or (cabe and n not in self._frames):
+                hecho = apply_edit(crudo, scaled_edit(self._edit, self._k))
+                if cabe:
+                    self._frames[n] = hecho
+                    self._bytes += hecho.sizeInBytes()
+                if n == i:
+                    img = hecho
+        return img
+
+    def delay(self, i: int) -> int:
+        # como los navegadores: un retardo de 0 o 10 ms se toma como 100
+        d = self._delays.get(i, 100)
+        return d if d > 10 else 100
+
+    def go(self, i: int, reprogramar: bool = True) -> bool:
+        if not self.count:
+            return False
+        i %= self.count                     # al pasar del ultimo vuelve al primero
+        img = self._frame(i)
+        if img.isNull():
+            self.pause()
+            return False
+        self.index, self.image = i, img
+        self.frameShown.emit(i)
+        if self.playing and reprogramar:
+            self._timer.start(self.delay(i))
+        return True
+
+    def play(self):
+        if self.count and not self.playing:
+            self.playing = True
+            self._timer.start(self.delay(self.index))
+
+    def pause(self):
+        self.playing = False
+        self._timer.stop()
+
+    def toggle(self):
+        self.pause() if self.playing else self.play()
+
+    def step(self, delta: int):
+        self.pause()
+        self.go(self.index + delta)
+
+
 class PreviewPane(QWidget):
     """Visor de una imagen. Se usa incrustado (abajo del centro) y en ventana.
 
@@ -2005,6 +2282,8 @@ class PreviewPane(QWidget):
         self.comparing = False
         self.prefix = ""
         self.edit_for = lambda path: None     # lo rellena la ventana principal
+        self.note_for = lambda path: None     # nota y comentario, tambien
+        self._caption_base = ""
         self._fitted = True
         self._tokens = [0, 0]                   # una ficha por hueco (A y B)
         self._pool = QThreadPool(self)
@@ -2029,9 +2308,17 @@ class PreviewPane(QWidget):
         self.view.setFrameShape(QFrame.Shape.NoFrame)
         self.view.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # las flechas son de la rejilla
         self.view.zoomed.connect(self._on_zoom)
+        # al salir o irse la barra del GIF la vista cambia de alto sin que
+        # cambie el panel: se reencaja igual. Con un video no: reencajar en
+        # mitad de un salto de fotograma llegaba a colgar el reproductor
+        self.view.resized.connect(
+            lambda: self._fitted and not self.showing_video and self.fit())
 
         self.caption = QLabel("")
         themed(self.caption, css="color:%(caption)s; padding:2px 6px;")
+        # un comentario largo en el pie no debe ensanchar la ventana: se corta
+        self.caption.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                   QSizePolicy.Policy.Preferred)
 
         bar = QHBoxLayout()
         bar.setContentsMargins(0, 0, 0, 0)
@@ -2093,18 +2380,18 @@ class PreviewPane(QWidget):
         self._tries = 0
         self._fps_known = False
 
-        self._video_tips = {}
+        self._video_tips = []                       # (accion, boton)
         SK.listeners.append(lambda: [b.setToolTip(shortcut_tip(a))
-                                     for a, b in self._video_tips.items()])
+                                     for a, b in self._video_tips])
 
-        def boton(accion, fn):
+        def boton(accion, fn, barra=vid_lay):
             b = QToolButton()
             b.setAutoRaise(True)
             b.setToolTip(shortcut_tip(accion))
-            self._video_tips[accion] = b
+            self._video_tips.append((accion, b))
             themed(b, icon=accion)
             b.clicked.connect(fn)
-            vid_lay.addWidget(b)
+            barra.addWidget(b)
             return b
 
         self.b_key_prev = boton("key_prev", lambda: self.jump_keyframe(-1))
@@ -2171,11 +2458,42 @@ class PreviewPane(QWidget):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.video_bar.hide()
 
+        # barra de GIF: solo con un GIF animado puesto. Arranca solo (no suena)
+        # y se mueve fotograma a fotograma con las mismas teclas que un video
+        self.gif = GifPlayer(self)
+        self.gif.frameShown.connect(self._on_gif_frame)
+        self.showing_gif = False
+        self._gif_new = False
+        self._gif_resume = False
+        self.gif_bar = QWidget()
+        gif_lay = QHBoxLayout(self.gif_bar)
+        gif_lay.setContentsMargins(6, 2, 6, 2)
+        self.b_gif_prev = boton("frame_prev", lambda: self.step_frame(-1), gif_lay)
+        self.b_gif_play = QToolButton()
+        self.b_gif_play.setAutoRaise(True)
+        self.b_gif_play.setToolTip("Play / pause")
+        themed(self.b_gif_play, icon="pause")
+        self.b_gif_play.clicked.connect(self.toggle_play)
+        gif_lay.addWidget(self.b_gif_play)
+        self.b_gif_next = boton("frame_next", lambda: self.step_frame(1), gif_lay)
+        self.sld_gif = QSlider(Qt.Orientation.Horizontal)
+        self.sld_gif.setToolTip("Drag to move through the frames of the GIF")
+        self.sld_gif.valueChanged.connect(self._on_gif_seek)
+        gif_lay.addWidget(self.sld_gif, 1)
+        self.lbl_gif = QLabel("")
+        themed(self.lbl_gif, css="color:%(caption)s;")
+        gif_lay.addWidget(self.lbl_gif)
+        gif_lay.addSpacing(8)
+        for w in (self.b_gif_prev, self.b_gif_play, self.b_gif_next, self.sld_gif):
+            w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.gif_bar.hide()
+
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         lay.addWidget(self.view, 1)
         lay.addWidget(self.video_bar)
+        lay.addWidget(self.gif_bar)
         lay.addWidget(self.cmp_bar)
         lay.addLayout(bar)
 
@@ -2187,14 +2505,37 @@ class PreviewPane(QWidget):
     def _on_zoom(self):
         self._fitted = False
 
+    def _show_caption(self, texto: str):
+        """El pie de un archivo ya abierto, con su nota y su comentario detras."""
+        self._caption_base = texto
+        nota = self.note_for(self.loaded_path) or {}
+        extra = []
+        if "grade" in nota:
+            extra.append("Grade %s" % format_grade(nota["grade"]))
+        comentario = nota.get("comment", "")
+        if comentario:
+            linea = " ".join(comentario.split())
+            extra.append("\u201c%s\u201d" % (linea if len(linea) <= 70
+                                               else linea[:69].rstrip() + "\u2026"))
+        self.caption.setText("   ·   ".join([texto] + extra))
+        self.caption.setToolTip(comentario)
+
+    def refresh_note(self):
+        """Tras cambiar la nota del archivo que se esta viendo."""
+        if self._caption_base and not self.comparing:
+            self._show_caption(self._caption_base)
+
     def show_path(self, path: str | None, immediate: bool = False):
         if self.comparing:
             self.stop_compare(refit=False)
         self.path = path
         self._tokens[0] += 1                # invalida lo que estuviera cargando
         self._timer.stop()
+        self._caption_base = ""
+        self.caption.setToolTip("")
         if path is None:
             self.stop_video()
+            self.stop_gif()
             self.loaded_path = None
             self.item.setPixmap(QPixmap())
             self.caption.setText("")
@@ -2211,9 +2552,83 @@ class PreviewPane(QWidget):
             self._load_video(self.path)
             return
         self.stop_video()
+        if is_gif(self.path):
+            if self.showing_gif and self.gif.path == self.path:
+                # el mismo GIF (otra edicion, o Z de antes/despues): sin
+                # volver al primer fotograma
+                self.gif.set_edit(self.edit_for(self.path))
+                self._caption_gif()
+                return
+            if self._load_gif(self.path):
+                return
+        self.stop_gif()                     # un GIF quieto va como cualquier imagen
         self._pool.start(PreviewTask(0, self._tokens[0], self.path,
                                      self.max_side, self._signals,
                                      self.edit_for(self.path)))
+
+    # --- GIF animado -------------------------------------------------------
+    def _load_gif(self, path: str) -> bool:
+        self.showing_gif = True             # antes de abrir: el primer fotograma
+        self._gif_new = True                # llega ya dentro de open()
+        self.loaded_path = path
+        if not self.gif.open(path, self.max_side, self.edit_for(path)):
+            self.showing_gif = False
+            return False
+        self.sld_gif.blockSignals(True)
+        self.sld_gif.setRange(0, self.gif.count - 1)
+        self.sld_gif.setValue(0)
+        self.sld_gif.blockSignals(False)
+        self.gif_bar.show()
+        for atajo in self._video_shortcuts[:2]:     # fotograma anterior / siguiente
+            atajo.setEnabled(True)
+        self.gif.play()
+        self._gif_state()
+        return True
+
+    def stop_gif(self):
+        if not self.showing_gif:
+            return
+        self.gif.close()
+        self.showing_gif = False
+        self._gif_resume = False
+        self.gif_bar.hide()
+        if not self.showing_video:
+            for atajo in self._video_shortcuts[:2]:
+                atajo.setEnabled(False)
+
+    def _on_gif_frame(self, i: int):
+        if not self.showing_gif:
+            return
+        self.item.setPixmap(QPixmap.fromImage(self.gif.image))
+        if self._gif_new:
+            self._gif_new = False
+            self.scene.setSceneRect(self.item.boundingRect())
+            self.fit()
+            self._caption_gif()
+        self.sld_gif.blockSignals(True)
+        self.sld_gif.setValue(i)
+        self.sld_gif.blockSignals(False)
+        self.lbl_gif.setText("frame %d / %d" % (i + 1, self.gif.count))
+
+    def _on_gif_seek(self, i: int):
+        if self.showing_gif and i != self.gif.index:
+            self.gif.pause()
+            self.gif.go(i)
+            self._gif_state()
+
+    def _gif_state(self):
+        themed(self.b_gif_play, icon="pause" if self.gif.playing else "play")
+
+    def _caption_gif(self):
+        w, h = self.gif.size.width(), self.gif.size.height()
+        e = self.edit_for(self.gif.path)
+        if not is_empty_edit(e):
+            w, h = edited_size(e, w, h)
+        self._show_caption("%s%s   ·   %d x %d   ·   GIF, %d frames%s"
+                           % (self.prefix, os.path.basename(self.gif.path or ""),
+                              w, h, self.gif.count,
+                              "   (scaled down to be able to show it)"
+                              if self.gif.reduced else ""))
 
     # --- video -------------------------------------------------------------
     def _ensure_player(self):
@@ -2238,6 +2653,7 @@ class PreviewPane(QWidget):
 
     def _load_video(self, path: str):
         """Abre en pausa: se ve el primer fotograma y no suena nada al pasar."""
+        self.stop_gif()
         self._ensure_player()
         self.player.stop()
         self.item.setPixmap(QPixmap())
@@ -2265,8 +2681,8 @@ class PreviewPane(QWidget):
         if self.player is not None:
             self.player.stop()
             self.player.setSource(QUrl())
-        for atajo in self._video_shortcuts:
-            atajo.setEnabled(False)
+        for i, atajo in enumerate(self._video_shortcuts):
+            atajo.setEnabled(self.showing_gif and i < 2)    # un GIF usa los de fotograma
         if self.showing_video:
             self.showing_video = False
             self._want_us = None
@@ -2331,6 +2747,10 @@ class PreviewPane(QWidget):
         self._refresh_frame_ui()
 
     def step_frame(self, delta: int):
+        if self.showing_gif:
+            self.gif.step(delta)
+            self._gif_state()
+            return
         if not self.showing_video:
             return
         self._go_to_frame_us(self.current_frame_us() + delta * self._frame_us)
@@ -2424,6 +2844,10 @@ class PreviewPane(QWidget):
                 == QMediaPlayer.PlaybackState.PlayingState)
 
     def toggle_play(self):
+        if self.showing_gif:
+            self.gif.toggle()
+            self._gif_state()
+            return
         if not self.showing_video or self.player is None:
             return
         if self.is_playing():
@@ -2443,7 +2867,7 @@ class PreviewPane(QWidget):
             partes.append(format_duration(self.player.duration()))
         else:
             partes.append("opening…")
-        self.caption.setText("   ·   ".join(partes))
+        self._show_caption("   ·   ".join(partes))
 
     def _on_native_size(self, tam):
         if not self.showing_video or not tam.isValid() or tam.isEmpty():
@@ -2499,12 +2923,22 @@ class PreviewPane(QWidget):
     def hideEvent(self, e):
         if self.is_playing():
             self.player.pause()                 # oculto no deberia seguir sonando
+        if self.showing_gif and self.gif.playing:
+            self.gif.pause()                    # ni gastando en fotogramas que no se ven
+            self._gif_resume = True
         super().hideEvent(e)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self.showing_gif and self._gif_resume:
+            self._gif_resume = False
+            self.gif.play()
 
     # --- comparar dos imagenes --------------------------------------------
     def compare(self, path_a: str, path_b: str, opacity: int | None = None):
         self._timer.stop()
         self.stop_video()
+        self.stop_gif()                         # se compara su primer fotograma
         self.comparing = True
         self.path, self.path_b = path_a, path_b
         self.loaded_path = self.loaded_path_b = None
@@ -2585,10 +3019,10 @@ class PreviewPane(QWidget):
             return
         self.scene.setSceneRect(self.item.boundingRect())
         self.fit()
-        self.caption.setText("%s%s   ·   %d x %d%s"
-                             % (self.prefix, os.path.basename(path),
-                                size.width(), size.height(),
-                                "   (scaled down to be able to show it)" if reduced else ""))
+        self._show_caption("%s%s   ·   %d x %d%s"
+                           % (self.prefix, os.path.basename(path),
+                              size.width(), size.height(),
+                              "   (scaled down to be able to show it)" if reduced else ""))
 
     def fit(self):
         if self.showing_video:
@@ -3506,7 +3940,8 @@ class HoldKey(QObject):
         elif (t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease)
                 and self.key and ev.key() == self.key and ev.modifiers() == self.mods
                 and (self.activa or QApplication.activeWindow() is self.ventana)):
-            if isinstance(QApplication.focusWidget(), QLineEdit):
+            if isinstance(QApplication.focusWidget(),
+                          (QLineEdit, QPlainTextEdit, QAbstractSpinBox)):
                 return False
             if not ev.isAutoRepeat():
                 self._set(t == QEvent.Type.KeyPress)
@@ -4342,6 +4777,30 @@ fullscreen, <b>Esc</b> closes.</li>
 belongs to those categories. A green frame means it has edits or drawings.</li>
 <li><b>Uncategorised only</b> leaves just what you have not classified yet —
 handy to see what is left to do.</li>
+<li><b>Animated GIFs</b> carry a <b>GIF</b> badge and play in the preview and the
+large window. The bar under them pauses, steps one frame back or forward
+(<b>[[frame_prev]]</b> / <b>[[frame_next]]</b>, as with videos) and moves through
+the frames. Edits apply to every frame; the editor and the A/B comparison
+use the first one. <i>Export…</i> copies an unedited GIF as it is; an edited
+one comes out as a PNG of its first frame.</li>
+</ul>
+
+<h3>Grades and comments</h3>
+<ul>
+<li>Under the categories, <b>Grade &amp; comment</b> belongs to the thumbnail
+you have chosen: a grade from 0 to 10 (decimals allowed) and a free comment,
+for images, GIFs and videos alike.</li>
+<li>Press <b>[[note]]</b> (or right-click ▸ <i>Grade / comment…</i>) to jump to the
+grade box; <b>Tab</b> goes on to the comment. They are saved as you type.</li>
+<li>The grade shows on the thumbnail, red below 5, amber up to 7, green from
+there; a speech bubble means there is a comment. Hover over the thumbnail to
+read it. The preview and the large window show both under the image.</li>
+<li>Arrow down below 0, or <i>Clear</i>, removes the grade. Ctrl+Z undoes
+grades and comments, and they travel with <b>Export library…</b>.</li>
+<li>Untick <b>Grades</b> above the thumbnails (or <b>View ▸ Show grades and
+comments</b>, <b>[[show_notes]]</b>) to hide them everywhere — thumbnails,
+preview, large window and the panel — for instance before projecting in class.
+Nothing is deleted; tick it again to bring them back.</li>
 </ul>
 
 <h3>3 · Comparing two images</h3>
@@ -4417,6 +4876,8 @@ with the same name instead of duplicating them, and keeps your own edits.</li>
 <tr><td><b>[[mark_a]]</b> / <b>[[mark_b]]</b></td><td>mark the chosen image as A or B</td></tr>
 <tr><td><b>[[compare]]</b></td><td>compare A and B</td></tr>
 <tr><td><b>[[edit]]</b></td><td>open the editor</td></tr>
+<tr><td><b>[[note]]</b></td><td>grade / comment the chosen file</td></tr>
+<tr><td><b>[[show_notes]]</b></td><td>show / hide grades and comments</td></tr>
 <tr><td><b>[[before]]</b> (hold)</td><td>before / after: show the original</td></tr>
 <tr><td><b>[[fit]]</b></td><td>fit the image in view</td></tr>
 <tr><td><b>[[assign_1]]…[[assign_9]]</b></td><td>assign to the first nine categories</td></tr>
@@ -4596,6 +5057,8 @@ class ImageViewer(QDialog):
         # tal cual, sin recortes, giros ni dibujos, al contrario que la vista previa
         if hasattr(parent, "edit_of"):
             self.pane.edit_for = parent.edit_of
+        if hasattr(parent, "visible_note_of"):
+            self.pane.note_for = parent.visible_note_of
         # los fotogramas clave son de la biblioteca: se leen y se guardan en la
         # ventana principal, y Ctrl+Z los deshace tambien desde aqui
         if hasattr(parent, "marks_of"):
@@ -4606,9 +5069,10 @@ class ImageViewer(QDialog):
 
         QShortcut(QKeySequence(Qt.Key.Key_Right), self, lambda: self.step(1))
         QShortcut(QKeySequence(Qt.Key.Key_Left), self, lambda: self.step(-1))
-        # con un video, espacio es reproducir / pausar; con una imagen, pasar
+        # con un video o un GIF, espacio es reproducir / pausar; con una imagen, pasar
         QShortcut(QKeySequence(Qt.Key.Key_Space), self,
-                  lambda: self.pane.toggle_play() if self.pane.showing_video
+                  lambda: self.pane.toggle_play()
+                  if self.pane.showing_video or self.pane.showing_gif
                   else self.step(1))
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, self.close)
         QShortcut(QKeySequence("F"), self, self._toggle_full)
@@ -4630,6 +5094,7 @@ class ImageViewer(QDialog):
 
     def done(self, r):
         self.pane.stop_video()                  # que no siga sonando al cerrar
+        self.pane.stop_gif()
         super().done(r)
 
     def step(self, d: int):
@@ -4729,6 +5194,10 @@ class MainWindow(QMainWindow):
         self.mark_b: str | None = None               # comparar
         self.edits: dict[str, dict] = {}             # ruta -> receta de edicion
         self.video_marks: dict[str, list[int]] = {}  # ruta de video -> ms clave
+        self.notes: dict[str, dict] = {}             # ruta -> {grade, comment}
+        self._note_path: str | None = None           # el archivo que ensena el panel
+        self._note_loading = False
+        self.show_notes = True                       # verlas u ocultarlas (Ctrl+G)
         self.export_dir = ""
         self._undo: list = []
         self._redo: list = []
@@ -4863,6 +5332,11 @@ class MainWindow(QMainWindow):
         self.chk_names.toggled.connect(self.on_names)
         bar.addWidget(self.chk_names)
 
+        self.chk_notes = QCheckBox("Grades")
+        self.chk_notes.setChecked(True)
+        self.chk_notes.toggled.connect(self.set_show_notes)
+        bar.addWidget(self.chk_notes)
+
         bar.addWidget(QLabel("Size"))
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(64, 420)
@@ -4874,11 +5348,12 @@ class MainWindow(QMainWindow):
 
         self.model = ThumbModel(self)
         self.model.edit_for = self.edit_of
+        self.model.note_for = self.visible_note_of
         self.view = QListView()
         self.view.setModel(self.model)
         self.view.setItemDelegate(
             ThumbDelegate(self.colors_for_path, self.mark_of, self.is_edited,
-                          self.view))
+                          self.view, note_of=self.visible_note_of))
         self.view.setViewMode(QListView.ViewMode.IconMode)
         self.view.setResizeMode(QListView.ResizeMode.Adjust)
         self.view.setMovement(QListView.Movement.Static)
@@ -4894,10 +5369,12 @@ class MainWindow(QMainWindow):
         themed(self.view, css="QListView{background:%(grid)s;} "
                            "QListView::item{color:%(grid_text)s;}")
         self.view.selectionModel().currentChanged.connect(self.on_current_image)
+        self.view.selectionModel().currentChanged.connect(self.sync_note_panel)
         self.view.selectionModel().selectionChanged.connect(self.on_selection_changed)
 
         self.preview = PreviewPane()
         self.preview.edit_for = self.preview_edit_of
+        self.preview.note_for = self.visible_note_of
         self._before = False
         HoldKey("before", self, self.set_before)
         self.preview.marks_for = self.marks_of
@@ -4919,6 +5396,7 @@ class MainWindow(QMainWindow):
         SK.bind(self, "mark_a", lambda: self.mark_image("A"))
         SK.bind(self, "mark_b", lambda: self.mark_image("B"))
         SK.bind(self, "edit", self.edit_current)
+        SK.bind(self, "note", self.focus_note)
         QShortcut(QKeySequence.StandardKey.Undo, self, self.undo)
         QShortcut(QKeySequence.StandardKey.Redo, self, self.redo)
         extra_redo_shortcut(self, self.redo)
@@ -5009,6 +5487,9 @@ class MainWindow(QMainWindow):
         self.cat_tree.itemSelectionChanged.connect(self.on_category_selected)
         self.cat_tree.itemDoubleClicked.connect(lambda *_: self.chk_only_cat.setChecked(True))
         lay.addWidget(self.cat_tree, 1)
+        self.note_panel = self._build_note_panel()
+        lay.addSpacing(6)
+        lay.addWidget(self.note_panel)
 
         def pista():
             self.cat_tree.placeholder = ("No categories yet",
@@ -5019,6 +5500,164 @@ class MainWindow(QMainWindow):
         pista()
         SK.listeners.append(pista)
         return w
+
+    def _build_note_panel(self) -> QWidget:
+        """Nota (0-10) y comentario del archivo elegido en la rejilla."""
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.section("GRADE & COMMENT"))
+        self.lbl_note_file = QLabel("")
+        themed(self.lbl_note_file, css="color:%(dim)s; font-size:11px;")
+        lay.addWidget(self.lbl_note_file)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Grade"))
+        self.spn_grade = QDoubleSpinBox()
+        # un paso por debajo de 0 es "sin nota": se ve como una raya
+        self.spn_grade.setRange(-0.5, GRADE_MAX)
+        self.spn_grade.setDecimals(2)
+        self.spn_grade.setSingleStep(0.5)
+        self.spn_grade.setSpecialValueText("\u2014")
+        self.spn_grade.setValue(-0.5)
+        self.spn_grade.setToolTip("From 0 to %s, decimals allowed. Arrow down "
+                                  "below 0 (or Clear) for no grade." % format_grade(GRADE_MAX))
+        self.spn_grade.valueChanged.connect(self._note_typed)
+        self.spn_grade.editingFinished.connect(self.commit_note)
+        row.addWidget(self.spn_grade)
+        row.addWidget(QLabel("/ %s" % format_grade(GRADE_MAX)))
+        row.addStretch(1)
+        self.b_note_clear = QPushButton("Clear")
+        self.b_note_clear.setToolTip("Remove the grade and the comment of this file")
+        self.b_note_clear.clicked.connect(self.clear_note)
+        row.addWidget(self.b_note_clear)
+        lay.addLayout(row)
+
+        self.txt_comment = QPlainTextEdit()
+        self.txt_comment.setPlaceholderText("Comment…")
+        self.txt_comment.setTabChangesFocus(True)
+        self.txt_comment.setFixedHeight(96)
+        self.txt_comment.textChanged.connect(self._note_typed)
+        lay.addWidget(self.txt_comment)
+
+        # se guarda al dejar de escribir un momento: un paso de deshacer por
+        # pausa, no uno por letra
+        self._note_timer = QTimer(self)
+        self._note_timer.setSingleShot(True)
+        self._note_timer.setInterval(800)
+        self._note_timer.timeout.connect(self.commit_note)
+        self.load_note_panel(None)
+        return w
+
+    # ---------------- nota y comentario ----------------------------------- #
+    def note_of(self, path: str | None) -> dict | None:
+        return self.notes.get(path) if path else None
+
+    def visible_note_of(self, path: str | None) -> dict | None:
+        """Lo que se pinta: nada si estan ocultas (para proyectar en clase)."""
+        return self.note_of(path) if self.show_notes else None
+
+    def set_show_notes(self, on: bool):
+        """Ensena u oculta notas y comentarios en todas partes, panel incluido.
+        Ocultar no borra nada: solo deja de verse."""
+        on = bool(on)
+        self.commit_note()
+        self.show_notes = on
+        for w in (self.chk_notes, self.act_notes):
+            if w.isChecked() != on:
+                w.blockSignals(True)
+                w.setChecked(on)
+                w.blockSignals(False)
+        self.note_panel.setVisible(on)
+        foco = QApplication.focusWidget()
+        if not on and foco is not None and self.note_panel.isAncestorOf(foco):
+            self.view.setFocus()                # que no se quede escribiendo a ciegas
+        self.view.viewport().update()
+        self.preview.refresh_note()
+        self.touch()
+
+    def _sync_notes_tip(self):
+        self.chk_notes.setToolTip("Show or hide grades and comments everywhere (%s). "
+                                  "Hiding them deletes nothing." % SK.text("show_notes"))
+
+    def load_note_panel(self, path: str | None):
+        """Ensena en el panel lo guardado de 'path', sin guardar nada."""
+        self._note_timer.stop()
+        self._note_path = path
+        n = (self.notes.get(path) or {}) if path else {}
+        self._note_loading = True
+        self.spn_grade.setValue(n.get("grade", -0.5))
+        self.txt_comment.setPlainText(n.get("comment", ""))
+        self.txt_comment.moveCursor(QTextCursor.MoveOperation.End)   # para seguir escribiendo
+        self._note_loading = False
+        for wd in (self.spn_grade, self.txt_comment, self.b_note_clear):
+            wd.setEnabled(path is not None)
+        self.lbl_note_file.setText(os.path.basename(path) if path
+                                   else "Choose a file to grade or comment on it")
+        self.lbl_note_file.setToolTip(path or "")
+
+    def note_target(self) -> str | None:
+        """El archivo del panel: el que tiene el foco en la rejilla."""
+        idx = self.view.currentIndex()
+        return idx.data(PATH_ROLE) if idx.isValid() else None
+
+    def sync_note_panel(self, *_):
+        """El panel sigue al archivo elegido en la rejilla."""
+        path = self.note_target()
+        if path != self._note_path:
+            self.commit_note()
+            self.load_note_panel(path)
+
+    def _note_typed(self, *_):
+        if not self._note_loading:
+            self._note_timer.start()
+
+    def commit_note(self):
+        """Pasa a la biblioteca lo escrito en el panel, si ha cambiado."""
+        self._note_timer.stop()
+        path = self._note_path
+        if not path:
+            return
+        nueva = {}
+        g = self.spn_grade.value()
+        if g >= 0:
+            nueva["grade"] = round(g, 2)
+        comentario = self.txt_comment.toPlainText().rstrip()
+        if comentario.strip():
+            nueva["comment"] = comentario
+        vieja = self.notes.get(path) or {}
+        if nueva == vieja:
+            return
+        que = "grade" if nueva.get("grade") != vieja.get("grade") else "comment"
+        self.push_undo("%s (%s)" % (que, os.path.basename(path)))
+        if nueva:
+            self.notes[path] = nueva
+        else:
+            self.notes.pop(path, None)
+        self.refresh_note_views()
+
+    def clear_note(self):
+        self._note_loading = True
+        self.spn_grade.setValue(-0.5)
+        self.txt_comment.clear()
+        self._note_loading = False
+        self.commit_note()
+
+    def refresh_note_views(self):
+        self.view.viewport().update()
+        self.preview.refresh_note()
+        self.touch()
+
+    def focus_note(self):
+        if not self.show_notes:
+            self.statusBar().showMessage("Grades and comments are hidden: %s shows them."
+                                         % SK.text("show_notes"), 5000)
+            return
+        if self._note_path is None:
+            self.statusBar().showMessage("Choose a file first.", 4000)
+            return
+        self.spn_grade.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.spn_grade.selectAll()
 
     # ---------------- orden ----------------------------------------------- #
     def _order_combo(self, on_change) -> QComboBox:
@@ -5441,6 +6080,7 @@ class MainWindow(QMainWindow):
         if self.chk_unassigned.isChecked():
             paths = [p for p in paths if p not in self._index]
         self.model.set_paths(paths)
+        self.sync_note_panel()
         videos = sum(1 for p in paths if is_video(p))
         texto = "%d images" % (len(paths) - videos)
         if videos:
@@ -5527,6 +6167,14 @@ class MainWindow(QMainWindow):
         v.addSeparator()
         a = v.addAction("Switch theme", self.toggle_theme)
         SK.bind_action(a, "theme")
+        v.addSeparator()
+        self.act_notes = v.addAction("Show grades and comments")
+        self.act_notes.setCheckable(True)
+        self.act_notes.setChecked(self.show_notes)
+        self.act_notes.toggled.connect(self.set_show_notes)
+        SK.bind_action(self.act_notes, "show_notes")
+        self._sync_notes_tip()
+        SK.listeners.append(self._sync_notes_tip)
 
         h = barra.addMenu("&Help")
         a = h.addAction("How DriloBoard works…", self.show_help)
@@ -5624,7 +6272,7 @@ class MainWindow(QMainWindow):
             {"recursive": self.recursive,
              "folder_order": self.cmb_folder_order.currentData(),
              "category_order": self.cmb_cat_order.currentData()},
-            video_marks=self.video_marks)
+            video_marks=self.video_marks, notes=self.notes)
         try:
             with open(destino, "w", encoding="utf-8") as f:
                 json.dump(datos, f, indent=1, ensure_ascii=False)
@@ -5636,14 +6284,16 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, APP_NAME,
             "Library exported to:\n%s\n\n"
-            "%d folder(s), %d categor(ies), %d classified image(s), %d edited.\n\n"
+            "%d folder(s), %d categor(ies), %d classified image(s), %d edited, "
+            "%d graded or commented.\n\n"
             "Paths are stored relative to:\n%s\n"
             "so this file also works on another computer, or after moving the "
             "images elsewhere."
             % (destino, len(self.folders), n_cats, n_imgs, len(self.edits),
-               datos["raiz"] or "(no common folder — absolute paths used)"))
+               len(self.notes), datos["raiz"] or "(no common folder — absolute paths used)"))
 
     def import_library(self):
+        self.commit_note()
         origen, _ = QFileDialog.getOpenFileName(
             self, "Import library", self.export_dir or str(DATA_DIR),
             "DriloBoard library (*%s);;JSON (*.json);;All files (*)" % LIB_EXT)
@@ -5695,8 +6345,9 @@ class MainWindow(QMainWindow):
 
         r = self.apply_import(datos, raiz, reemplazar=(pulsado is b_rep))
 
-        aviso = "Imported: %d folder(s), %d categor(ies), %d edit(s)." % (
-            r["folders"], r["categories"], r["edits"])
+        aviso = ("Imported: %d folder(s), %d categor(ies), %d edit(s), "
+                 "%d grade(s)/comment(s)." % (r["folders"], r["categories"],
+                                               r["edits"], r["notes"]))
         if r["saltadas"]:
             aviso += ("\n%d edit(s) were skipped: those images already had your "
                       "own edits, which were kept." % r["saltadas"])
@@ -5712,6 +6363,9 @@ class MainWindow(QMainWindow):
         que las pruebas puedan usar exactamente este mismo camino."""
         folders, cats, edits = read_export(datos, raiz)
         marcas = read_export_marks(datos, raiz)
+        notas = read_export_notes(datos, raiz)
+        self.commit_note()                   # lo escrito, antes; y el panel se suelta
+        self._note_path = None
         self.push_undo("import library")     # se puede deshacer con Ctrl+Z
         saltadas = 0
         if reemplazar:
@@ -5719,8 +6373,10 @@ class MainWindow(QMainWindow):
             self.categories = cats
             self.edits = edits
             self.video_marks = marcas
+            self.notes = notas
             nuevas_cats = len(list(iter_cats(cats)))
             nuevas_edits = len(edits)
+            nuevas_notas = len(notas)
         else:
             antes_f = set(self.folders)
             self.folders.extend(f for f in folders if f not in antes_f)
@@ -5734,6 +6390,13 @@ class MainWindow(QMainWindow):
                     saltadas += 1
             for p, ms in marcas.items():        # fundir: se suman los fotogramas clave
                 self.video_marks[p] = sorted(set(self.video_marks.get(p, [])) | set(ms))
+            nuevas_notas = 0
+            for p, n in notas.items():          # la nota o el comentario tuyos no se pisan
+                mia = self.notes.get(p, {})
+                junta = dict(n, **mia)
+                if junta != mia:
+                    self.notes[p] = junta
+                    nuevas_notas += 1
         self._set_mode(self.cmb_folder_order,
                        datos.get("folder_order", self.cmb_folder_order.currentData()))
         self._set_mode(self.cmb_cat_order,
@@ -5745,12 +6408,14 @@ class MainWindow(QMainWindow):
         self.refresh_folders(expand_roots=True)
         self.refresh_categories()
         self.refresh_images()
+        self.load_note_panel(self.note_target())
         self.model.invalidate(self.model.paths())
         self.touch()
         perdidas = sum(1 for c, _ in iter_cats(self.categories)
                        for p in c["images"] if not os.path.exists(p))
         return {"folders": len(folders), "categories": nuevas_cats,
-                "edits": nuevas_edits, "saltadas": saltadas, "perdidas": perdidas}
+                "edits": nuevas_edits, "saltadas": saltadas, "perdidas": perdidas,
+                "notes": nuevas_notas}
 
     # ---------------- deshacer y rehacer ---------------------------------- #
     def snapshot(self) -> dict:
@@ -5761,6 +6426,7 @@ class MainWindow(QMainWindow):
             "categories": copy.deepcopy(self.categories),
             "edits": copy.deepcopy(self.edits),
             "video_marks": copy.deepcopy(self.video_marks),
+            "notes": copy.deepcopy(self.notes),
             "folder_order": self.cmb_folder_order.currentData(),
             "category_order": self.cmb_cat_order.currentData(),
         }
@@ -5771,6 +6437,10 @@ class MainWindow(QMainWindow):
         self._redo.clear()
 
     def restore(self, snap: dict):
+        # el panel se suelta antes: lo que ensena es de antes de restaurar y
+        # al cambiar de imagen se guardaria encima
+        self._note_timer.stop()
+        self._note_path = None
         visibles = list(self.model.paths())
         # tras deshacer sueles querer repetir sobre lo mismo: no se pierde
         antes = set(self.selected_images())
@@ -5779,6 +6449,7 @@ class MainWindow(QMainWindow):
         self.categories = snap["categories"]
         self.edits = snap["edits"]
         self.video_marks = snap.get("video_marks", {})
+        self.notes = snap.get("notes", {})
         self._set_mode(self.cmb_folder_order, snap["folder_order"])
         self._set_mode(self.cmb_cat_order, snap["category_order"])
         self.refresh_folders()
@@ -5786,6 +6457,7 @@ class MainWindow(QMainWindow):
         self.refresh_images()
         self.model.invalidate(set(visibles) | set(self.model.paths()))
         self.reselect(antes, actual)
+        self.load_note_panel(self.note_target())
         self.view.viewport().update()
         if self.preview.comparing:
             self.preview.compare(self.preview.path, self.preview.path_b,
@@ -5814,6 +6486,7 @@ class MainWindow(QMainWindow):
             sm.setCurrentIndex(primera, sm.SelectionFlag.NoUpdate)
 
     def undo(self):
+        self.commit_note()                  # lo recien escrito es lo primero que se deshace
         if not self._undo:
             self.statusBar().showMessage("Nothing to undo.", 3000)
             return
@@ -5823,6 +6496,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Undone: %s" % desc, 5000)
 
     def redo(self):
+        self.commit_note()
         if not self._redo:
             self.statusBar().showMessage("Nothing to redo.", 3000)
             return
@@ -5968,8 +6642,9 @@ class MainWindow(QMainWindow):
         hechas, fallos = 0, []
         for p in sel:
             destino = unique_path(os.path.join(carpeta, os.path.basename(p)))
-            if is_video(p):
-                # un video no tiene ediciones: se copia tal cual
+            if is_video(p) or (is_gif(p) and not self.is_edited(p)):
+                # un video no tiene ediciones: se copia tal cual. Un GIF sin
+                # editar, tambien: reescrito saldria un PNG sin la animacion
                 try:
                     shutil.copy2(p, destino)
                     ok, err = True, destino
@@ -6114,6 +6789,8 @@ class MainWindow(QMainWindow):
                 ed.addSeparator()
                 ed.addAction("Remove the edits", lambda: self.quick_edit("reset"))
         m.addAction("Export copy/copies\u2026", self.export_selected)
+        if self.show_notes:
+            m.addAction("Grade / comment\u2026", lambda: self.note_from_menu(idx))
         m.addSeparator()
         if self.categories:
             sub = m.addMenu("Assign to")
@@ -6126,6 +6803,12 @@ class MainWindow(QMainWindow):
             for n in sorted(current_cats):
                 sub.addAction(n, lambda n=n: self.unassign_paths(n, sel))
         m.exec(self.view.viewport().mapToGlobal(pos))
+
+    def note_from_menu(self, idx):
+        self.view.selectionModel().setCurrentIndex(
+            idx, self.view.selectionModel().SelectionFlag.NoUpdate)
+        self.sync_note_panel()
+        self.focus_note()
 
     # ---------------- estado ---------------------------------------------- #
     def touch(self):
@@ -6149,6 +6832,8 @@ class MainWindow(QMainWindow):
             "theme": _theme,
             "videos": self.show_videos,
             "video_marks": self.video_marks,
+            "notes": self.notes,
+            "show_notes": self.show_notes,
         }
         try:
             tmp = STATE_FILE.with_suffix(".tmp")
@@ -6172,6 +6857,7 @@ class MainWindow(QMainWindow):
                       for p, e in crudo.items() if isinstance(e, dict)}
         self.edits = {p: e for p, e in self.edits.items() if not is_empty_edit(e)}
         self.video_marks = clean_video_marks(data.get("video_marks"))
+        self.notes = clean_notes(data.get("notes"))
         self.export_dir = data.get("export_dir", "")
         self._set_mode(self.cmb_folder_order, data.get("folder_order", "manual"))
         self._set_mode(self.cmb_cat_order, data.get("category_order", "manual"))
@@ -6182,6 +6868,7 @@ class MainWindow(QMainWindow):
         self.chk_videos.blockSignals(False)
         self.set_show_videos(self.chk_videos.isChecked())
         self.chk_names.setChecked(bool(data.get("show_names", True)))
+        self.set_show_notes(bool(data.get("show_notes", True)))
         self.slider.setValue(int(data.get("icon", 160)))
         if isinstance(data.get("splitter"), list):
             self.splitter.setSizes(data["splitter"])
@@ -6209,9 +6896,11 @@ class MainWindow(QMainWindow):
             self.setGeometry(x, y, ancho, alto)
 
     def closeEvent(self, e):
+        self.commit_note()
         self._save_timer.stop()
         self.save_state()
         self.preview.stop_video()
+        self.preview.stop_gif()
         if self.model.videos is not None:
             self.model.videos.clear()
         # sin esto, una miniatura a medio cargar emite sobre un objeto ya muerto

@@ -67,6 +67,17 @@ cache. *Preview below* splits the column and shows the selected image large
 underneath at full resolution — arrow through the thumbnails and the preview
 follows. Double-click opens a large window with zoom, pan and fullscreen.
 Selected thumbnails get a clear **blue frame**.
+**Animated GIFs** carry a GIF badge and play in the preview and the large
+window, with pause and frame-by-frame stepping (`,` / `.`) and a frame bar.
+
+**Grades and comments**
+Under the categories, give the chosen file a **grade from 0 to 10** (decimals
+allowed) and a free **comment** — images, GIFs and videos alike. The grade
+shows on the thumbnail, coloured red / amber / green; a speech bubble means
+there is a comment, which you can read by hovering. Press `N` to jump to the
+grade box. Saved as you type, undoable, and carried by *Export library…*.
+Untick *Grades* (or `Ctrl+G`) to hide them all — handy before projecting in
+class; nothing is deleted.
 
 **A/B comparison**
 Mark one image as **A** and another as **B** — the marks stay put while you
@@ -199,13 +210,15 @@ you try it there, reports are welcome.
 | `A` / `B` | mark the chosen image as A or B |
 | `C` | compare A and B |
 | `E` | open the editor |
+| `N` | grade / comment the chosen file |
+| `Ctrl+G` | show / hide grades and comments |
 | `0` | fit the image in view |
 | `Ctrl+1` … `Ctrl+9` | assign to the first nine categories |
 | `Ctrl+Z` / `Ctrl+Y` | undo / redo |
 | `F5` | re-read the folders from disk |
 | `Ctrl+T` | switch between dark and light theme |
-| `Space` | play / pause a video in the large window |
-| `,` / `.` | video: previous / next frame |
+| `Space` | play / pause a video or GIF in the large window |
+| `,` / `.` | video or GIF: previous / next frame |
 | `-` / `Ctrl+-` | video: set / delete a keyframe |
 | `Ctrl+,` / `Ctrl+.` | video: previous / next keyframe |
 | `F1` | help |

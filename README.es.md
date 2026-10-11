@@ -89,11 +89,11 @@ app sirve para Intel y Apple Silicon a la vez.
 .venv\Scripts\python.exe tests\correr_tests.py
 ```
 
-Doce suites que corren sin abrir ninguna ventana y usan su propio archivo de
+Quince suites que corren sin abrir ninguna ventana y usan su propio archivo de
 estado, así que no pueden tocar tu `biblioteca.json`. Cubren, entre otras cosas, el mapeo de
 coordenadas de recortes y dibujos en 14 combinaciones de transformaciones (y 9
 más con giro libre), los dos temas, el marco azul de la selección, los
-vídeos y sus fotogramas clave, y
+vídeos y sus fotogramas clave, los GIF animados, las notas y comentarios, y
 —dos veces, contrastando marca de tiempo y tamaño— que ni editar ni exportar
 modifican el archivo original.
 
@@ -187,10 +187,20 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   - Cada botón enseña su atajo en un bocadillo al dejar el ratón encima.
   - Desde el código fuente hace falta `pip install PySide6-Addons`; sin él la
     casilla sale desactivada y lo explica. La versión portable ya lo lleva.
+- **GIF animados**: salen siempre (son imágenes, no hace falta casilla), con un
+  distintivo **GIF** en la miniatura. En la vista previa y en el visor grande
+  **se animan solos**; debajo, pausa/play, fotograma anterior y siguiente (o
+  `,` y `.`, como en los vídeos), una barra para moverse por los fotogramas y
+  el número del que ves. En el visor grande, `Espacio` lo para y lo reanuda.
+  - Las ediciones se aplican a todos los fotogramas; el editor y la
+    comparación A/B trabajan sobre el primero.
+  - *Export…* copia tal cual un GIF sin editar (sigue animado). Uno editado
+    sale como PNG de su primer fotograma.
+  - Un GIF de un solo fotograma se ve como cualquier imagen, sin barra.
 - Doble clic abre el visor grande: `←`/`→` pasan imágenes, rueda hace zoom,
   arrastrar mueve, `0` reencuadra, `F` o `F11` pantalla completa, `Esc` cierra.
 - Clic derecho: abrir, abrir la carpeta contenedora, copiar ruta, asignar o
-  quitar de categorías.
+  quitar de categorías, poner nota o comentario.
 - Las miniaturas seleccionadas llevan un **marco azul** bien visible.
 - Los puntos de color en la esquina indican a qué categorías pertenece.
 - *Uncategorised only* deja a la vista lo que aún no has clasificado.
@@ -218,6 +228,28 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   *Z → A*, que ordena dentro de cada nivel sin deshacer el anidamiento. Ojo:
   `Ctrl+1` … `Ctrl+9` siguen el orden que veas de arriba abajo, subcategorías
   incluidas, así que reordenar cambia también los atajos.
+
+**Columna derecha, abajo — Nota y comentario** (*Grade & comment*)
+- Es del archivo que tengas elegido en la rejilla (el del foco): una **nota de
+  0 a 10**, con decimales, y un **comentario** libre. Vale igual para imágenes,
+  GIF y vídeos.
+- `N` (o clic derecho ▸ *Grade / comment…*) te lleva a la casilla de la nota;
+  `Tab` pasa al comentario. Se guarda solo al dejar de escribir un momento o al
+  cambiar de archivo.
+- Sin nota se ve una raya: baja con la flecha por debajo de 0, o *Clear*, que
+  borra nota y comentario.
+- La nota sale en la miniatura, abajo a la derecha: **roja** por debajo de 5,
+  **ámbar** hasta el 7 y **verde** de ahí arriba. Un bocadillo indica que hay
+  comentario; al dejar el ratón encima de la miniatura se lee entero. La vista
+  previa y el visor grande ponen la nota y el principio del comentario en el pie.
+- `Ctrl+Z` deshace notas y comentarios como todo lo demás (por pausas al
+  escribir, no letra a letra), y viajan con *Export library…*. Al importar
+  fundiendo, tu nota y tu comentario no se pisan: solo se rellena lo que falte.
+- **Ocultarlas**: quita la casilla *Grades* (junto a *Names*), o *View* ▸
+  *Show grades and comments*, o `Ctrl+G`. Desaparecen de las miniaturas, los
+  bocadillos, el pie de la vista previa, el visor grande y el panel; útil para
+  proyectar en clase. No se borra nada: al volver a marcarla salen igual. Se
+  recuerda al cerrar.
 
 ## Importar y exportar la biblioteca
 

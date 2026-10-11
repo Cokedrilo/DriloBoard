@@ -7,7 +7,19 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
-Novedades de la 1.4:
+Novedades de la 1.5:
+
+  - Nota y comentario desde el reproductor: la vista previa y la ventana
+    grande llevan debajo la misma barra de nota y comentario, que sigue al
+    archivo que ves. Boton "Grade" junto a "Fit"; en la ventana grande, N.
+  - Bucle de video: L repite el video entero. Para un tramo, I en su primer
+    fotograma y O en el ultimo; Shift+L lo quita. El tramo sale en azul
+    sobre la barra de tiempo.
+  - Exportar notas y comentarios a un documento: Library > Export grades and
+    comments. Entra lo que ves en la rejilla, como PDF con miniaturas, hoja
+    de calculo (CSV) o Word.
+
+De la 1.4:
 
   - GIF animados: salen con un distintivo GIF y se animan en la vista previa
     y en la ventana grande. Debajo, pausa, fotograma a fotograma ( ,  y  . )

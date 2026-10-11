@@ -26,8 +26,6 @@ if not visor.HAS_VIDEO:
     print("\nBUCLE OK (sin modulo de video)")
     sys.exit(0)
 
-from PySide6.QtMultimedia import QMediaPlayer
-
 
 def espera(cond, ms=6000):
     limite = time.time() + ms / 1000
@@ -56,12 +54,21 @@ assert espera(lambda: abs(p._frame_us - 66666.7) < 50), p._frame_us
 f_ms = p._frame_us / 1000
 
 print("1. BUCLE DEL VIDEO ENTERO")
-assert not p.loop_on and p.player.loops() == 1
+assert not p.loop_on
 p.b_loop.click()
-assert p.loop_on and p.player.loops() == QMediaPlayer.Loops.Infinite, p.player.loops()
-assert "Loop on" in p.caption.text(), p.caption.text()
+assert p.loop_on and "Loop on" in p.caption.text(), p.caption.text()
 assert p.lbl_loop.text() == "⟲" and p.sld_pos.loop_range is None
-print("   el propio reproductor repite el video entero")
+assert p.player.loops() == 1, "el bucle lo lleva DriloBoard, no setLoops"
+# cerca del final: al acabar vuelve a empezar y sigue reproduciendo
+p._go_to_frame_us(38 * p._frame_us)
+assert espera(lambda: p._want_us is None and p.frame_index(p._frame_start_us) == 38)
+vueltas_ent = []
+p.player.positionChanged.connect(lambda ms: vueltas_ent.append(ms))
+p.toggle_play()
+assert espera(lambda: any(ms < 500 for ms in vueltas_ent) and p.is_playing(), 5000), \
+    "no volvio al principio: %s" % vueltas_ent[-5:]
+p.toggle_play()
+print("   al acabar el video vuelve al principio y sigue")
 
 print("\n2. UN TRAMO")
 p._go_to_frame_us(10 * p._frame_us)
@@ -74,7 +81,7 @@ assert p.loop_in is None, "un fin despues del anterior no deberia tocar el princ
 p._go_to_frame_us(10 * p._frame_us)
 assert espera(lambda: p._want_us is None and p.frame_index(p._frame_start_us) == 10)
 p.set_loop_in()
-assert p.loop_on and p.player.loops() == 1, "con tramo, el bucle lo lleva DriloBoard"
+assert p.loop_on and p.has_loop_range()
 desde, hasta = p.loop_bounds()
 assert abs(desde - 10 * f_ms) < f_ms / 2 and abs(hasta - 21 * f_ms) < f_ms / 2, (desde, hasta)
 assert p.lbl_loop.text() == "⟲ 10–20", p.lbl_loop.text()
@@ -108,15 +115,14 @@ print("   dar a play fuera del tramo empieza en su principio")
 
 print("\n3. QUITAR EL TRAMO Y CAMBIAR DE VIDEO")
 p.clear_loop_range()
-assert not p.has_loop_range() and p.loop_on
-assert p.player.loops() == QMediaPlayer.Loops.Infinite and p.sld_pos.loop_range is None
+assert not p.has_loop_range() and p.loop_on and p.sld_pos.loop_range is None
 p.set_loop_in()
 w.view.setCurrentIndex(w.model.index(1))    # otro video: sin tramo, con el bucle puesto
 assert espera(lambda: p.showing_video and p.loaded_path.endswith("otro.webm")
               and p.player.duration() > 0)
-assert p.loop_on and not p.has_loop_range() and p.player.loops() == QMediaPlayer.Loops.Infinite
+assert p.loop_on and not p.has_loop_range() and p.lbl_loop.text() == "⟲"
 p.b_loop.click()
-assert not p.loop_on and p.player.loops() == 1 and p.lbl_loop.text() == ""
+assert not p.loop_on and p.lbl_loop.text() == ""
 print("   el tramo es de cada video; el boton de bucle se mantiene")
 
 print("\n4. ATAJOS")

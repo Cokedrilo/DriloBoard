@@ -3393,11 +3393,10 @@ class PreviewPane(QWidget):
                 self.loop_out if self.loop_out is not None else fin)
 
     def _apply_loop(self):
-        """El video entero lo repite el propio reproductor, sin saltos; un tramo,
-        _loop_jump a cada fotograma."""
-        if self.player is not None:
-            entero = self.loop_on and not self.has_loop_range()
-            self.player.setLoops(QMediaPlayer.Loops.Infinite if entero else 1)
+        """El bucle lo lleva DriloBoard, no QMediaPlayer.setLoops: cambiar el
+        modo del reproductor y luego saltar de fotograma llegaba a colgarlo.
+        Un tramo vuelve a su principio en _loop_jump; el final del video, en
+        _on_media_status."""
         self._refresh_loop_ui()
 
     def set_loop(self, on: bool):
@@ -3450,9 +3449,9 @@ class PreviewPane(QWidget):
         return False
 
     def _on_media_status(self, estado):
-        # un tramo que acaba donde el video: el final del archivo tambien vuelve
+        # al final del archivo: el video entero, o un tramo que acaba donde el video
         if (estado == QMediaPlayer.MediaStatus.EndOfMedia and self.loop_on
-                and self.has_loop_range() and self.showing_video):
+                and self.showing_video):
             self.player.setPosition(self.loop_bounds()[0])
             self.player.play()
 

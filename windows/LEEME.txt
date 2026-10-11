@@ -7,7 +7,13 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
-Novedades de la 1.5:
+Novedades de la 1.5.1:
+
+  - Bucle en los GIF, con los mismos controles que los videos: el boton de
+    bucle (o L) lo enciende o apaga; apagado, el GIF se para en el ultimo
+    fotograma. I y O repiten solo un tramo de fotogramas; Shift+L lo quita.
+
+De la 1.5:
 
   - Nota y comentario desde el reproductor: la vista previa y la ventana
     grande llevan debajo la misma barra de nota y comentario, que sigue al

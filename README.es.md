@@ -16,6 +16,8 @@ al vuelo. Una imagen puede estar en varias categorías a la vez, cualquier
 edición se deshace meses después, y para obtener archivos ya editados está el
 botón *Export*.
 
+![DriloBoard: carpetas a la izquierda, miniaturas con sus notas en el centro, la vista previa con la barra de nota debajo y las categorías a la derecha](docs/screenshot.png)
+
 ## Arrancar
 
 **Versión portable (lo normal).** Descomprime
@@ -174,6 +176,9 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   - Si son de distinto tamaño, B se encaja dentro de A centrada y sin
     deformarse.
   - *Open large* se lleva la pareja y la opacidad tal cual.
+
+  ![Comparando dos láminas con el deslizador de opacidad](docs/compare.png)
+
 - **Vídeos** (casilla *Videos*, **apagada por defecto**): al marcarla se buscan
   también mp4, mov, webm, mkv, avi… y entran en la rejilla con un distintivo
   ▶ y su duración. La casilla se recuerda al cerrar.
@@ -205,6 +210,9 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   - Cada botón enseña su atajo en un bocadillo al dejar el ratón encima.
   - Desde el código fuente hace falta `pip install PySide6-Addons`; sin él la
     casilla sale desactivada y lo explica. La versión portable ya lo lleva.
+
+  ![Un vídeo sobre un fotograma clave, con los fotogramas clave y un tramo en bucle sobre la barra de tiempo y su nota debajo, en el tema claro](docs/video.png)
+
 - **GIF animados**: salen siempre (son imágenes, no hace falta casilla), con un
   distintivo **GIF** en la miniatura. En la vista previa y en el visor grande
   **se animan solos**; debajo, pausa/play, fotograma anterior y siguiente (o
@@ -289,6 +297,8 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   proyectar en clase. No se borra nada: al volver a marcarla salen igual. Se
   recuerda al cerrar.
 
+![Poniendo nota a un GIF desde el visor grande, con un tramo en bucle sobre la barra de fotogramas](docs/grades.png)
+
 ## Importar y exportar la biblioteca
 
 Menú **Library** ▸ *Export library…* guarda en un archivo `.driloboard` **toda
@@ -326,6 +336,8 @@ que se guarda en `biblioteca.json` es una receta por imagen (recorte, giro,
 volteo, ajustes), que se aplica al vuelo a la miniatura y a la vista previa.
 Cualquier edición se puede deshacer en cualquier momento, incluso semanas
 después.
+
+![El editor, con una lámina enderezada unos grados y anotada](docs/editor.png)
 
 - **Editor** (botón *Edit…*, tecla `E`, o clic derecho ▸ *Edit*):
   - Rotar 90° a izquierda o derecha, voltear en horizontal y en vertical.

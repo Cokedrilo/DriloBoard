@@ -16,6 +16,9 @@ on:
       tag:
         description: "Release tag, e.g. v1.4.1"
         required: true
+      ref:
+        description: "Code to build, if not the tag (it must say the same VERSION)"
+        required: false
 
 permissions:
   contents: write
@@ -29,7 +32,7 @@ jobs:
       # el codigo de la version que se publica...
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ inputs.ref || env.TAG }}
           path: src
       # ...y el LEEME de este mismo workflow, que puede ser mas nuevo
       - uses: actions/checkout@v4

@@ -48,9 +48,10 @@ print("   macOS sin .app: junto al ejecutable")
 print("\n2. PLAN B")
 original = visor.app_dir
 try:
-    visor.app_dir = lambda: TMP / "AppTranslocation" / "ABC" / "d"
-    assert visor.data_dir() == visor.user_data_dir(), "App Translocation es de solo lectura"
-    print("   una app aislada por macOS (App Translocation) usa", visor.user_data_dir())
+    if sys.platform == "darwin":            # App Translocation solo existe en macOS
+        visor.app_dir = lambda: TMP / "AppTranslocation" / "ABC" / "d"
+        assert visor.data_dir() == visor.user_data_dir(), "App Translocation es de solo lectura"
+        print("   una app aislada por macOS (App Translocation) usa", visor.user_data_dir())
     solo_lectura = TMP / "solo_lectura"
     solo_lectura.mkdir()
     os.chmod(solo_lectura, 0o555)
@@ -65,7 +66,8 @@ try:
     print("   y si se puede escribir, se queda junto al programa")
 finally:
     visor.app_dir = original
-    os.chmod(TMP / "solo_lectura", 0o755)
+    if (TMP / "solo_lectura").exists():
+        os.chmod(TMP / "solo_lectura", 0o755)
 assert visor.user_data_dir().name == visor.APP_NAME
 
 print("\nPORTABLE OK")

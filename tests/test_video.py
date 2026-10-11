@@ -121,7 +121,10 @@ assert len(colores) > 8, "la miniatura parece vacia"
 print("   fotograma %dx%d, duracion %s, cacheada con la duracion dentro"
       % (guardada.width(), guardada.height(), visor.format_duration(dur)))
 
-# desde la cache, sin volver a abrir el video, recupera tambien la duracion
+# desde la cache, sin volver a abrir el video, recupera tambien la duracion.
+# Antes, que el reproductor de la miniatura termine de recoger: en una maquina
+# lenta (la de Windows de GitHub, sin grafica) aun estaba ocupado aqui
+assert espera(lambda: not w.model.videos.busy(), 10000), "el reproductor no termina"
 w.model.durations.clear()
 w.model.invalidate([str(video)])
 w.model.data(indice, visor.Qt.ItemDataRole.DecorationRole)

@@ -103,6 +103,22 @@ assert len(pv.caption.text()) < 200 and pv.caption.text().endswith("…”"), \
     pv.caption.text()
 print("   nota en el bocadillo y en el pie; un comentario largo se recorta")
 
+print("\n3b. COPIAR EL COMENTARIO")
+w.txt_comment.setPlainText("Para copiar\ncon dos lineas  ")
+assert w.b_copy_comment.isEnabled()
+QApplication.clipboard().clear()
+w.b_copy_comment.click()                    # aun sin guardar: copia lo que se ve
+assert QApplication.clipboard().text() == "Para copiar\ncon dos lineas", \
+    repr(QApplication.clipboard().text())
+assert "copied" in w.statusBar().currentMessage()
+w.txt_comment.setPlainText("   ")
+assert not w.b_copy_comment.isEnabled(), "sin comentario no hay nada que copiar"
+w.load_note_panel(p2)                       # alumno2: sin comentario
+assert not w.b_copy_comment.isEnabled()
+w.load_note_panel(p0)                       # sin guardar lo de arriba: no cuenta para deshacer
+assert w.b_copy_comment.isEnabled() and w.notes[p0]["comment"] == largo.rstrip()
+print("   copia el texto del panel; apagado si no hay comentario")
+
 print("\n4. DESHACER")
 pasos = len(w._undo)
 w.txt_comment.setPlainText("Version final")

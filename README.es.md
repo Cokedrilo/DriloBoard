@@ -235,7 +235,8 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   GIF y vídeos.
 - `N` (o clic derecho ▸ *Grade / comment…*) te lleva a la casilla de la nota;
   `Tab` pasa al comentario. Se guarda solo al dejar de escribir un momento o al
-  cambiar de archivo.
+  cambiar de archivo. *Copy comment* copia el texto del comentario al
+  portapapeles, para pegarlo donde haga falta.
 - Sin nota se ve una raya: baja con la flecha por debajo de 0, o *Clear*, que
   borra nota y comentario.
 - La nota sale en la miniatura, abajo a la derecha: **roja** por debajo de 5,

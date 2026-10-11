@@ -3587,6 +3587,11 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
         p.drawLine(m, M - 2, M, M - 2)
         p.drawLine(m + 2, M - 5, M - 4, m + 1)
         p.drawLine(M - 4, m + 1, M - 1, m + 4)
+    elif kind == "copy":
+        # dos hojas: la de detras asoma arriba a la izquierda
+        p.drawPolyline([QPointF(m + 3, M - 6), QPointF(m, M - 6), QPointF(m, m),
+                        QPointF(M - 6, m), QPointF(M - 6, m + 3)])
+        p.drawRoundedRect(QRectF(m + 5, m + 5, M - m - 5, M - m - 5), 1.5, 1.5)
     elif kind == "select_all":
         p.setPen(QPen(tinta, 1.4, Qt.PenStyle.DashLine))
         p.drawRect(QRectF(m, m + 1, M - m, M - m - 2))
@@ -4791,7 +4796,8 @@ one comes out as a PNG of its first frame.</li>
 you have chosen: a grade from 0 to 10 (decimals allowed) and a free comment,
 for images, GIFs and videos alike.</li>
 <li>Press <b>[[note]]</b> (or right-click ▸ <i>Grade / comment…</i>) to jump to the
-grade box; <b>Tab</b> goes on to the comment. They are saved as you type.</li>
+grade box; <b>Tab</b> goes on to the comment. They are saved as you type.
+<i>Copy comment</i> puts its text on the clipboard.</li>
 <li>The grade shows on the thumbnail, red below 5, amber up to 7, green from
 there; a speech bubble means there is a comment. Hover over the thumbnail to
 read it. The preview and the large window show both under the image.</li>
@@ -5538,7 +5544,17 @@ class MainWindow(QMainWindow):
         self.txt_comment.setTabChangesFocus(True)
         self.txt_comment.setFixedHeight(96)
         self.txt_comment.textChanged.connect(self._note_typed)
+        self.txt_comment.textChanged.connect(self._sync_copy_button)
         lay.addWidget(self.txt_comment)
+
+        fila = QHBoxLayout()
+        fila.addStretch(1)
+        self.b_copy_comment = QPushButton("  Copy comment")
+        themed(self.b_copy_comment, icon="copy")
+        self.b_copy_comment.setToolTip("Copy the text of the comment to the clipboard")
+        self.b_copy_comment.clicked.connect(self.copy_comment)
+        fila.addWidget(self.b_copy_comment)
+        lay.addLayout(fila)
 
         # se guarda al dejar de escribir un momento: un paso de deshacer por
         # pausa, no uno por letra
@@ -5592,6 +5608,7 @@ class MainWindow(QMainWindow):
         self._note_loading = False
         for wd in (self.spn_grade, self.txt_comment, self.b_note_clear):
             wd.setEnabled(path is not None)
+        self._sync_copy_button()
         self.lbl_note_file.setText(os.path.basename(path) if path
                                    else "Choose a file to grade or comment on it")
         self.lbl_note_file.setToolTip(path or "")
@@ -5635,6 +5652,18 @@ class MainWindow(QMainWindow):
         else:
             self.notes.pop(path, None)
         self.refresh_note_views()
+
+    def _sync_copy_button(self):
+        self.b_copy_comment.setEnabled(self._note_path is not None
+                                       and bool(self.txt_comment.toPlainText().strip()))
+
+    def copy_comment(self):
+        """El comentario tal cual se ve en el panel, aunque aun no se haya guardado."""
+        texto = self.txt_comment.toPlainText().strip()
+        if not texto:
+            return
+        QApplication.clipboard().setText(texto)
+        self.statusBar().showMessage("Comment copied to the clipboard.", 3000)
 
     def clear_note(self):
         self._note_loading = True

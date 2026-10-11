@@ -74,8 +74,8 @@ window, with pause and frame-by-frame stepping (`,` / `.`) and a frame bar.
 Under the categories, give the chosen file a **grade from 0 to 10** (decimals
 allowed) and a free **comment** — images, GIFs and videos alike. The grade
 shows on the thumbnail, coloured red / amber / green; a speech bubble means
-there is a comment, which you can read by hovering. Press `N` to jump to the
-grade box. Saved as you type, undoable, and carried by *Export library…*.
+there is a comment, which you can read by hovering; *Copy comment* puts it on
+the clipboard. Press `N` to jump to the grade box. Saved as you type, undoable, and carried by *Export library…*.
 Untick *Grades* (or `Ctrl+G`) to hide them all — handy before projecting in
 class; nothing is deleted.
 

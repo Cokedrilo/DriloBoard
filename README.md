@@ -68,7 +68,9 @@ underneath at full resolution — arrow through the thumbnails and the preview
 follows. Double-click opens a large window with zoom, pan and fullscreen.
 Selected thumbnails get a clear **blue frame**.
 **Animated GIFs** carry a GIF badge and play in the preview and the large
-window, with pause and frame-by-frame stepping (`,` / `.`) and a frame bar.
+window, with pause and frame-by-frame stepping (`,` / `.`), a frame bar and the
+same loop controls as videos: on by default, off to stop on the last frame, or
+just a fragment marked with `I` and `O`.
 
 **Grades and comments**
 Under the categories, give the chosen file a **grade from 0 to 10** (decimals
@@ -226,8 +228,8 @@ you try it there, reports are welcome.
 | `,` / `.` | video or GIF: previous / next frame |
 | `-` / `Ctrl+-` | video: set / delete a keyframe |
 | `Ctrl+,` / `Ctrl+.` | video: previous / next keyframe |
-| `L` | video: loop on / off |
-| `I` / `O` / `Shift+L` | video: loop from / up to this frame, clear the fragment |
+| `L` | video or GIF: loop on / off |
+| `I` / `O` / `Shift+L` | video or GIF: loop from / up to this frame, clear the fragment |
 | `F1` | help |
 
 There is a **? Help** button in the top-right corner with a full guide that

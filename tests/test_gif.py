@@ -103,9 +103,51 @@ pv.step_frame(-1)
 assert pv.gif.index == 1 and color_visto(pv) == COLORES[1], color_visto(pv)
 # las teclas de fotograma, activas con un GIF puesto
 assert all(a.isEnabled() for a in pv._video_shortcuts[:2])
-assert not any(a.isEnabled() for a in pv._video_shortcuts[2:]), \
+assert not any(a.isEnabled() for i, a in zip(pv._shortcut_ids, pv._video_shortcuts)
+               if i.startswith("key_")), \
     "los fotogramas clave son solo de video"
 print("   adelante, atras, vuelta completa y barra: el color de cada fotograma cuadra")
+
+print("\n3b. BUCLE")
+assert pv.gif_loop_on and pv.b_gif_loop.isChecked() and pv.gif.loop, \
+    "un GIF repite de entrada, como en un navegador"
+activos = {i for i, a in zip(pv._shortcut_ids, pv._video_shortcuts) if a.isEnabled()}
+assert {"loop", "loop_in", "loop_out", "loop_clear"} <= activos, activos
+# repite: del ultimo vuelve al primero reproduciendo
+vistos = []
+pv.gif.frameShown.connect(lambda i: vistos.append(i))
+pv.gif.go(2)
+pv.toggle_play()
+assert espera(lambda: 0 in vistos and pv.gif.playing, 3000), vistos
+# sin bucle (L): se para en el ultimo y play vuelve a empezar
+pv.toggle_loop()
+assert not pv.gif_loop_on and not pv.gif.loop and "Loop off" in pv.caption.text()
+assert espera(lambda: not pv.gif.playing, 3000), "sin bucle deberia pararse"
+assert pv.gif.index == 3, "deberia pararse en el ultimo: %d" % pv.gif.index
+assert pv.b_gif_play.property("drilo_icon") == "play", "el boton no volvio a play"
+vistos.clear()
+pv.toggle_play()
+assert espera(lambda: vistos[:1] == [0], 1000), "play al final deberia volver al principio: %s" % vistos
+assert espera(lambda: not pv.gif.playing, 3000)
+# un tramo: fotogramas 2 y 3 (I en el 2, O en el 3); da vueltas solo ahi
+pv.gif.go(1)
+pv.set_loop_in()
+pv.gif.go(2)
+pv.set_loop_out()
+assert pv.gif.range == (1, 2) and pv.gif_loop_on, pv.gif.range
+assert pv.lbl_gif_loop.text() == "⟲ 2–3" and pv.sld_gif.loop_range == (1, 2)
+vistos.clear()
+pv.gif.go(0)
+pv.toggle_play()                            # fuera del tramo: empieza en su principio
+espera(lambda: False, 1500)
+pv.toggle_play()
+assert vistos and set(vistos[1:]) <= {1, 2} and vistos.count(1) >= 2, vistos
+pv.clear_loop_range()
+assert pv.gif.range is None and pv.lbl_gif_loop.text() == "⟲"
+pv.gif.frameShown.disconnect()
+pv.gif.frameShown.connect(pv._on_gif_frame)
+pv.set_gif_loop(True)
+print("   repite de entrada; sin bucle se para al final; un tramo con I y O")
 
 print("\n4. LAS EDICIONES VALEN EN TODOS LOS FOTOGRAMAS")
 pv.gif.go(2)

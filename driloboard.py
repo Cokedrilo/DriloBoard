@@ -2421,6 +2421,7 @@ class GifPlayer(QObject):
     atras relee desde el principio, que en un GIF es rapido.
     """
     frameShown = Signal(int)
+    finished = Signal()                 # sin bucle, llego al final y se paro
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2441,7 +2442,11 @@ class GifPlayer(QObject):
         self._scaled = QSize()
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
-        self._timer.timeout.connect(lambda: self.go(self.index + 1))
+        self._timer.timeout.connect(self._advance)
+        # bucle: el GIF entero (lo normal, como en un navegador) o un tramo de
+        # fotogramas, ambos incluidos. Sin bucle se para en el ultimo
+        self.loop = True
+        self.range: tuple[int, int] | None = None
 
     def open(self, path: str, max_side: int, edit: dict | None) -> bool:
         """False si no es un GIF animado: entonces se ensena como imagen fija."""
@@ -2535,8 +2540,32 @@ class GifPlayer(QObject):
             self._timer.start(self.delay(i))
         return True
 
+    def bounds(self) -> tuple[int, int]:
+        """Primer y ultimo fotograma de lo que se reproduce."""
+        return self.range if self.range else (0, max(0, self.count - 1))
+
+    def _next_index(self) -> int | None:
+        """El fotograma que viene al reproducir; None si toca pararse."""
+        desde, hasta = self.bounds()
+        if self.index == hasta or self.index >= self.count - 1:
+            return desde if self.loop else None
+        return self.index + 1
+
+    def _advance(self):
+        siguiente = self._next_index()
+        if siguiente is None:
+            self.pause()
+            self.finished.emit()
+        else:
+            self.go(siguiente)
+
     def play(self):
         if self.count and not self.playing:
+            desde, hasta = self.bounds()
+            # en el final sin bucle, o fuera del tramo: se empieza por el principio
+            if (not self.loop and self.index >= hasta) or \
+                    (self.range and not desde <= self.index <= hasta):
+                self.go(desde, reprogramar=False)
             self.playing = True
             self._timer.start(self.delay(self.index))
 
@@ -2901,21 +2930,23 @@ class PreviewPane(QWidget):
         vid_lay.addWidget(self.lbl_loop)
         vid_lay.addSpacing(8)
 
-        # los atajos, activos solo mientras hay un video puesto
+        # los atajos, activos solo mientras hay un video (o un GIF) puesto
         self._video_shortcuts = []
+        self._shortcut_ids = []
         for accion, fn in (("frame_prev", lambda: self.step_frame(-1)),
                            ("frame_next", lambda: self.step_frame(1)),
                            ("key_add", self.set_keyframe),
                            ("key_prev", lambda: self.jump_keyframe(-1)),
                            ("key_next", lambda: self.jump_keyframe(1)),
                            ("key_del", self.delete_keyframe),
-                           ("loop", lambda: self.b_loop.toggle()),
+                           ("loop", self.toggle_loop),
                            ("loop_in", self.set_loop_in),
                            ("loop_out", self.set_loop_out),
                            ("loop_clear", self.clear_loop_range)):
             atajo = SK.bind(self, accion, fn)
             atajo.setEnabled(False)
             self._video_shortcuts.append(atajo)
+            self._shortcut_ids.append(accion)
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
         self._flash_timer.setInterval(2500)
@@ -2962,7 +2993,7 @@ class PreviewPane(QWidget):
         self.b_gif_play.clicked.connect(self.toggle_play)
         gif_lay.addWidget(self.b_gif_play)
         self.b_gif_next = boton("frame_next", lambda: self.step_frame(1), gif_lay)
-        self.sld_gif = QSlider(Qt.Orientation.Horizontal)
+        self.sld_gif = MarkSlider()
         self.sld_gif.setToolTip("Drag to move through the frames of the GIF")
         self.sld_gif.valueChanged.connect(self._on_gif_seek)
         gif_lay.addWidget(self.sld_gif, 1)
@@ -2970,7 +3001,23 @@ class PreviewPane(QWidget):
         themed(self.lbl_gif, css="color:%(caption)s;")
         gif_lay.addWidget(self.lbl_gif)
         gif_lay.addSpacing(8)
-        for w in (self.b_gif_prev, self.b_gif_play, self.b_gif_next, self.sld_gif):
+        # bucle, como en los videos: encendido de entrada, como en un navegador
+        self.gif_loop_on = True
+        self.b_gif_loop = boton("loop", lambda: None, gif_lay)
+        self.b_gif_loop.setCheckable(True)
+        self.b_gif_loop.setChecked(True)
+        self.b_gif_loop.toggled.connect(self.set_gif_loop)
+        self.b_gif_loop_in = boton("loop_in", self.set_loop_in, gif_lay)
+        self.b_gif_loop_out = boton("loop_out", self.set_loop_out, gif_lay)
+        self.b_gif_loop_clear = boton("loop_clear", self.clear_loop_range, gif_lay)
+        self.lbl_gif_loop = QLabel("")
+        self.lbl_gif_loop.setStyleSheet("color:%s; font-weight:bold;" % LOOP_COLOR)
+        gif_lay.addWidget(self.lbl_gif_loop)
+        gif_lay.addSpacing(8)
+        self.gif.finished.connect(self._gif_state)
+        for w in (self.b_gif_prev, self.b_gif_play, self.b_gif_next, self.sld_gif,
+                  self.b_gif_loop, self.b_gif_loop_in, self.b_gif_loop_out,
+                  self.b_gif_loop_clear):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.gif_bar.hide()
 
@@ -3117,8 +3164,10 @@ class PreviewPane(QWidget):
         self.sld_gif.setValue(0)
         self.sld_gif.blockSignals(False)
         self.gif_bar.show()
-        for atajo in self._video_shortcuts[:2]:     # fotograma anterior / siguiente
-            atajo.setEnabled(True)
+        self.gif.loop = self.gif_loop_on
+        self.gif.range = None                       # el tramo es de cada GIF
+        self._refresh_gif_loop_ui()
+        self._enable_shortcuts()
         self.gif.play()
         self._gif_state()
         return True
@@ -3130,9 +3179,7 @@ class PreviewPane(QWidget):
         self.showing_gif = False
         self._gif_resume = False
         self.gif_bar.hide()
-        if not self.showing_video:
-            for atajo in self._video_shortcuts[:2]:
-                atajo.setEnabled(False)
+        self._enable_shortcuts()
 
     def _on_gif_frame(self, i: int):
         if not self.showing_gif:
@@ -3208,8 +3255,7 @@ class PreviewPane(QWidget):
         self._fps_known = False
         self._want_us = None
         self.lbl_time.setText("0:00 / 0:00")
-        for atajo in self._video_shortcuts:
-            atajo.setEnabled(True)
+        self._enable_shortcuts()
         self.refresh_marks()
         self.loop_in = self.loop_out = None
         self.player.setSource(QUrl.fromLocalFile(path))
@@ -3222,14 +3268,13 @@ class PreviewPane(QWidget):
         if self.player is not None:
             self.player.stop()
             self.player.setSource(QUrl())
-        for i, atajo in enumerate(self._video_shortcuts):
-            atajo.setEnabled(self.showing_gif and i < 2)    # un GIF usa los de fotograma
         if self.showing_video:
             self.showing_video = False
             self._want_us = None
             self.video_item.hide()
             self.item.show()
             self.video_bar.hide()
+        self._enable_shortcuts()
 
     # --- fotograma a fotograma ---------------------------------------------
     #  QMediaPlayer no sabe avanzar un fotograma: solo saltar a un milisegundo.
@@ -3382,7 +3427,63 @@ class PreviewPane(QWidget):
         self.b_key_prev.setEnabled(antes)
         self.b_key_next.setEnabled(despues)
 
+    GIF_SHORTCUTS = {"frame_prev", "frame_next", "loop", "loop_in", "loop_out", "loop_clear"}
+
+    def _enable_shortcuts(self):
+        """Los atajos del reproductor: todos con un video; con un GIF, los de
+        fotograma y los de bucle (los fotogramas clave son solo de video)."""
+        for id, atajo in zip(self._shortcut_ids, self._video_shortcuts):
+            atajo.setEnabled(self.showing_video
+                             or (self.showing_gif and id in self.GIF_SHORTCUTS))
+
     # --- bucle ---------------------------------------------------------------
+    def toggle_loop(self):
+        if self.showing_gif:
+            self.b_gif_loop.toggle()
+        elif self.showing_video:
+            self.b_loop.toggle()
+
+    def set_gif_loop(self, on: bool):
+        self.gif_loop_on = bool(on)
+        if self.b_gif_loop.isChecked() != self.gif_loop_on:
+            self.b_gif_loop.blockSignals(True)
+            self.b_gif_loop.setChecked(self.gif_loop_on)
+            self.b_gif_loop.blockSignals(False)
+        self.gif.loop = self.gif_loop_on
+        self._refresh_gif_loop_ui()
+        if self.showing_gif:
+            self.flash(("Loop on" + (" (range)" if self.gif.range else ""))
+                       if self.gif_loop_on else "Loop off: the GIF stops at the end")
+
+    def _gif_loop_point(self, extremo: str):
+        """I u O sobre un GIF: el tramo en fotogramas, ambos incluidos."""
+        i = max(0, self.gif.index)
+        desde, hasta = self.gif.range or (None, None)
+        if extremo == "in":
+            desde = i
+            if hasta is not None and hasta < i:
+                hasta = None                        # un final antes del principio no vale
+        else:
+            hasta = i
+            if desde is not None and desde > i:
+                desde = None
+        self.gif.range = (0 if desde is None else desde,
+                          self.gif.count - 1 if hasta is None else hasta)
+        self.set_gif_loop(True)
+        self.flash("Loop %s frame %d" % ("from" if extremo == "in" else "up to", i + 1))
+
+    def _refresh_gif_loop_ui(self):
+        r = self.gif.range
+        self.b_gif_loop_clear.setEnabled(r is not None)
+        self.sld_gif.set_loop_range(r)
+        if r:
+            self.lbl_gif_loop.setText("⟲ %d–%d" % (r[0] + 1, r[1] + 1))
+            self.lbl_gif_loop.setToolTip("Looping frames %d to %d; %s clears the range"
+                                         % (r[0] + 1, r[1] + 1, SK.text("loop_clear")))
+        else:
+            self.lbl_gif_loop.setText("⟲" if self.gif_loop_on else "")
+            self.lbl_gif_loop.setToolTip("Looping the whole GIF" if self.gif_loop_on else "")
+
     def has_loop_range(self) -> bool:
         return self.loop_in is not None or self.loop_out is not None
 
@@ -3411,6 +3512,9 @@ class PreviewPane(QWidget):
                        if self.loop_on else "Loop off")
 
     def set_loop_in(self):
+        if self.showing_gif:
+            self._gif_loop_point("in")
+            return
         if not self.showing_video:
             return
         ms = int(round(self.current_frame_us() / 1000))
@@ -3421,6 +3525,9 @@ class PreviewPane(QWidget):
         self.flash("Loop from frame %d" % self.frame_index())
 
     def set_loop_out(self):
+        if self.showing_gif:
+            self._gif_loop_point("out")
+            return
         if not self.showing_video:
             return
         # hasta el final de este fotograma, que se vea entero
@@ -3432,6 +3539,13 @@ class PreviewPane(QWidget):
         self.flash("Loop up to frame %d" % self.frame_index())
 
     def clear_loop_range(self):
+        if self.showing_gif:
+            if self.gif.range:
+                self.gif.range = None
+                self._refresh_gif_loop_ui()
+                self.flash("Loop range cleared" + (": looping the whole GIF"
+                                                   if self.gif_loop_on else ""))
+            return
         if not self.showing_video or not self.has_loop_range():
             return
         self.loop_in = self.loop_out = None
@@ -5453,7 +5567,9 @@ handy to see what is left to do.</li>
 <li><b>Animated GIFs</b> carry a <b>GIF</b> badge and play in the preview and the
 large window. The bar under them pauses, steps one frame back or forward
 (<b>[[frame_prev]]</b> / <b>[[frame_next]]</b>, as with videos) and moves through
-the frames. Edits apply to every frame; the editor and the A/B comparison
+the frames. A GIF <b>loops</b> by default; the loop button (<b>[[loop]]</b>) turns
+that off so it stops on its last frame, and <b>[[loop_in]]</b> /
+<b>[[loop_out]]</b> loop just a fragment of frames, as with videos. Edits apply to every frame; the editor and the A/B comparison
 use the first one. <i>Export…</i> copies an unedited GIF as it is; an edited
 one comes out as a PNG of its first frame.</li>
 </ul>
@@ -5571,8 +5687,8 @@ with the same name instead of duplicating them, and keeps your own edits.</li>
 <tr><td><b>[[frame_prev]]</b> / <b>[[frame_next]]</b></td><td>video: previous / next frame</td></tr>
 <tr><td><b>[[key_add]]</b> / <b>[[key_del]]</b></td><td>video: set / delete a keyframe</td></tr>
 <tr><td><b>[[key_prev]]</b> / <b>[[key_next]]</b></td><td>video: previous / next keyframe</td></tr>
-<tr><td><b>[[loop]]</b></td><td>video: loop on / off</td></tr>
-<tr><td><b>[[loop_in]]</b> / <b>[[loop_out]]</b> / <b>[[loop_clear]]</b></td><td>video: loop from / up to this frame, clear the fragment</td></tr>
+<tr><td><b>[[loop]]</b></td><td>video or GIF: loop on / off</td></tr>
+<tr><td><b>[[loop_in]]</b> / <b>[[loop_out]]</b> / <b>[[loop_clear]]</b></td><td>video or GIF: loop from / up to this frame, clear the fragment</td></tr>
 <tr><td><b>[[help]]</b></td><td>this help</td></tr>
 <tr><td><b>[[shortcuts]]</b></td><td>keyboard shortcuts: see and <b>change</b> them (Help menu)</td></tr>
 </table>

@@ -210,6 +210,11 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   **se animan solos**; debajo, pausa/play, fotograma anterior y siguiente (o
   `,` y `.`, como en los vídeos), una barra para moverse por los fotogramas y
   el número del que ves. En el visor grande, `Espacio` lo para y lo reanuda.
+  - **Bucle**: un GIF se repite de entrada, como en un navegador. El botón de
+    bucle de su barra (o `L`) lo apaga, y entonces se para en el último
+    fotograma; play lo vuelve a empezar. Para repetir solo unos fotogramas,
+    `I` en el primero y `O` en el último, como en los vídeos; `Shift+L` quita
+    el tramo.
   - Las ediciones se aplican a todos los fotogramas; el editor y la
     comparación A/B trabajan sobre el primero.
   - *Export…* copia tal cual un GIF sin editar (sigue animado). Uno editado

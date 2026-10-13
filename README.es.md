@@ -21,7 +21,7 @@ botón *Export*.
 ## Arrancar
 
 **Versión portable (lo normal).** Descomprime
-`DriloBoard-1.5.1-portable-win64.zip` donde quieras —disco, USB, carpeta de
+`DriloBoard-1.5.2-portable-win64.zip` donde quieras —disco, USB, carpeta de
 red— y ejecuta `DriloBoard.exe`. No instala nada ni escribe en el registro.
 La biblioteca y la caché de miniaturas se crean **dentro de esa misma
 carpeta**, así que copiándola te llevas también toda la clasificación.
@@ -30,7 +30,7 @@ La primera vez Windows puede avisar de que el origen es desconocido (el
 ejecutable no está firmado): *Más información* → *Ejecutar de todas formas*.
 
 **Versión portable para Mac.** Descomprime
-`DriloBoard-1.5.1-portable-macos.zip`: sale una carpeta `DriloBoard` con
+`DriloBoard-1.5.2-portable-macos.zip`: sale una carpeta `DriloBoard` con
 `DriloBoard.app` dentro. Una sola app para Mac Intel y Apple Silicon, macOS 13
 Ventura o posterior. Igual que en Windows, la biblioteca y la caché se crean
 **en esa carpeta, junto a la app** (nunca dentro del `.app`), así que se puede
@@ -296,6 +296,15 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   bocadillos, el pie de la vista previa, el visor grande y el panel; útil para
   proyectar en clase. No se borra nada: al volver a marcarla salen igual. Se
   recuerda al cerrar.
+- **Corregir a ciegas**: marca la casilla *Blind* (junto a *Names*), o *View* ▸
+  *Blind marking (hide file names)*, o `Ctrl+B`, y no se ve el nombre de ningún
+  archivo en ninguna parte: ni bajo las miniaturas, ni en el pie de la vista
+  previa y del visor grande, ni en el panel de nota, ni en el título del
+  editor, ni en los bocadillos y avisos. Así el nombre del alumno no te
+  condiciona al poner la nota. No se renombra nada, y no cambian los nombres
+  de las **carpetas** ni lo que exportas (el PDF o el CSV de notas sí lleva los
+  nombres, porque es para saber después de quién es cada nota). Se recuerda al
+  cerrar: la próxima vez arranca en modo ciego hasta que lo quites.
 
 ![Poniendo nota a un GIF desde el visor grande, con un tramo en bucle sobre la barra de fotogramas](docs/grades.png)
 

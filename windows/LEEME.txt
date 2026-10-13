@@ -7,7 +7,16 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
-Novedades de la 1.5.1:
+Novedades de la 1.5.2:
+
+  - Modo ciego, para corregir sin que el nombre del alumno te condicione:
+    marca "Blind" junto a "Names" (o View > Blind marking, o Ctrl+B) y no se
+    ve el nombre de ningun archivo: ni en las miniaturas, ni en el pie de la
+    vista previa y de la ventana grande, ni en el panel de nota, ni en el
+    titulo del editor, ni en los bocadillos y avisos. No se renombra nada;
+    las carpetas y los documentos exportados no cambian. Se recuerda al cerrar.
+
+De la 1.5.1:
 
   - Bucle en los GIF, con los mismos controles que los videos: el boton de
     bucle (o L) lo enciende o apaga; apagado, el GIF se para en el ultimo

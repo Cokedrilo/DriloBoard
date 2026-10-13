@@ -69,7 +69,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 
 
 def app_dir() -> Path:
@@ -204,6 +204,7 @@ SHORTCUT_DEFS = [
     ("edit", "Open the editor", "E"),
     ("note", "Grade / comment the image", "N"),
     ("show_notes", "Show / hide grades and comments", "Ctrl+G"),
+    ("blind", "Blind marking: hide / show file names", "Ctrl+B"),
     ("before", "Before / after (hold to see the original)", "Z"),
     ("refresh", "Refresh folders", "F5"),
     ("theme", "Switch dark / light theme", "Ctrl+T"),
@@ -370,6 +371,53 @@ def is_video(path: str | None) -> bool:
 
 def is_gif(path: str | None) -> bool:
     return bool(path) and os.path.splitext(path)[1].lower() in GIF_EXTS
+
+
+# Modo ciego: corregir sin saber de quien es el trabajo. Con el en marcha ningun
+# nombre de archivo sale en pantalla (miniaturas, pies, paneles, avisos, titulos).
+# Las carpetas y lo que se exporta no cambian.
+_blind = False
+
+
+def apply_blind(on: bool):
+    global _blind
+    _blind = bool(on)
+
+
+def shown_name(path: str | None) -> str:
+    """El nombre del archivo tal como se ensena: vacio en modo ciego."""
+    return "" if _blind or not path else os.path.basename(path)
+
+
+def scrub_name(texto: str, path: str | None) -> str:
+    """Quita de un texto ajeno (un error de Qt, por ejemplo) el nombre del archivo."""
+    if not _blind or not path:
+        return texto
+    nombre = os.path.basename(path)
+    for trozo in (QUrl.fromLocalFile(path).toString(), path,
+                  bytes(QUrl.toPercentEncoding(nombre)).decode(), nombre):
+        if trozo:
+            texto = texto.replace(trozo, "\u2026")
+    return texto
+
+
+class NamedText(str):
+    """Un texto con el nombre de un archivo dentro; .plain es el mismo sin el nombre.
+
+    Los pasos de deshacer se guardan con su descripcion y se leen mas tarde, quiza
+    con el modo ciego ya cambiado: por eso el nombre no se decide al guardarlos."""
+    plain = ""
+
+
+def with_name(texto: str, path: str | None) -> str:
+    """'edit (foto.png)'; shown_text() lo deja en 'edit' en modo ciego."""
+    out = NamedText("%s (%s)" % (texto, os.path.basename(path)) if path else texto)
+    out.plain = texto
+    return out
+
+
+def shown_text(texto: str) -> str:
+    return texto.plain if _blind and isinstance(texto, NamedText) else str(texto)
 
 
 def format_duration(ms: int | None) -> str:
@@ -1742,11 +1790,20 @@ class ThumbModel(QAbstractListModel):
         if self._paths:
             self.dataChanged.emit(self.index(0), self.index(len(self._paths) - 1))
 
+    @property
+    def names_visible(self) -> bool:
+        return self.show_names and not _blind
+
     def set_show_names(self, on: bool):
         self.show_names = on
+        self.names_changed()
+
+    def names_changed(self):
+        """Los nombres de las miniaturas, y los avisos con ruta, se rehacen."""
         if self._paths:
             self.dataChanged.emit(self.index(0), self.index(len(self._paths) - 1),
-                                  [Qt.ItemDataRole.DisplayRole])
+                                  [Qt.ItemDataRole.DisplayRole,
+                                   Qt.ItemDataRole.ToolTipRole])
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._paths)
@@ -1756,13 +1813,13 @@ class ThumbModel(QAbstractListModel):
             return None
         path = self._paths[index.row()]
         if role == Qt.ItemDataRole.DisplayRole:
-            return os.path.basename(path) if self.show_names else ""
+            return os.path.basename(path) if self.names_visible else ""
         if role == Qt.ItemDataRole.ToolTipRole:
             nota = self.note_for(path)
             if not nota:
-                return path
+                return None if _blind else path     # la ruta lleva el nombre
             # texto enriquecido: asi Qt parte las lineas largas del comentario
-            partes = [html.escape(path)]
+            partes = [] if _blind else [html.escape(path)]
             if "grade" in nota:
                 partes.append("<b>Grade %s</b>" % format_grade(nota["grade"]))
             if "comment" in nota:
@@ -2682,9 +2739,15 @@ class NoteEditor(QWidget):
         for wd in (self.spn, self.txt, self.b_clear):
             wd.setEnabled(path is not None)
         self._sync_copy()
-        self.lbl_file.setText(os.path.basename(path) if path
-                              else "Choose a file to grade or comment on it")
-        self.lbl_file.setToolTip(path or "")
+        self.show_file_label()
+
+    def show_file_label(self):
+        """El rotulo del archivo; en modo ciego no dice cual es."""
+        path = self.path
+        self.lbl_file.setText(
+            "Choose a file to grade or comment on it" if not path
+            else shown_name(path) or "Blind marking: name hidden")
+        self.lbl_file.setToolTip("" if _blind else path or "")
 
     def set_path(self, path: str | None):
         """Pasa a otro archivo, guardando antes lo escrito en el anterior."""
@@ -2761,6 +2824,8 @@ class PreviewPane(QWidget):
         self.edit_for = lambda path: None     # lo rellena la ventana principal
         self.note_for = lambda path: None     # nota y comentario, tambien
         self._caption_base = ""
+        self._caption_args: tuple = ()          # (ruta, *partes) del pie en pantalla
+        self._rebuild = None                    # rehace el pie si cambia el modo ciego
         self._fitted = True
         self._tokens = [0, 0]                   # una ficha por hueco (A y B)
         self._pool = QThreadPool(self)
@@ -3088,9 +3153,46 @@ class PreviewPane(QWidget):
         self.b_notes.setChecked(True)
         self.notes_box.focus_grade()
 
-    def _show_caption(self, texto: str):
+    def _cap(self, path: str | None, *partes: str) -> str:
+        """El pie sin nota: 'n / total  ·  nombre  ·  partes'. En modo ciego, sin nombre."""
+        cuerpo = "   ·   ".join(p for p in (shown_name(path),) + partes if p)
+        return self.prefix + cuerpo if cuerpo else self.prefix.rstrip(" \u00b7")
+
+    def say_caption(self, fn):
+        """Un texto suelto en el pie. fn lo rehace cuando cambia el modo ciego."""
+        self._rebuild = lambda: self.caption.setText(fn())
+        self._rebuild()
+
+    def refresh_names(self):
+        """Tras activar o quitar el modo ciego: rehace los textos que llevan nombre."""
+        if self._rebuild is not None:
+            self._rebuild()
+        if self.comparing and self.path and self.path_b:
+            self._set_compare_label(self.path, self.path_b)
+        if self.notes_box is not None:
+            self.notes_box.show_file_label()
+
+    def _set_compare_label(self, path_a: str, path_b: str):
+        self.lbl_cmp.setText("A  vs  B" if _blind else
+                             "A: %s     B: %s" % (os.path.basename(path_a),
+                                                  os.path.basename(path_b)))
+
+    def _compare_caption(self) -> str:
+        if _blind or not (self.loaded_path and self.loaded_path_b):
+            return "Comparing"
+        return "Comparing   ·   %s  /  %s" % (os.path.basename(self.loaded_path),
+                                               os.path.basename(self.loaded_path_b))
+
+    def _show_caption(self, path: str | None, *partes: str):
         """El pie de un archivo ya abierto, con su nota y su comentario detras."""
+        self._caption_args = (path, *partes)
+        self._paint_caption()
+
+    def _paint_caption(self):
+        path, *partes = self._caption_args
+        texto = self._cap(path, *partes)
         self._caption_base = texto
+        self._rebuild = self._paint_caption
         nota = self.note_for(self.loaded_path) or {}
         extra = []
         if "grade" in nota:
@@ -3106,7 +3208,7 @@ class PreviewPane(QWidget):
     def refresh_note(self):
         """Tras cambiar la nota del archivo que se esta viendo."""
         if self._caption_base and not self.comparing:
-            self._show_caption(self._caption_base)
+            self._paint_caption()
 
     def show_path(self, path: str | None, immediate: bool = False):
         if self.comparing:
@@ -3117,6 +3219,7 @@ class PreviewPane(QWidget):
         if self.notes_box is not None:
             self.notes_box.set_path(path)
         self._caption_base = ""
+        self._rebuild = None
         self.caption.setToolTip("")
         if path is None:
             self.stop_video()
@@ -3126,8 +3229,7 @@ class PreviewPane(QWidget):
             self.caption.setText("")
             return
         # se anuncia ya el nombre y se deja la imagen anterior hasta que llegue
-        self.caption.setText("%s%s   ·   opening…"
-                             % (self.prefix, os.path.basename(path)))
+        self.say_caption(lambda: self._cap(path, "opening…"))
         self._load() if immediate else self._timer.start()
 
     def _load(self):
@@ -3209,10 +3311,9 @@ class PreviewPane(QWidget):
         e = self.edit_for(self.gif.path)
         if not is_empty_edit(e):
             w, h = edited_size(e, w, h)
-        self._show_caption("%s%s   ·   %d x %d   ·   GIF, %d frames%s"
-                           % (self.prefix, os.path.basename(self.gif.path or ""),
-                              w, h, self.gif.count,
-                              "   (scaled down to be able to show it)"
+        self._show_caption(self.gif.path, "%d x %d" % (w, h),
+                           "GIF, %d frames%s"
+                           % (self.gif.count, "   (scaled down to be able to show it)"
                               if self.gif.reduced else ""))
 
     # --- video -------------------------------------------------------------
@@ -3405,9 +3506,7 @@ class PreviewPane(QWidget):
 
     def flash(self, texto: str):
         """Un aviso corto en el pie, que se va solo."""
-        self.caption.setText("%s%s   ·   %s" % (self.prefix,
-                                                os.path.basename(self.loaded_path or ""),
-                                                texto))
+        self.say_caption(lambda: self._cap(self.loaded_path, texto))
         self._flash_timer.start()
 
     def _refresh_frame_ui(self):
@@ -3610,14 +3709,14 @@ class PreviewPane(QWidget):
 
     def _caption_video(self):
         tam = self.video_item.nativeSize() if self.video_item is not None else QSizeF()
-        partes = [self.prefix + os.path.basename(self.loaded_path or "")]
+        partes = []
         if tam.isValid() and not tam.isEmpty():
             partes.append("%d x %d" % (tam.width(), tam.height()))
         if self.player is not None and self.player.duration() > 0:
             partes.append(format_duration(self.player.duration()))
         else:
             partes.append("opening…")
-        self._show_caption("   ·   ".join(partes))
+        self._show_caption(self.loaded_path, *partes)
 
     def _on_native_size(self, tam):
         if not self.showing_video or not tam.isValid() or tam.isEmpty():
@@ -3667,9 +3766,9 @@ class PreviewPane(QWidget):
 
     def _on_video_error(self, _error, texto: str):
         if self.showing_video:
-            self.caption.setText("%sCould not play %s: %s"
-                                 % (self.prefix, os.path.basename(self.loaded_path or ""),
-                                    texto))
+            path = self.loaded_path
+            self.say_caption(lambda: "%sCould not play %s: %s" % (
+                self.prefix, shown_name(path) or "this file", scrub_name(texto, path)))
 
     def hideEvent(self, e):
         if self.is_playing():
@@ -3704,9 +3803,8 @@ class PreviewPane(QWidget):
             self.sld_opacity.setValue(int(opacity))
         self._on_opacity(self.sld_opacity.value())
         self.cmp_bar.show()
-        self.lbl_cmp.setText("A: %s     B: %s" % (os.path.basename(path_a),
-                                                  os.path.basename(path_b)))
-        self.caption.setText("Comparing   ·   opening…")
+        self._set_compare_label(path_a, path_b)
+        self.say_caption(lambda: "Comparing   ·   opening…")
         self._pool.start(PreviewTask(0, self._tokens[0], path_a,
                                      self.max_side, self._signals,
                                      self.edit_for(path_a)))
@@ -3756,8 +3854,8 @@ class PreviewPane(QWidget):
             self.loaded_path_b = path
         if img.isNull():
             item.setPixmap(QPixmap())
-            self.caption.setText("%sCould not open %s"
-                                 % (self.prefix, os.path.basename(path)))
+            self.say_caption(lambda: "%sCould not open %s"
+                             % (self.prefix, shown_name(path) or "this file"))
             return
         item.setPixmap(QPixmap.fromImage(img))
         if self.comparing:
@@ -3766,15 +3864,12 @@ class PreviewPane(QWidget):
                 self.scene.setSceneRect(self.item.boundingRect())
                 self.fit()
             if self.loaded_path and self.loaded_path_b:
-                self.caption.setText("Comparing   ·   %s  /  %s"
-                                     % (os.path.basename(self.loaded_path),
-                                        os.path.basename(self.loaded_path_b)))
+                self.say_caption(self._compare_caption)
             return
         self.scene.setSceneRect(self.item.boundingRect())
         self.fit()
-        self._show_caption("%s%s   ·   %d x %d%s"
-                           % (self.prefix, os.path.basename(path),
-                              size.width(), size.height(),
+        self._show_caption(path, "%d x %d%s"
+                           % (size.width(), size.height(),
                               "   (scaled down to be able to show it)" if reduced else ""))
 
     def fit(self):
@@ -4762,7 +4857,7 @@ class EditorDialog(QDialog):
         self._full_timer.setInterval(300)
         self._full_timer.timeout.connect(self.render_full)
         self.src = QImage()
-        self.setWindowTitle("Edit  ·  " + os.path.basename(path))
+        self.setWindowTitle(self._title())
         self.resize(1000, 760)
 
         self.scene = QGraphicsScene(self)
@@ -5450,6 +5545,10 @@ class EditorDialog(QDialog):
         """Lo que se ve: la receta, o la imagen original mientras se mantiene Z."""
         return empty_edit() if self._before else self.edit
 
+    def _title(self) -> str:
+        return ("  \u00b7  ".join(p for p in ("Edit", shown_name(self.path)) if p)
+                + ("   \u00b7   BEFORE (original)" if self._before else ""))
+
     def set_before(self, activo: bool):
         if activo == self._before or self.item.pixmap().isNull():
             return
@@ -5457,8 +5556,7 @@ class EditorDialog(QDialog):
         self._before = activo
         cambia = antes != edited_size(self.view_edit(), *self.full_size)
         self.render_preview(reajustar=cambia)
-        self.setWindowTitle(("Edit  \u00b7  " + os.path.basename(self.path))
-                            + ("   \u00b7   BEFORE (original)" if activo else ""))
+        self.setWindowTitle(self._title())
 
     def render_preview(self, reajustar: bool = True):
         """reajustar=False al mover brillo o contraste: no toca el zoom.
@@ -5601,6 +5699,12 @@ grades and comments, and they travel with <b>Export library…</b>.</li>
 comments</b>, <b>[[show_notes]]</b>) to hide them everywhere — thumbnails,
 preview, large window and the panel — for instance before projecting in class.
 Nothing is deleted; tick it again to bring them back.</li>
+<li><b>Blind marking</b>: tick <b>Blind</b> above the thumbnails (or
+<b>View ▸ Blind marking</b>, <b>[[blind]]</b>) and no file name shows anywhere —
+thumbnails, captions, the grade panel, the large window, editor titles,
+tooltips and messages — so a student's name does not sway the grade. Folder
+names and the exported documents are not changed, and nothing is renamed. It is
+remembered between sessions.</li>
 </ul>
 
 <h3>3 · Comparing two images</h3>
@@ -5678,6 +5782,7 @@ with the same name instead of duplicating them, and keeps your own edits.</li>
 <tr><td><b>[[edit]]</b></td><td>open the editor</td></tr>
 <tr><td><b>[[note]]</b></td><td>grade / comment the chosen file</td></tr>
 <tr><td><b>[[show_notes]]</b></td><td>show / hide grades and comments</td></tr>
+<tr><td><b>[[blind]]</b></td><td>blind marking: hide / show file names</td></tr>
 <tr><td><b>[[before]]</b> (hold)</td><td>before / after: show the original</td></tr>
 <tr><td><b>[[fit]]</b></td><td>fit the image in view</td></tr>
 <tr><td><b>[[assign_1]]…[[assign_9]]</b></td><td>assign to the first nine categories</td></tr>
@@ -6155,6 +6260,10 @@ class MainWindow(QMainWindow):
         self.chk_names.toggled.connect(self.on_names)
         bar.addWidget(self.chk_names)
 
+        self.chk_blind = QCheckBox("Blind")
+        self.chk_blind.toggled.connect(self.set_blind)
+        bar.addWidget(self.chk_blind)
+
         self.chk_notes = QCheckBox("Grades")
         self.chk_notes.setChecked(True)
         self.chk_notes.toggled.connect(self.set_show_notes)
@@ -6386,6 +6495,35 @@ class MainWindow(QMainWindow):
         self.chk_notes.setToolTip("Show or hide grades and comments everywhere (%s). "
                                   "Hiding them deletes nothing." % SK.text("show_notes"))
 
+    def set_blind(self, on: bool):
+        """Modo ciego: ningun nombre de archivo a la vista, para corregir sin saber
+        de quien es cada trabajo. No cambia nada guardado; solo deja de verse."""
+        on = bool(on)
+        apply_blind(on)
+        for w in (self.chk_blind, self.act_blind):
+            if w.isChecked() != on:
+                w.blockSignals(True)
+                w.setChecked(on)
+                w.blockSignals(False)
+        self.chk_names.setEnabled(not on)       # sus nombres no salen, esten como esten
+        self.model.names_changed()
+        self.apply_icon_size(self.slider.value())   # la rejilla no deja hueco al nombre
+        self.update_marks()
+        self.preview.refresh_names()
+        for e in self.live_note_editors():
+            e.show_file_label()
+            pane = getattr(e, "pane", None)
+            if pane is not None:
+                pane.refresh_names()
+        self.view.viewport().update()
+        self.touch()
+
+    def _sync_blind_tip(self):
+        self.chk_blind.setToolTip(
+            "Blind marking (%s): no file name shows anywhere, so you grade the "
+            "work without knowing whose it is. Nothing is renamed; exports and "
+            "folder names are not changed." % SK.text("blind"))
+
     @property
     def _note_path(self) -> str | None:
         return self.note_editor.path
@@ -6435,7 +6573,7 @@ class MainWindow(QMainWindow):
         if nueva == vieja:
             return
         que = "grade" if nueva.get("grade") != vieja.get("grade") else "comment"
-        self.push_undo("%s (%s)" % (que, os.path.basename(path)))
+        self.push_undo(with_name(que, path))
         if nueva:
             self.notes[path] = nueva
         else:
@@ -6987,7 +7125,7 @@ class MainWindow(QMainWindow):
     def apply_icon_size(self, px: int):
         self.model.set_icon_size(px)
         self.view.setIconSize(QSize(px, px))
-        extra = 34 if self.model.show_names else 10
+        extra = 34 if self.model.names_visible else 10
         extra += 2 * ThumbDelegate.PAD              # el aire del marco de seleccion
         self.view.setGridSize(QSize(px + 22, px + extra))
 
@@ -7056,6 +7194,13 @@ class MainWindow(QMainWindow):
         SK.bind_action(self.act_notes, "show_notes")
         self._sync_notes_tip()
         SK.listeners.append(self._sync_notes_tip)
+        self.act_blind = v.addAction("Blind marking (hide file names)")
+        self.act_blind.setCheckable(True)
+        self.act_blind.setChecked(_blind)
+        self.act_blind.toggled.connect(self.set_blind)
+        SK.bind_action(self.act_blind, "blind")
+        self._sync_blind_tip()
+        SK.listeners.append(self._sync_blind_tip)
 
         h = barra.addMenu("&Help")
         a = h.addAction("How DriloBoard works…", self.show_help)
@@ -7373,7 +7518,7 @@ class MainWindow(QMainWindow):
         desc, snap = self._undo.pop()
         self._redo.append((desc, self.snapshot()))
         self.restore(snap)
-        self.statusBar().showMessage("Undone: %s" % desc, 5000)
+        self.statusBar().showMessage("Undone: %s" % shown_text(desc), 5000)
 
     def redo(self):
         self.commit_note()
@@ -7383,7 +7528,7 @@ class MainWindow(QMainWindow):
         desc, snap = self._redo.pop()
         self._undo.append((desc, self.snapshot()))
         self.restore(snap)
-        self.statusBar().showMessage("Redone: %s" % desc, 5000)
+        self.statusBar().showMessage("Redone: %s" % shown_text(desc), 5000)
 
     # ---------------- fotogramas clave de los videos ---------------------- #
     def marks_of(self, path: str | None) -> list[int]:
@@ -7391,7 +7536,7 @@ class MainWindow(QMainWindow):
 
     def set_video_marks(self, path: str, marks: list[int], descripcion: str):
         """Como las ediciones: se guarda en la biblioteca y se deshace."""
-        self.push_undo("%s (%s)" % (descripcion, os.path.basename(path)))
+        self.push_undo(with_name(descripcion, path))
         limpias = sorted({int(m) for m in marks})
         if limpias:
             self.video_marks[path] = limpias
@@ -7422,7 +7567,7 @@ class MainWindow(QMainWindow):
         return bool(path) and not is_empty_edit(self.edits.get(path))
 
     def set_edit(self, path: str, edit: dict | None):
-        self.push_undo("edit %s" % os.path.basename(path))
+        self.push_undo(with_name("edit", path))
         anterior = self.edits.get(path)
         if edit_signature(anterior) != edit_signature(edit):
             drop_thumb_cache(path, anterior)    # su miniatura ya no vale
@@ -7520,7 +7665,7 @@ class MainWindow(QMainWindow):
             return
         self.export_dir = carpeta
         hechas, fallos = 0, []
-        for p in sel:
+        for n, p in enumerate(sel, 1):
             destino = unique_path(os.path.join(carpeta, os.path.basename(p)))
             if is_video(p) or (is_gif(p) and not self.is_edited(p)):
                 # un video no tiene ediciones: se copia tal cual. Un GIF sin
@@ -7534,7 +7679,8 @@ class MainWindow(QMainWindow):
                 ok, err = export_edited(p, self.edits.get(p), destino)
             hechas += 1 if ok else 0
             if not ok:
-                fallos.append("%s: %s" % (os.path.basename(p), err))
+                fallos.append("%s: %s" % (shown_name(p) or "file %d" % n,
+                                          scrub_name(err, p)))
         self.touch()
         aviso = "%d copy/copies saved to:\n%s" % (hechas, carpeta)
         if fallos:
@@ -7572,7 +7718,7 @@ class MainWindow(QMainWindow):
             movida = True
         setattr(self, "mark_" + slot.lower(), path)
         self.statusBar().showMessage(
-            "%s marked as %s%s" % (os.path.basename(path), slot,
+            "%s marked as %s%s" % (shown_name(path) or "Image", slot,
                                    "  (no longer %s)" % otro if movida else ""), 5000)
         self.update_marks(compare=True)
 
@@ -7583,7 +7729,7 @@ class MainWindow(QMainWindow):
         self.update_marks()
 
     def update_marks(self, compare: bool = False):
-        corto = lambda p: (os.path.basename(p)[:22] if p else "—")
+        corto = lambda p: ((shown_name(p)[:22] or "\u2713") if p else "—")
         self.lbl_marks.setText("A: %s    B: %s" % (corto(self.mark_a),
                                                    corto(self.mark_b)))
         ambas = bool(self.mark_a and self.mark_b)
@@ -7700,6 +7846,7 @@ class MainWindow(QMainWindow):
             "recursive": self.recursive,
             "icon": self.slider.value(),
             "show_names": self.chk_names.isChecked(),
+            "blind": _blind,
             "categories": self.categories,
             "preview": self.chk_preview.isChecked(),
             "folder_order": self.cmb_folder_order.currentData(),
@@ -7750,6 +7897,7 @@ class MainWindow(QMainWindow):
         self.chk_videos.blockSignals(False)
         self.set_show_videos(self.chk_videos.isChecked())
         self.chk_names.setChecked(bool(data.get("show_names", True)))
+        self.set_blind(bool(data.get("blind", False)))
         self.viewer_notes = bool(data.get("viewer_notes", True))
         self.preview_notes = bool(data.get("preview_notes", True))
         self.preview.b_notes.setChecked(self.preview_notes)

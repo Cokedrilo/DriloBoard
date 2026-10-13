@@ -1,7 +1,7 @@
 # DriloBoard - Image viewer and reviewer
 
-[![Download](https://img.shields.io/badge/Download-Windows%20portable%20·%2058%20MB-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.5.1-portable-win64.zip)
-[![Download](https://img.shields.io/badge/Download-macOS%20portable%20·%2035%20MB-2ea44f?style=for-the-badge&logo=apple)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.5.1-portable-macos.zip)
+[![Download](https://img.shields.io/badge/Download-Windows%20portable%20·%2058%20MB-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.5.2-portable-win64.zip)
+[![Download](https://img.shields.io/badge/Download-macOS%20portable%20·%2035%20MB-2ea44f?style=for-the-badge&logo=apple)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.5.2-portable-macos.zip)
 [![Release](https://img.shields.io/github/v/release/Cokedrilo/DriloBoard)](https://github.com/Cokedrilo/DriloBoard/releases/latest)
 [![Licence](https://img.shields.io/github/license/Cokedrilo/DriloBoard)](LICENSE)
 
@@ -15,14 +15,14 @@ sheets, before/after comparisons.
 
 ### ⬇ Try it in one minute
 
-**[Download DriloBoard for Windows](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.5.1-portable-win64.zip)** → unzip anywhere → run
+**[Download DriloBoard for Windows](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.5.2-portable-win64.zip)** → unzip anywhere → run
 `DriloBoard.exe`.
 
 Nothing is installed, nothing is written to the registry, and it runs happily
 from a USB stick. Windows will warn about an unknown publisher the first time
 (the executable is not signed): *More info* → *Run anyway*.
 
-**[Download DriloBoard for Mac](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.5.1-portable-macos.zip)**
+**[Download DriloBoard for Mac](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.5.2-portable-macos.zip)**
 → unzip → open `DriloBoard.app` inside the `DriloBoard` folder. One app for
 Intel and Apple Silicon, macOS 13 or later. [First launch on a Mac](#macos).
 
@@ -84,6 +84,13 @@ writes the files in view to a **PDF with thumbnails**, a **spreadsheet (CSV)**
 or a **Word document**.
 Untick *Grades* (or `Ctrl+G`) to hide them all — handy before projecting in
 class; nothing is deleted.
+
+**Blind marking**
+Tick *Blind* (or `Ctrl+B`, *View ▸ Blind marking*) and no file name shows
+anywhere — thumbnails, captions, the grade panel, the large window, editor
+titles, tooltips and messages — so a student's name does not sway the grade.
+Nothing is renamed, folder names and exported documents are unchanged, and it
+is remembered between sessions.
 
 ![Grading a GIF in the large window, with a loop fragment on the frame bar](docs/grades.png)
 
@@ -149,7 +156,7 @@ overwrites your own edits.
 
 ### Prebuilt Windows package
 
-[**Download the ZIP**](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.5.1-portable-win64.zip)
+[**Download the ZIP**](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.5.2-portable-win64.zip)
 (58 MB) — or browse every version under
 [Releases](https://github.com/Cokedrilo/DriloBoard/releases). Unpack it
 anywhere: hard disk, USB stick, network share.
@@ -166,7 +173,7 @@ with status 0 if everything is in place.
 
 ### Prebuilt Mac package
 
-[**Download the ZIP**](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.5.1-portable-macos.zip)
+[**Download the ZIP**](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.5.2-portable-macos.zip)
 (35 MB). It unzips to a `DriloBoard` folder holding `DriloBoard.app` and a
 short read-me. Keep the app in that folder: the library and the thumbnail
 cache are created **next to the app** (never inside it), so the folder is
@@ -221,6 +228,7 @@ you try it there, reports are welcome.
 | `E` | open the editor |
 | `N` | grade / comment the chosen file |
 | `Ctrl+G` | show / hide grades and comments |
+| `Ctrl+B` | blind marking: hide / show file names |
 | `0` | fit the image in view |
 | `Ctrl+1` … `Ctrl+9` | assign to the first nine categories |
 | `Ctrl+Z` / `Ctrl+Y` | undo / redo |

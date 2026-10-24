@@ -21,7 +21,7 @@ botón *Export*.
 ## Arrancar
 
 **Versión portable (lo normal).** Descomprime
-`DriloBoard-1.12.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
+`DriloBoard-1.13.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
 red— y ejecuta `DriloBoard.exe`. No instala nada ni escribe en el registro.
 La biblioteca y la caché de miniaturas se crean **dentro de esa misma
 carpeta**, así que copiándola te llevas también toda la clasificación.
@@ -30,7 +30,7 @@ La primera vez Windows puede avisar de que el origen es desconocido (el
 ejecutable no está firmado): *Más información* → *Ejecutar de todas formas*.
 
 **Versión portable para Mac.** Descomprime
-`DriloBoard-1.12.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
+`DriloBoard-1.13.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
 `DriloBoard.app` dentro. Una sola app para Mac Intel y Apple Silicon, macOS 13
 Ventura o posterior. Igual que en Windows, la biblioteca y la caché se crean
 **en esa carpeta, junto a la app** (nunca dentro del `.app`), así que se puede
@@ -230,7 +230,8 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   - Un GIF de un solo fotograma se ve como cualquier imagen, sin barra.
 - **Doble clic en una imagen abre el editor** (un vídeo o un GIF, el visor
   grande). El visor grande se abre con *Open large*, bajo la vista previa:
-  `←`/`→` pasan imágenes, rueda hace zoom, arrastrar mueve, `0` reencuadra,
+  `←`/`→` pasan imágenes, rueda hace zoom, arrastrar (o el botón central)
+  mueve, `0` reencuadra,
   `F` o `F11` pantalla completa, `Esc` cierra.
 - Clic derecho: abrir, abrir la carpeta contenedora, copiar ruta, asignar o
   quitar de categorías, poner nota o comentario.
@@ -266,6 +267,8 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
 - Es del archivo que tengas elegido en la rejilla (el del foco): una **nota de
   0 a 10**, con decimales, y un **comentario** libre. Vale igual para imágenes,
   GIF y vídeos.
+- Elige uno o varios archivos y pulsa un número del **1** al **9**: esa es su
+  nota (un solo paso de deshacer).
 - `N` (o clic derecho ▸ *Grade / comment…*) te lleva a la casilla de la nota;
   `Tab` pasa al comentario. Se guarda solo al dejar de escribir un momento o al
   cambiar de archivo. *Copy comment* copia el texto del comentario al
@@ -421,21 +424,28 @@ después.
       amarillo, verde, cian, azul, añil y violeta) más blanco y negro. El
       botón `…` abre el selector completo si necesitas otro. Al lado, el
       grosor.
-    - La *Eraser* borra **el dibujo entero sobre el que pinchas**, no raspa
-      píxeles. Cada trazo es un objeto: puedes quitar la flecha y dejar el
-      círculo.
+    - El pincel llega a **200** de tamaño.
+    - **Eraser** (la goma): borra lo dibujado en la **capa elegida**, con el
+      tamaño y la dureza del pincel. La foto de debajo nunca se toca.
+      **Remove stroke** quita el trazo entero sobre el que pinchas.
+    - Con el **botón central** del ratón te mueves por la imagen, con
+      cualquier herramienta. `Ctrl+Z` y rehacer no cambian el zoom.
     - Los dibujos se guardan en coordenadas del original, así que **siguen a
       la imagen**: si luego rotas o recortas, se rotan y se recortan con ella.
     - Van al final de la receta, por eso un rotulador rojo sigue rojo aunque
       pongas la imagen en blanco y negro.
     - `Ctrl+Z` deshace trazo a trazo. *Clear drawings* los quita todos (y
       también se deshace).
-    - **Capas** (panel *LAYERS* a la derecha del editor), como en
-      DriloReview: cada dibujo es una capa y la de arriba de la lista queda
-      encima. El **ojo** la oculta (las ocultas no salen al exportar ni en
-      los PDF); arrastrar reordena; las flechas (`Ctrl+]` / `Ctrl+[`) la
-      suben o bajan; *Opacity* la vuelve transparente; la papelera o `Supr`
-      la borran.
+    - **Capas** (panel *LAYERS* a la derecha del editor): la de arriba de la
+      lista queda encima. Lo que dibujas va a la **capa elegida**; sin
+      ninguna elegida, el primer trazo crea una. **+** añade una capa vacía
+      (`Ctrl+Shift+N`); doble clic la renombra. Con Cmd o Mayús eliges
+      **varias**: el ojo (las ocultas no salen al exportar ni en los PDF),
+      *Opacity*, *Hardness*, las flechas (`Ctrl+]` / `Ctrl+[`), **fundir**
+      (`Ctrl+E`) y la papelera (o `Supr`) valen para todas; el botón del bote
+      de pintura les pone el color elegido. Sobre una capa de color o una
+      guía se dibuja en una capa nueva encima. Las correcciones de antes se
+      abren con un dibujo por capa, igual que se veían.
     - **Opacity** y **Hardness**, junto a *Size*: la opacidad y la dureza
       del siguiente trazo. Con menos dureza el borde se difumina como un
       aerógrafo (el centro sigue sólido). En el panel de capas se cambian las

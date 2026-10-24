@@ -100,21 +100,32 @@ dlg.on_color(QColor("#0078d4"))
 dlg.add_colour_layer()
 capa = dlg.edit["draw"][-1]
 assert capa["tipo"] == "solido" and capa["opacidad"] == 50 and capa["color"] == "#0078d4"
-assert dlg.sel == 1 and dlg.layers.item(0).text().startswith("Colour layer")
+assert dlg.layers.item(0).text().startswith("Colour layer") and len(dlg.edit["capas"]) == 2
+assert dlg.selected_layer_ids() == [capa["capa"]]
 assert not dlg.sld_hard.isEnabled() and dlg.sld_opacity.isEnabled()
 assert dlg.shape_at(dlg.screen_transform().map(QPointF(300, 250)), interior=True) is None, \
     "la capa de color no se pincha en el lienzo (se elige en Capas)"
+# el fallo de la 1.12: elegir color para el trazo siguiente repintaba la capa de color
 dlg.on_color(QColor("#16a34a"))
-assert dlg.edit["draw"][1]["color"] == "#16a34a", "con la capa elegida, el color la cambia"
+assert dlg.edit["draw"][1]["color"] == "#0078d4", "elegir un color no repinta la capa"
+dlg.set_tool("trazo")
+dlg.view._puntos = [QPointF(20, 20), QPointF(80, 30)]
+dlg.on_drawn(dlg.view._forma())
+nuevo = dlg.edit["draw"][-1]
+assert nuevo["color"] == "#16a34a" and nuevo["capa"] != capa["capa"], \
+    "sobre una capa de color se dibuja en una capa nueva encima"
+assert [c["nombre"] for c in dlg.edit["capas"]][-2:] == ["Colour layer 1", "Layer 2"]
+dlg.select_layers([capa["capa"]])
+dlg.recolour_layers()
+assert dlg.edit["draw"][1]["color"] == "#16a34a", "el boton del panel si la repinta"
 dlg.sld_opacity.setValue(30)
-assert dlg.edit["draw"][1]["opacidad"] == 30
-# dureza de la capa elegida, con deshacer
-dlg.select_shape(0)
+assert dlg.capa(capa["capa"])["opacidad"] == 30, "la opacidad es de la capa"
+# dureza de los trazos de la capa elegida, con deshacer
+dlg.select_layers([dlg.edit["draw"][0]["capa"]])
 assert dlg.sld_hard.isEnabled() and dlg.sld_hard.value() == 25
 n = len(dlg._undo)
 dlg.sld_hard.setValue(80)
 assert dlg.edit["draw"][0]["dureza"] == 80 and len(dlg._undo) == n + 1
-assert "soft 20" in dlg.layers.item(1).text()
 dlg.sld_hard.setValue(100)
 assert "dureza" not in dlg.edit["draw"][0]
 dlg.undo()
@@ -221,11 +232,12 @@ dlg.add_guide("espiral", 3)
 g = dlg.edit["draw"][-1]
 assert g["tipo"] == "guia" and g["regla"] == "espiral" and g["giro"] == 3 and g["color"] == "#fcd116"
 assert dlg.layers.item(0).text() == "Golden spiral" and not dlg.sld_hard.isEnabled()
+assert dlg.edit["capas"][-1]["nombre"] == "Golden spiral"
 assert dlg.shape_at(dlg.screen_transform().map(QPointF(200, 150)), interior=True) is None
 menu = dlg.b_guides.menu()
 assert [a.text() for a in menu.actions()][:3] == ["Rule of thirds", "Centre", "Diagonals"]
 dlg.sld_opacity.setValue(40)
-assert dlg.edit["draw"][-1]["opacidad"] == 40
+assert dlg.capa(g["capa"])["opacidad"] == 40
 dlg.undo()
 dlg.undo()
 assert dlg.edit["draw"] == []

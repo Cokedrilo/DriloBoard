@@ -7,7 +7,21 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
-Novedades de la 1.12:
+Novedades de la 1.13:
+
+  - Capas como en un programa de dibujo: lo que dibujas va a la capa
+    elegida (no una capa por trazo). "+" anade una capa vacia; doble clic
+    la renombra. Varias a la vez con Ctrl/Mayus: ocultar, opacidad,
+    dureza, subir/bajar, fundir (Ctrl+E), color y borrar.
+  - Goma de pincel ("Eraser"): borra en la capa elegida, con el tamano y la
+    dureza del pincel. "Remove stroke" quita un trazo entero.
+  - Pincel hasta 200. Boton central del raton: moverse por la imagen.
+  - Ctrl+Z ya no cambia el zoom.
+  - En la rejilla, del 1 al 9: esa nota a los archivos elegidos.
+  - Arreglado: elegir un color despues de poner una capa de color la
+    repintaba.
+
+De la 1.12:
 
   - Guias de composicion en el editor (boton "Composition"): tercios,
     centro, diagonales, rejilla aurea, simetria dinamica, triangulos aureos

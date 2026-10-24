@@ -32,7 +32,7 @@ try:                      # sin numpy el color (tono/saturacion/luz) no se aplic
 except ImportError:       # pragma: no cover
     np = None
 
-from PySide6.QtCore import (QAbstractListModel, QBuffer, QByteArray, QEvent, QLocale,
+from PySide6.QtCore import (QAbstractListModel, QBuffer, QByteArray, QEvent, QItemSelectionModel, QLocale,
                             QMarginsF, QMimeData, QModelIndex,
                             QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, QSizeF,
                             Qt, QThreadPool, QTimer, QUrl, Signal, Slot)
@@ -71,7 +71,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.12.0"
+VERSION = "1.13.0"
 
 
 def app_dir() -> Path:
@@ -595,7 +595,7 @@ def empty_edit() -> dict:
     return {"crop": None, "rot": 0, "angle": 0, "flip_h": False, "flip_v": False,
             "gray": False, "bright": 0, "contrast": 0, "blur": 0, "hue": 0, "sat": 0, "light": 0,
             "resize": None, "pad": None,
-            "draw": []}
+            "draw": [], "capas": []}
 
 
 def edit_angle(edit: dict | None) -> float:
@@ -684,7 +684,7 @@ def shape_path(forma: dict) -> QPainterPath:
     if not pts:
         return path
     tipo = forma.get("tipo")
-    if tipo in ("trazo", "rotulador"):
+    if tipo in ("trazo", "rotulador", "borrar"):
         path.moveTo(pts[0])
         for p in pts[1:]:
             path.lineTo(p)
@@ -793,7 +793,7 @@ def soft_layer(forma: dict, t: QTransform, area: QRect):
 
 
 def paint_shape(p: QPainter, forma: dict):
-    if forma.get("tipo") in ("difuminar", "solido", "guia") or forma.get("oculto"):
+    if forma.get("tipo") in ("difuminar", "solido", "guia", "borrar") or forma.get("oculto"):
         return                               # difuminar y el color de fondo, aparte
     color = QColor(forma.get("color", "#e6542f"))
     color.setAlpha(shape_alpha(forma))
@@ -979,11 +979,108 @@ def paint_guide(p: QPainter, forma: dict, W: int, H: int):
     p.restore()
 
 
+# --- capas: cada una agrupa trazos. Los dibujos guardan su capa en "capa" y
+# la receta lleva "capas" (de abajo arriba) con nombre, ojo y opacidad. Las
+# recetas de antes no tienen capas: cada dibujo era una, y asi se siguen viendo.
+def new_layer_id() -> str:
+    import uuid
+    return uuid.uuid4().hex[:10]
+
+
+def layer_groups(formas: list, capas: list | None) -> list[tuple[dict, list]]:
+    """[(capa, [dibujos])] de abajo arriba, cada capa con sus dibujos en orden."""
+    if not capas:
+        return [({"id": None}, [f]) for f in formas]
+    por_id = {c.get("id"): [] for c in capas}
+    sueltos = []
+    for f in formas:
+        (por_id[f["capa"]] if f.get("capa") in por_id else sueltos).append(f)
+    grupos = [(c, por_id[c.get("id")]) for c in capas]
+    return grupos + [({"id": None}, [f]) for f in sueltos]       # sin capa: una cada uno
+
+
+def layer_name(forma: dict) -> str:
+    """El nombre de la capa que sale de un dibujo de antes (sin opacidad)."""
+    if forma.get("tipo") == "guia":
+        return GUIDE_NAMES.get(forma.get("regla"), "Guide")
+    return shape_label(dict(forma, opacidad=100, dureza=100))
+
+
+def normalize_layers(edit: dict) -> dict:
+    """Una receta con capas. Las de antes pasan a una capa por dibujo (con su
+    ojo), asi que se ven exactamente igual. No toca la que le dan."""
+    edit = dict(edit or empty_edit())
+    formas = [dict(f) for f in edit.get("draw") or []]
+    capas = [dict(c) for c in edit.get("capas") or [] if isinstance(c, dict) and c.get("id")]
+    ids = {c["id"] for c in capas}
+    for f in formas:
+        if f.get("capa") in ids:
+            continue
+        capa = {"id": new_layer_id(), "nombre": layer_name(f)}
+        if f.pop("oculto", False):
+            capa["oculto"] = True
+        f["capa"] = capa["id"]
+        capas.append(capa)
+        ids.add(capa["id"])
+    edit["draw"], edit["capas"] = formas, capas
+    return edit
+
+
+def layer_opacity(capa: dict) -> int:
+    return shape_opacity(capa)
+
+
+def _paint_one(p: QPainter, forma: dict, t: QTransform, area: QRect):
+    """Un dibujo sobre p (que tiene puesta la transformacion t)."""
+    tipo = forma.get("tipo")
+    if tipo == "guia":                          # guia de composicion: sobre lo que se ve
+        p.resetTransform()
+        paint_guide(p, forma, area.width(), area.height())
+        p.setTransform(t)
+    elif tipo == "solido":                      # una capa de color: toda la imagen
+        c = QColor(forma.get("color", "#ffffff"))
+        c.setAlpha(shape_alpha(forma))
+        p.resetTransform()
+        p.fillRect(area, c)
+        p.setTransform(t)
+    elif tipo == "borrar":                      # la goma: quita de su capa
+        p.save()
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+        if shape_hardness(forma) < 100:
+            suave = soft_layer(dict(forma, color="#000000"), t, area)
+            if suave is not None:
+                p.resetTransform()
+                p.setOpacity(shape_alpha(forma) / 255)
+                p.drawImage(suave[1], suave[0])
+        else:
+            c = QColor(0, 0, 0, shape_alpha(forma))
+            pen = QPen(c, max(0.1, float(forma.get("grosor", 4))))
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(shape_path(forma))
+        p.restore()
+    elif shape_hardness(forma) < 100 and tipo != "difuminar":
+        suave = soft_layer(forma, t, area)
+        if suave is not None:
+            p.resetTransform()
+            if tipo != "texto":                 # el texto ya trae su opacidad
+                p.setOpacity(shape_alpha(forma) / 255)
+            p.drawImage(suave[1], suave[0])
+            p.setOpacity(1.0)
+            p.setTransform(t)
+    else:
+        paint_shape(p, forma)
+
+
 def draw_annotations(img: QImage, edit: dict | None, src_w: int, src_h: int) -> QImage:
     formas = (edit or {}).get("draw") or []
     if not formas or img.isNull():
         return img
-    img = blur_regions(img, formas, source_to_display_transform(edit, src_w, src_h))
+    grupos = layer_groups(formas, (edit or {}).get("capas"))
+    visibles = [f for c, fs in grupos if not c.get("oculto") for f in fs]
+    img = blur_regions(img, visibles, source_to_display_transform(edit, src_w, src_h))
     if img.format() not in (QImage.Format.Format_ARGB32,
                             QImage.Format.Format_RGB32,
                             QImage.Format.Format_ARGB32_Premultiplied):
@@ -991,33 +1088,32 @@ def draw_annotations(img: QImage, edit: dict | None, src_w: int, src_h: int) -> 
     else:
         img = QImage(img)                    # no pintar sobre la que nos dieron
     t = source_to_display_transform(edit, src_w, src_h)
+    area = img.rect()
     p = QPainter(img)
     p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    p.setTransform(t)
-    for forma in formas:
-        if forma.get("oculto"):
+    for capa, fs in grupos:
+        fs = [f for f in fs if not f.get("oculto")]
+        if capa.get("oculto") or not fs:
             continue
-        if forma.get("tipo") == "guia":         # guia de composicion: sobre lo que se ve
-            p.resetTransform()
-            paint_guide(p, forma, img.width(), img.height())
-            p.setTransform(t)
-        elif forma.get("tipo") == "solido":     # una capa de color: toda la imagen
-            c = QColor(forma.get("color", "#ffffff"))
-            c.setAlpha(shape_alpha(forma))
-            p.resetTransform()
-            p.fillRect(img.rect(), c)
-            p.setTransform(t)
-        elif shape_hardness(forma) < 100 and forma.get("tipo") != "difuminar":
-            suave = soft_layer(forma, t, img.rect())
-            if suave is not None:
-                p.resetTransform()
-                if forma.get("tipo") != "texto":    # el texto ya trae su opacidad
-                    p.setOpacity(shape_alpha(forma) / 255)
-                p.drawImage(suave[1], suave[0])
-                p.setOpacity(1.0)
-                p.setTransform(t)
-        else:
-            paint_shape(p, forma)
+        op = layer_opacity(capa)
+        if op >= 100 and not any(f.get("tipo") == "borrar" for f in fs):
+            p.setTransform(t)                   # lo normal: directo sobre la imagen
+            for f in fs:
+                _paint_one(p, f, t, area)
+            continue
+        # con goma u opacidad de capa: la capa se pinta aparte y se pega entera
+        hoja = QImage(img.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        hoja.fill(Qt.GlobalColor.transparent)
+        q = QPainter(hoja)
+        q.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        q.setTransform(t)
+        for f in fs:
+            _paint_one(q, f, t, area)
+        q.end()
+        p.resetTransform()
+        p.setOpacity(op / 100)
+        p.drawImage(0, 0, hoja)
+        p.setOpacity(1.0)
     p.end()
     return img
 
@@ -1038,7 +1134,7 @@ def edit_signature(edit: dict | None) -> str:
         # sin giro libre la firma queda como antes de existir el angulo, y las
         # miniaturas ya cacheadas de ediciones viejas siguen valiendo
         del d["angle"]
-    for k in ("blur", "hue", "sat", "light", "pad"):
+    for k in ("blur", "hue", "sat", "light", "pad", "capas"):
         if not d.get(k):
             d.pop(k, None)           # idem: las ediciones viejas conservan su firma
     return json.dumps(d, sort_keys=True)
@@ -2843,10 +2939,54 @@ class CategoryTree(EmptyHint, QTreeWidget):
 # --------------------------------------------------------------------------- #
 #  Visor a pantalla grande
 # --------------------------------------------------------------------------- #
+def _pan_press(view, e) -> bool:
+    """Boton central: se arrastra la imagen, con cualquier herramienta."""
+    if e.button() != Qt.MouseButton.MiddleButton:
+        return False
+    view._pan = e.position()
+    view._pan_cursor = view.viewport().cursor()
+    view.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+    e.accept()
+    return True
+
+
+def _pan_move(view, e) -> bool:
+    if getattr(view, "_pan", None) is None:
+        return False
+    d = e.position() - view._pan
+    view._pan = e.position()
+    h, v = view.horizontalScrollBar(), view.verticalScrollBar()
+    h.setValue(h.value() - int(round(d.x())))
+    v.setValue(v.value() - int(round(d.y())))
+    e.accept()
+    return True
+
+
+def _pan_release(view, e) -> bool:
+    if getattr(view, "_pan", None) is None or e.button() != Qt.MouseButton.MiddleButton:
+        return False
+    view._pan = None
+    view.viewport().setCursor(view._pan_cursor)
+    e.accept()
+    return True
+
+
 class ZoomView(QGraphicsView):
-    """QGraphicsView con zoom de rueda."""
+    """QGraphicsView con zoom de rueda; el boton central arrastra."""
     zoomed = Signal()
     resized = Signal()
+
+    def mousePressEvent(self, e):
+        if not _pan_press(self, e):
+            super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if not _pan_move(self, e):
+            super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if not _pan_release(self, e):
+            super().mouseReleaseEvent(e)
 
     def wheelEvent(self, e):
         f = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
@@ -6149,7 +6289,7 @@ class FullRenderTask(QRunnable):
 
 
 DRAW_TOOLS = ("trazo", "rotulador", "linea", "flecha", "rect", "elipse", "texto",
-              "difuminar")
+              "difuminar", "borrador")
 
 # Los 8 del arco iris mas blanco y negro
 DRAW_COLORS = [("Red", "#e81123"), ("Orange", "#f7630c"), ("Yellow", "#fcd116"),
@@ -6775,6 +6915,12 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
         p.drawLine(m, M, M, M)
         p.drawLine(m, M, M - 2, m + 1)
         p.drawArc(QRectF(m - 7, M - 7, 14, 14), 0, 60 * 16)
+    elif kind == "merge":                       # dos capas que se juntan en una
+        c = size / 2
+        p.drawLine(QPointF(m + 1, m + 2), QPointF(M - 1, m + 2))
+        p.drawLine(QPointF(m + 1, M - 2), QPointF(M - 1, M - 2))
+        p.drawPolyline([QPointF(c - 3, m + 5), QPointF(c, c - 0.5), QPointF(c + 3, m + 5)])
+        p.drawPolyline([QPointF(c - 3, M - 5), QPointF(c, c + 0.5), QPointF(c + 3, M - 5)])
     elif kind == "guides":                      # tercios y una diagonal
         p.drawRect(QRectF(m, m, M - m, M - m))
         for f in (1 / 3, 2 / 3):
@@ -6905,7 +7051,7 @@ class LayerList(QListWidget):
     Clic en el ojo la oculta o muestra; arrastrar reordena; Supr borra."""
     reordered = Signal()
     delete_pressed = Signal()
-    eye_clicked = Signal(int)                   # indice del dibujo
+    eye_clicked = Signal(object)                # id de la capa
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -6915,6 +7061,7 @@ class LayerList(QListWidget):
         self.setDropIndicatorShown(True)
         self.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
 
     def mousePressEvent(self, e):
         item = self.itemAt(e.position().toPoint())
@@ -7021,7 +7168,8 @@ class CropView(QGraphicsView):
     def _forma(self) -> dict:
         alpha = 90 if self.tool == "rotulador" else 255
         grosor = self.width * 4 if self.tool == "rotulador" else self.width
-        forma = {"tipo": self.tool, "puntos": [[p.x(), p.y()] for p in self._puntos],
+        tipo = "borrar" if self.tool == "borrador" else self.tool    # la goma de pincel
+        forma = {"tipo": tipo, "puntos": [[p.x(), p.y()] for p in self._puntos],
                  "color": self.color.name(), "grosor": grosor, "alpha": alpha}
         if self.tool != "difuminar":
             if self.opacity < 100:
@@ -7038,6 +7186,8 @@ class CropView(QGraphicsView):
         forma = self._forma()
         c = QColor(self.color)
         c.setAlpha(shape_alpha(forma))
+        if forma["tipo"] == "borrar":           # la goma se ve como un rastro claro
+            c = QColor(255, 255, 255, 110)
         pen = QPen(c, max(0.5, forma["grosor"]))
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -7060,6 +7210,8 @@ class CropView(QGraphicsView):
         super().mouseDoubleClickEvent(e)
 
     def mousePressEvent(self, e):
+        if _pan_press(self, e):
+            return
         if self.tool == "seleccionar" and e.button() == Qt.MouseButton.LeftButton:
             self._arrastre = True
             self.setFocus(Qt.FocusReason.MouseFocusReason)   # para que Supr le llegue
@@ -7079,12 +7231,14 @@ class CropView(QGraphicsView):
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
+        if _pan_move(self, e):
+            return
         if self.tool == "seleccionar" and self._arrastre:
             self.dragged.emit(self.mapToScene(e.position().toPoint()))
             return
         if self.tool in DRAW_TOOLS and self._puntos:
             p = self.mapToScene(e.position().toPoint())
-            if self.tool in ("trazo", "rotulador"):
+            if self.tool in ("trazo", "rotulador", "borrador"):
                 self._puntos.append(p)
             else:
                 self._puntos = [self._puntos[0], p]
@@ -7093,6 +7247,8 @@ class CropView(QGraphicsView):
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
+        if _pan_release(self, e):
+            return
         if self.tool == "seleccionar" and self._arrastre:
             self._arrastre = False
             self.drag_done.emit()
@@ -7100,7 +7256,7 @@ class CropView(QGraphicsView):
         if self.tool in DRAW_TOOLS and self._puntos:
             forma = self._forma()
             self._clear_preview()
-            if len(forma["puntos"]) > 1 or forma["tipo"] in ("trazo", "rotulador"):
+            if len(forma["puntos"]) > 1 or forma["tipo"] in ("trazo", "rotulador", "borrar"):
                 self.drawn.emit(forma)
             return
         band = self.rubberBandRect()
@@ -7261,7 +7417,7 @@ class EditorDialog(QDialog):
     def __init__(self, path: str, edit: dict, parent=None):
         super().__init__(parent)
         self.path = path
-        self.edit = dict(empty_edit(), **(edit or {}))
+        self.edit = normalize_layers(dict(empty_edit(), **(edit or {})))
         self._undo: list = []
         self._redo: list = []
         self._before = False                   # Z mantenida: se ve el original
@@ -7303,7 +7459,7 @@ class EditorDialog(QDialog):
         self.view.delete_pressed.connect(self.delete_shape)
         self.sel: int | None = None            # capa elegida (indice en edit["draw"])
         self._move = None                      # arrastre en curso con Seleccionar
-        self._op_drag = None                   # (receta antes, opacidad) al pinchar el slider
+        self._pending_select = None            # capas a elegir tras el proximo repintado
         self._drag_timer = QTimer(self)        # al arrastrar, repinta a ratos
         self._drag_timer.setSingleShot(True)
         self._drag_timer.setInterval(30)
@@ -7390,7 +7546,10 @@ class EditorDialog(QDialog):
                 ("texto", "text", "Text", "Click and type"),
                 ("difuminar", "blurarea", "Blur area",
                  "Drag a rectangle to blur what is inside (names, faces\u2026)"),
-                ("goma", "eraser", "Eraser", "Remove the drawing you click on"),
+                ("borrador", "eraser", "Eraser",
+                 "Rub out part of what is drawn on the selected layer, with the brush size "
+                 "and hardness (the image underneath is never touched)"),
+                ("goma", "trash", "Remove stroke", "Remove the whole stroke you click on"),
                 ("recortar", "crop", "Crop",
                  "Drag a rectangle over the image. Drag it past the edges "
                  "to enlarge the frame with a margin")):
@@ -7430,9 +7589,10 @@ class EditorDialog(QDialog):
         dibujo.addWidget(self.b_color)
         dibujo.addWidget(QLabel("Size"))
         self.sld_width = QSlider(Qt.Orientation.Horizontal)
-        self.sld_width.setRange(1, 40)
+        self.sld_width.setRange(1, 200)
         self.sld_width.setValue(6)
-        self.sld_width.setFixedWidth(110)
+        self.sld_width.setFixedWidth(130)
+        self.sld_width.setToolTip("Brush size, from 1 to 200")
         self.sld_width.valueChanged.connect(self.set_width)
         dibujo.addWidget(self.sld_width)
         # opacidad y dureza de lo siguiente que dibujes (la capa elegida se
@@ -7748,19 +7908,22 @@ class EditorDialog(QDialog):
             return
         desc, receta = self._undo.pop()
         self._redo.append((desc, dict(self.edit)))
-        self.edit = receta
-        self.sync_widgets()
-        self.render_preview()
-        self.update_undo_buttons()
+        self._swap_edit(receta)
 
     def redo(self):
         if not self._redo:
             return
         desc, receta = self._redo.pop()
         self._undo.append((desc, dict(self.edit)))
+        self._swap_edit(receta)
+
+    def _swap_edit(self, receta: dict):
+        """Pone otra receta (deshacer, rehacer) sin mover el zoom ni el encuadre,
+        salvo que cambie el tamano de lo que se ve (un recorte, un giro)."""
+        antes = edited_size(self.view_edit(), *self.full_size)
         self.edit = receta
         self.sync_widgets()
-        self.render_preview()
+        self.render_preview(reajustar=edited_size(self.view_edit(), *self.full_size) != antes)
         self.update_undo_buttons()
 
     def update_undo_buttons(self):
@@ -7926,6 +8089,9 @@ class EditorDialog(QDialog):
     def set_tool(self, tool: str | None):
         antes = self.view.tool
         self.view.set_tool(tool)
+        if tool != "seleccionar" and getattr(self, "sel", None) is not None:
+            self.sel = None                     # dibujando ya no hay trazo elegido
+            self._sync_layer_controls()
         b = self._tool_buttons.get(tool)     # tambien al volver solo a "Mover"
         if b is not None and not b.isChecked():
             b.setChecked(True)
@@ -7984,26 +8150,87 @@ class EditorDialog(QDialog):
         fila.addWidget(lbl)
         return sld, lbl
 
+    # --- capas (contenedores de trazos) -------------------------------------
+    #
+    # self.edit["capas"]: de abajo arriba, {id, nombre, oculto?, opacidad?}.
+    # Cada dibujo lleva "capa". Lo que dibujas va a la capa activa; la lista
+    # admite varias elegidas a la vez (ocultar, opacidad, subir, fusionar,
+    # borrar). self.sel es un TRAZO concreto (el que elige Select and move).
+    def capas(self) -> list:
+        return [dict(c) for c in self.edit.get("capas") or []]
+
+    def capa(self, cid):
+        for c in self.edit.get("capas") or []:
+            if c.get("id") == cid:
+                return c
+        return None
+
+    def selected_layer_ids(self) -> list:
+        """Las capas elegidas en la lista, de abajo arriba."""
+        elegidas = {it.data(LAYER_ROLE) for it in self.layers.selectedItems()}
+        return [c["id"] for c in self.edit.get("capas") or [] if c["id"] in elegidas]
+
+    def active_layer(self, o_la_de_arriba: bool = False):
+        """La capa en la que se dibuja: la actual de la lista. Sin ninguna
+        elegida, None (se dibuja en una nueva) o, si se pide, la de arriba."""
+        it = self.layers.currentItem()
+        if it is not None and it.isSelected() and self.capa(it.data(LAYER_ROLE)):
+            return it.data(LAYER_ROLE)
+        sel = self.selected_layer_ids()
+        if sel:
+            return sel[-1]
+        capas = self.edit.get("capas") or []
+        return capas[-1]["id"] if capas and o_la_de_arriba else None
+
+    def _next_name(self, base: str = "Layer") -> str:
+        usados = {c.get("nombre") for c in self.edit.get("capas") or []}
+        n = 1
+        while "%s %d" % (base, n) in usados:
+            n += 1
+        return "%s %d" % (base, n)
+
+    def _commit(self, formas=None, capas=None, descripcion=None, elegir=None):
+        """Cambia trazos y/o capas (listas nuevas: el deshacer guarda las viejas)."""
+        if descripcion:
+            self.push(descripcion)
+        if formas is not None:
+            self.edit["draw"] = formas
+        if capas is not None:
+            self.edit["capas"] = capas
+        if elegir is not None:
+            self._pending_select = list(elegir)
+        self.render_preview(reajustar=False)
+
+    def new_layer(self, nombre: str | None = None, contenido=None, descripcion="add a layer"):
+        """Una capa nueva encima de la activa (o arriba del todo), y elegida."""
+        capa = {"id": new_layer_id(), "nombre": nombre or self._next_name()}
+        capas = self.capas()
+        activa = self.active_layer()
+        pos = next((i + 1 for i, c in enumerate(capas) if c["id"] == activa), len(capas))
+        if contenido is not None:               # las capas especiales van arriba del todo
+            pos = len(capas)
+        capas.insert(pos, capa)
+        formas = self.formas() + [dict(f, capa=capa["id"]) for f in contenido or []]
+        self.sel = None
+        self._commit(formas, capas, descripcion, elegir=[capa["id"]])
+        return capa["id"]
+
     def add_guide(self, regla: str, giro: int = 0):
-        """Una guia de composicion encima de todo, del color y grosor elegidos."""
+        """Una guia de composicion, en su propia capa, del color y grosor elegidos."""
         guia = {"tipo": "guia", "regla": regla, "giro": int(giro),
-                "color": self.view.color.name(), "grosor": self.sld_width.value(),
+                "color": self.view.color.name(), "grosor": min(12, self.sld_width.value()),
                 "alpha": 255, "puntos": []}
         op = self.sld_tool_op.value()
         if op < 100:
             guia["opacidad"] = op
-        formas = self.formas() + [guia]
-        self.sel = len(formas) - 1
-        self._set_formas(formas, "add a composition guide")
+        self.new_layer(GUIDE_NAMES.get(regla, "Guide"), [guia], "add a composition guide")
 
     def add_colour_layer(self):
-        """Una capa de color encima de todo, transparente, para dibujar sobre ella."""
+        """Una capa de color sobre todo, transparente, para dibujar encima."""
         op = self.sld_tool_op.value()
         capa = {"tipo": "solido", "color": self.view.color.name(), "alpha": 255,
                 "opacidad": op if op < 100 else 50, "puntos": []}
-        formas = self.formas() + [capa]
-        self.sel = len(formas) - 1
-        self._set_formas(formas, "add a colour layer")
+        self.new_layer(self._next_name("Colour layer"), [capa], "add a colour layer")
 
     def to_source(self, forma: dict) -> dict:
         """Pasa la forma de lo que se ve a coordenadas del archivo original."""
@@ -8019,47 +8246,72 @@ class EditorDialog(QDialog):
 
     @Slot(object)
     def on_drawn(self, forma: dict):
+        """Lo que se acaba de dibujar va a la capa activa (si no hay, se crea)."""
         if forma["tipo"] == "texto":
             txt, ok = QInputDialog.getText(self, "Text", "What do you want to write?")
             if not ok or not txt.strip():
                 return
             forma = dict(forma, texto=txt.strip())
-        self.push("draw")
-        self.edit["draw"] = list(self.edit.get("draw") or []) + [self.to_source(forma)]
-        self.render_preview(reajustar=False)
+        self.push("erase" if forma["tipo"] == "borrar" else "draw")
+        capas = self.capas()
+        activa = self.active_layer(o_la_de_arriba=forma["tipo"] == "borrar")
+        dentro = [f for f in self.formas() if f.get("capa") == activa]
+        if activa is not None and forma["tipo"] != "borrar" and dentro and \
+                all(f.get("tipo") in ("solido", "guia") for f in dentro):
+            # sobre una capa de color o una guia se dibuja en una capa nueva encima
+            nueva = {"id": new_layer_id(), "nombre": self._next_name()}
+            capas.insert(next(i + 1 for i, c in enumerate(capas) if c["id"] == activa), nueva)
+            activa = nueva["id"]
+        if activa is None:
+            if forma["tipo"] == "borrar":       # una goma sin nada que borrar
+                self._undo.pop()
+                self.update_undo_buttons()
+                return
+            activa = new_layer_id()
+            capas.append({"id": activa, "nombre": self._next_name()})
+        formas = self.formas() + [dict(self.to_source(forma), capa=activa)]
+        self._commit(formas, capas, elegir=[activa])
 
     @Slot(object)
     def on_erase(self, punto):
-        """Borra el dibujo visible de mas arriba que este bajo el puntero."""
+        """Remove stroke: quita el trazo visible de mas arriba bajo el puntero."""
         i = self.shape_at(punto)
         if i is None:
             return
-        self.push("erase a drawing")
+        self.push("remove a stroke")
         self._remove_shape(i)
 
-    # --- capas -------------------------------------------------------------
     def _build_layers_panel(self) -> QWidget:
         der = QWidget()
         ld = QVBoxLayout(der)
         ld.setContentsMargins(6, 0, 0, 0)
         ld.setSpacing(4)
+        cab = QHBoxLayout()
         et = QLabel("LAYERS")
         themed(et, css="color:%(dim)s; font-size:11px; font-weight:600;")
-        et.setToolTip("Top of the list = in front. Drag to reorder, click the eye to hide.")
-        ld.addWidget(et)
+        et.setToolTip("Top of the list = in front. What you draw goes into the selected layer.")
+        cab.addWidget(et)
+        cab.addStretch(1)
+        self.b_new_layer = QToolButton()
+        self.b_new_layer.setText("+")
+        self.b_new_layer.setAutoRaise(True)
+        self.b_new_layer.setToolTip("New layer (%s): what you draw next goes into it"
+                                    % keys_text("Ctrl+Shift+N"))
+        self.b_new_layer.clicked.connect(lambda: self.new_layer())
+        cab.addWidget(self.b_new_layer)
+        ld.addLayout(cab)
         self.layers = LayerList()
-        self.layers.setToolTip("Top of the list = in front. Drag to reorder; click the eye "
-                               "to hide (hidden layers are left out of exports and PDFs). "
-                               "Double-click a text to change it.")
+        self.layers.setToolTip("What you draw goes into the selected layer. Cmd/Shift-click to "
+                               "select several. Drag to reorder; click the eye to hide (hidden "
+                               "layers are left out of exports and PDFs); double-click to rename.")
         self.layers.itemSelectionChanged.connect(self._on_layer_selected)
         self.layers.eye_clicked.connect(self.toggle_visibility)
-        self.layers.itemDoubleClicked.connect(
-            lambda it: self.edit_text(it.data(LAYER_ROLE)))
+        self.layers.itemDoubleClicked.connect(lambda it: self.rename_layer(it.data(LAYER_ROLE)))
         self.layers.reordered.connect(self._on_layers_reordered)
-        self.layers.delete_pressed.connect(self.delete_shape)
+        self.layers.delete_pressed.connect(self.delete_layers)
         ld.addWidget(self.layers, 1)
-        self.lbl_no_layers = QLabel("Nothing drawn yet. Every drawing you add "
-                                    "becomes a layer here.")
+        self.lbl_no_layers = QLabel("No layers yet. The first thing you draw creates one; "
+                                    "+ adds more.")
         self.lbl_no_layers.setWordWrap(True)
         themed(self.lbl_no_layers, css="color:%(dim)s;")
         ld.addWidget(self.lbl_no_layers)
@@ -8073,10 +8325,10 @@ class EditorDialog(QDialog):
         self.sld_opacity.setSingleStep(5)
         self.sld_opacity.setPageStep(10)
         self.sld_opacity.setValue(100)
-        self.sld_opacity.setToolTip("Opacity of the selected layer (it shows in exports too)")
-        self.sld_opacity.sliderPressed.connect(self._on_opacity_pressed)
+        self.sld_opacity.setToolTip("Opacity of the selected layers (it shows in exports too)")
+        self.sld_opacity.sliderPressed.connect(lambda: self._drag_start("op"))
         self.sld_opacity.valueChanged.connect(self._on_opacity)
-        self.sld_opacity.sliderReleased.connect(self._on_opacity_released)
+        self.sld_opacity.sliderReleased.connect(lambda: self._drag_end("op", "layer opacity"))
         fila_op.addWidget(self.sld_opacity, 1)
         self.lbl_opacity = QLabel("100 %")
         self.lbl_opacity.setMinimumWidth(42)
@@ -8092,29 +8344,36 @@ class EditorDialog(QDialog):
         self.sld_hard.setSingleStep(5)
         self.sld_hard.setPageStep(10)
         self.sld_hard.setValue(100)
-        self.sld_hard.setToolTip("Edge of the selected drawing: 100 = sharp, lower = softer")
-        self.sld_hard.sliderPressed.connect(self._on_hard_pressed)
+        self.sld_hard.setToolTip("Edge of every stroke in the selected layers: 100 = sharp, "
+                                 "lower = softer")
+        self.sld_hard.sliderPressed.connect(lambda: self._drag_start("hard"))
         self.sld_hard.valueChanged.connect(self._on_hard)
-        self.sld_hard.sliderReleased.connect(self._on_hard_released)
+        self.sld_hard.sliderReleased.connect(lambda: self._drag_end("hard", "layer hardness"))
         fila_du.addWidget(self.sld_hard, 1)
         self.lbl_hard = QLabel("100")
         self.lbl_hard.setMinimumWidth(42)
         self.lbl_hard.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         fila_du.addWidget(self.lbl_hard)
         ld.addLayout(fila_du)
-        self._hard_drag = None
+        self._drag = {}
         botones = QHBoxLayout()
         botones.setSpacing(2)
         self.b_raise = QToolButton()
         self.b_lower = QToolButton()
+        self.b_merge = QToolButton()
+        self.b_recolour = QToolButton()
         self.b_del_layer = QToolButton()
         for b, icono, tip, fn in (
                 (self.b_raise, "raise", "Bring forward (%s)" % keys_text("Ctrl+]"),
                  lambda: self.restack(1)),
                 (self.b_lower, "lower", "Send backward (%s)" % keys_text("Ctrl+["),
                  lambda: self.restack(-1)),
-                (self.b_del_layer, "trash", "Delete the selected drawing (Delete)",
-                 self.delete_shape)):
+                (self.b_merge, "merge", "Merge the selected layers into one (%s)"
+                 % keys_text("Ctrl+E"), self.merge_layers),
+                (self.b_recolour, "fill", "Paint everything in the selected layers with the "
+                 "chosen colour (a colour layer, a guide or strokes)", self.recolour_layers),
+                (self.b_del_layer, "trash", "Delete the selected layers (Delete)",
+                 self.delete_layers)):
             themed(b, icon=icono)
             b.setIconSize(QSize(20, 20))
             b.setAutoRaise(True)
@@ -8122,10 +8381,14 @@ class EditorDialog(QDialog):
             b.clicked.connect(fn)
         botones.addWidget(self.b_raise)
         botones.addWidget(self.b_lower)
+        botones.addWidget(self.b_merge)
+        botones.addWidget(self.b_recolour)
         botones.addStretch(1)
         botones.addWidget(self.b_del_layer)
         ld.addLayout(botones)
-        der.setMinimumWidth(180)
+        der.setMinimumWidth(190)
+        QShortcut(QKeySequence("Ctrl+Shift+N"), self, lambda: self.new_layer())
+        QShortcut(QKeySequence("Ctrl+E"), self, self.merge_layers)
         return der
 
     def formas(self) -> list:
@@ -8137,20 +8400,30 @@ class EditorDialog(QDialog):
         return (source_to_display_transform(self.edit, *self.full_size)
                 * QTransform.fromScale(k, k))
 
+    def _hidden_layers(self) -> set:
+        return {c["id"] for c in self.edit.get("capas") or [] if c.get("oculto")}
+
     def shape_at(self, punto, interior: bool = False):
-        """El indice del dibujo visible de mas arriba bajo el punto, o None.
+        """El indice del trazo visible de mas arriba bajo el punto, o None.
 
         interior=True vale tambien el hueco de rectangulos y elipses: es lo
-        comodo para elegirlos, pero la goma solo borra si tocas el trazo."""
+        comodo para elegirlos, pero Remove stroke solo quita si tocas el trazo.
+        Las gomas, las capas de color y las guias no se pinchan."""
         formas = self.formas()
         if not formas:
             return None
+        ocultas = self._hidden_layers()
+        orden = {c["id"]: n for n, c in enumerate(self.edit.get("capas") or [])}
         T = self.screen_transform()
         estira = math.sqrt(abs(T.determinant())) or 1.0
         tol = max(5.0, 6.0 / max(self.view.transform().m11(), 1e-6))
-        for i in range(len(formas) - 1, -1, -1):
+        # de la capa de arriba a la de abajo, y dentro, del ultimo al primero
+        candidatos = sorted(range(len(formas)), reverse=True,
+                            key=lambda i: (orden.get(formas[i].get("capa"), -1), i))
+        for i in candidatos:
             f = formas[i]
-            if f.get("oculto") or not f.get("puntos"):
+            if f.get("oculto") or not f.get("puntos") or f.get("capa") in ocultas \
+                    or f.get("tipo") == "borrar":
                 continue
             tipo = f.get("tipo")
             if tipo in ("texto", "difuminar"):
@@ -8169,52 +8442,72 @@ class EditorDialog(QDialog):
                 return i
         return None
 
-    def select_shape(self, i):
-        formas = self.formas()
-        self.sel = i if i is not None and 0 <= i < len(formas) else None
+    def select_layers(self, ids: list, actual=None):
+        """Elige esas capas en la lista (la actual, la ultima)."""
+        ids = [i for i in ids if self.capa(i)]
         self.layers.blockSignals(True)
         self.layers.clearSelection()
+        actual = actual if actual in ids else (ids[-1] if ids else None)
         for fila in range(self.layers.count()):
             it = self.layers.item(fila)
-            if it.data(LAYER_ROLE) == self.sel:
+            if it.data(LAYER_ROLE) in ids:
                 it.setSelected(True)
-                self.layers.setCurrentItem(it)
+            if it.data(LAYER_ROLE) == actual:
+                self.layers.setCurrentItem(it, QItemSelectionModel.SelectionFlag.Select)
                 self.layers.scrollToItem(it)
-                break
         self.layers.blockSignals(False)
         self._sync_layer_controls()
+
+    def select_shape(self, i):
+        """Elige un trazo (y su capa)."""
+        formas = self.formas()
+        self.sel = i if i is not None and 0 <= i < len(formas) else None
+        if self.sel is not None and formas[self.sel].get("capa"):
+            self.select_layers([formas[self.sel]["capa"]])
+        else:
+            self._sync_layer_controls()
 
     def selected_shape(self):
         formas = self.formas()
         return formas[self.sel] if self.sel is not None and self.sel < len(formas) else None
 
+    def _strokes_in(self, ids) -> list:
+        """Indices de los trazos de esas capas a los que se les puede ablandar el borde."""
+        ids = set(ids)
+        return [i for i, f in enumerate(self.formas()) if f.get("capa") in ids
+                and f.get("tipo") not in ("solido", "difuminar", "guia")]
+
     def _sync_layer_controls(self):
-        f = self.selected_shape()
-        op = shape_opacity(f) if f else 100
+        sel = self.selected_layer_ids()
+        hay = bool(sel)
+        op = layer_opacity(self.capa(sel[-1])) if hay else 100
         self.sld_opacity.blockSignals(True)
         self.sld_opacity.setValue(op)
         self.sld_opacity.blockSignals(False)
         self.lbl_opacity.setText("%d %%" % op)
-        du = shape_hardness(f) if f else 100
+        trazos = self._strokes_in(sel)
+        formas = self.formas()
+        du = shape_hardness(formas[trazos[-1]]) if trazos else 100
         self.sld_hard.blockSignals(True)
         self.sld_hard.setValue(du)
         self.sld_hard.blockSignals(False)
         self.lbl_hard.setText("%d" % du)
-        hay = f is not None
-        n = len(self.formas())
         for w in (self.sld_opacity, self.lbl_op_title, self.lbl_opacity, self.b_del_layer):
             w.setEnabled(hay)
-        con_borde = hay and f.get("tipo") not in ("solido", "difuminar", "guia")
         for w in (self.sld_hard, self.lbl_hard_title, self.lbl_hard):
-            w.setEnabled(con_borde)
-        self.b_raise.setEnabled(hay and self.sel < n - 1)
-        self.b_lower.setEnabled(hay and self.sel > 0)
+            w.setEnabled(bool(trazos))
+        ids = [c["id"] for c in self.edit.get("capas") or []]
+        self.b_raise.setEnabled(hay and ids[-1] not in sel)
+        self.b_lower.setEnabled(hay and ids[0] not in sel)
+        self.b_merge.setEnabled(len(sel) > 1)
+        self.b_recolour.setEnabled(hay)
         self._update_sel_overlay()
 
     def _update_sel_overlay(self):
-        """Un recuadro discontinuo alrededor de la capa elegida."""
+        """Un recuadro discontinuo alrededor del trazo elegido con Select and move."""
         f = self.selected_shape()
-        if f is None or self._before or f.get("oculto") or not f.get("puntos"):
+        if f is None or self._before or f.get("oculto") or not f.get("puntos") \
+                or f.get("capa") in self._hidden_layers():
             self.sel_item.hide()
             return
         caja = QPainterPath()
@@ -8222,168 +8515,246 @@ class EditorDialog(QDialog):
         self.sel_item.setPath(self.screen_transform().map(caja))
         self.sel_item.show()
 
+    def _layer_label(self, capa: dict, fs: list) -> str:
+        op = layer_opacity(capa)
+        n = len([f for f in fs if f.get("tipo") != "borrar"])
+        extra = ("  ·  %d %%" % op if op < 100 else "")
+        if n > 1:
+            extra += "  ·  %d" % n
+        return (capa.get("nombre") or "Layer") + extra
+
     def _rebuild_layers(self):
         formas = self.formas()
         if self.sel is not None and self.sel >= len(formas):
             self.sel = None
+        antes = getattr(self, "_pending_select", None)
+        self._pending_select = None
+        if antes is None:
+            antes = self.selected_layer_ids()
+            actual = self.layers.currentItem().data(LAYER_ROLE) \
+                if self.layers.currentItem() is not None else None
+        else:
+            actual = antes[-1] if antes else None
+        grupos = layer_groups(formas, self.edit.get("capas"))
         self.layers.blockSignals(True)
         self.layers.clear()
-        for i in range(len(formas) - 1, -1, -1):           # arriba de la lista = encima
-            f = formas[i]
-            it = QListWidgetItem(layer_icon(f), shape_label(f))
-            it.setData(LAYER_ROLE, i)
+        for capa, fs in reversed(grupos):               # arriba de la lista = encima
+            if capa.get("id") is None:
+                continue
+            visibles = [f for f in fs if f.get("tipo") != "borrar"]
+            icono = layer_icon(dict(visibles[-1] if visibles else {"tipo": "trazo",
+                                                                    "color": "#00000000"},
+                                    oculto=capa.get("oculto", False)))
+            it = QListWidgetItem(icono, self._layer_label(capa, fs))
+            it.setData(LAYER_ROLE, capa["id"])
             it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsDropEnabled)
-            if f.get("oculto"):
+            if capa.get("oculto"):
                 it.setForeground(QColor(theme_color("dim")))
                 it.setToolTip("Hidden: left out of exports and PDFs. Click the eye to show it.")
             else:
-                it.setToolTip("Click the eye to hide it")
+                it.setToolTip("Click the eye to hide it; double-click to rename it")
             self.layers.addItem(it)
-            if i == self.sel:
-                it.setSelected(True)
-                self.layers.setCurrentItem(it)
         self.layers.blockSignals(False)
-        self.layers.setVisible(bool(formas))
-        self.lbl_no_layers.setVisible(not formas)
-        self._sync_layer_controls()
+        hay = bool(self.edit.get("capas"))
+        self.layers.setVisible(hay)
+        self.lbl_no_layers.setVisible(not hay)
+        self.select_layers(antes, actual)
 
     def _on_layer_selected(self):
-        items = self.layers.selectedItems()
-        self.select_shape(items[0].data(LAYER_ROLE) if items else None)
-
-    def _set_formas(self, formas: list, descripcion: str | None = None):
-        """Cambia los dibujos (lista nueva: el deshacer guarda la vieja)."""
-        if descripcion:
-            self.push(descripcion)
-        self.edit["draw"] = formas
-        self.render_preview(reajustar=False)
+        sel = self.selected_layer_ids()
+        f = self.selected_shape()
+        if f is not None and f.get("capa") not in sel:
+            self.sel = None                     # el trazo elegido era de otra capa
+        self._sync_layer_controls()
 
     def _replace_shape(self, i: int, nueva: dict, descripcion: str):
         formas = self.formas()
         formas[i] = nueva
-        self._set_formas(formas, descripcion)
+        self._commit(formas, descripcion=descripcion)
 
     def _remove_shape(self, i: int):
         formas = self.formas()
         del formas[i]
         if self.sel is not None:
             self.sel = None if self.sel == i else (self.sel - 1 if self.sel > i else self.sel)
-        self._set_formas(formas)
+        self._commit(formas)
 
     def delete_shape(self):
+        """Supr en el lienzo: el trazo elegido, o si no hay, las capas elegidas."""
         if self.selected_shape() is None:
+            self.delete_layers()
             return
-        self.push("delete a drawing")
+        self.push("delete a stroke")
         self._remove_shape(self.sel)
 
-    def toggle_visibility(self, i=None):
-        i = self.sel if i is None else i
-        formas = self.formas()
-        if i is None or not 0 <= i < len(formas):
+    def delete_layers(self):
+        sel = set(self.selected_layer_ids())
+        if not sel:
             return
-        f = formas[i]
-        nueva = ({k: v for k, v in f.items() if k != "oculto"} if f.get("oculto")
-                 else dict(f, oculto=True))
+        capas = [c for c in self.capas() if c["id"] not in sel]
+        formas = [f for f in self.formas() if f.get("capa") not in sel]
+        self.sel = None
+        resto = [c["id"] for c in capas]
+        self._commit(formas, capas, "delete %d layer%s" % (len(sel), "" if len(sel) == 1 else "s"),
+                     elegir=resto[-1:])
+
+    def rename_layer(self, cid=None):
+        cid = cid or self.active_layer()
+        capa = self.capa(cid)
+        if capa is None:
+            return
+        nombre, ok = QInputDialog.getText(self, "Rename layer", "Name:", QLineEdit.EchoMode.Normal,
+                                          capa.get("nombre", ""))
+        if ok and nombre.strip() and nombre.strip() != capa.get("nombre"):
+            capas = [dict(c, nombre=nombre.strip()) if c["id"] == cid else c for c in self.capas()]
+            self._commit(capas=capas, descripcion="rename a layer", elegir=[cid])
+
+    def toggle_visibility(self, cid=None):
+        """El ojo: oculta o muestra esa capa (o las elegidas, si es una de ellas)."""
+        sel = self.selected_layer_ids()
+        cid = cid if cid is not None else (sel[-1] if sel else None)
+        capa = self.capa(cid)
+        if capa is None:
+            return
+        ids = set(sel) if cid in sel else {cid}
+        ocultar = not capa.get("oculto")
+        capas = []
+        for c in self.capas():
+            if c["id"] in ids:
+                c = dict(c, oculto=True) if ocultar else {k: v for k, v in c.items() if k != "oculto"}
+            capas.append(c)
         # fuera del clic: rehacer la lista borra el elemento que lo recibio
-        QTimer.singleShot(0, lambda: self._replace_shape(
-            i, nueva, "show a drawing" if f.get("oculto") else "hide a drawing"))
+        QTimer.singleShot(0, lambda: self._commit(
+            capas=capas, descripcion="hide a layer" if ocultar else "show a layer",
+            elegir=sel or [cid]))
 
     def restack(self, delta: int):
-        """Sube (delta > 0) o baja la capa elegida un puesto."""
-        formas = self.formas()
-        if self.selected_shape() is None:
+        """Sube (delta > 0) o baja las capas elegidas un puesto, juntas."""
+        sel = set(self.selected_layer_ids())
+        capas = self.capas()
+        if not sel:
             return
-        j = max(0, min(len(formas) - 1, self.sel + delta))
-        if j == self.sel:
+        orden = list(range(len(capas)))
+        rango = range(len(capas) - 2, -1, -1) if delta > 0 else range(1, len(capas))
+        cambio = False
+        for i in rango:
+            j = i + (1 if delta > 0 else -1)
+            if capas[orden[i]]["id"] in sel and capas[orden[j]]["id"] not in sel:
+                orden[i], orden[j] = orden[j], orden[i]
+                cambio = True
+        if cambio:
+            self._commit(capas=[capas[k] for k in orden], descripcion="move layers",
+                         elegir=self.selected_layer_ids())
+
+    def merge_layers(self):
+        """Funde las elegidas en la de mas abajo, sin que cambie como se ven:
+        la opacidad de cada capa pasa a sus trazos."""
+        sel = self.selected_layer_ids()
+        if len(sel) < 2:
             return
-        formas.insert(j, formas.pop(self.sel))
-        self.sel = j
-        self._set_formas(formas, "move a layer")
+        destino = sel[0]
+        con_goma = [c for c in sel[1:] if any(f.get("capa") == c and f.get("tipo") == "borrar"
+                                              for f in self.formas())]
+        if con_goma and QMessageBox.question(
+                self, APP_NAME, "Some of these layers have eraser strokes. Merged, they would "
+                "also rub out what is underneath them in the layers below.\n\nMerge anyway?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        opac = {c["id"]: layer_opacity(c) for c in self.capas()}
+        orden = {c["id"]: n for n, c in enumerate(self.capas())}
+        formas = []
+        movidas = []
+        for f in self.formas():
+            if f.get("capa") in sel:
+                # la goma no se aclara: borra lo mismo que antes
+                op = shape_opacity(f) if f.get("tipo") == "borrar" else \
+                    opac[f["capa"]] * shape_opacity(f) // 100
+                g = dict(f, capa=destino)
+                g.pop("opacidad", None)
+                if op < 100:
+                    g["opacidad"] = op
+                movidas.append((orden[f["capa"]], len(movidas), g))
+            else:
+                formas.append(f)
+        # dentro de la capa fundida, en el orden en que se veian
+        formas += [g for _o, _n, g in sorted(movidas, key=lambda x: (x[0], x[1]))]
+        capas = [({k: v for k, v in c.items() if k not in ("opacidad", "oculto")}
+                  if c["id"] == destino else c)
+                 for c in self.capas() if c["id"] == destino or c["id"] not in sel]
+        self.sel = None
+        self._commit(formas, capas, "merge %d layers" % len(sel), elegir=[destino])
 
     def _on_layers_reordered(self):
-        formas = self.formas()
         orden = [self.layers.item(r).data(LAYER_ROLE) for r in range(self.layers.count())]
         nuevo = list(reversed(orden))                   # de abajo arriba
-        if sorted(nuevo) != list(range(len(formas))) or nuevo == list(range(len(formas))):
+        capas = self.capas()
+        por_id = {c["id"]: c for c in capas}
+        if sorted(nuevo) != sorted(por_id) or nuevo == [c["id"] for c in capas]:
             QTimer.singleShot(0, self._rebuild_layers)
             return
-        if self.sel is not None:
-            self.sel = nuevo.index(self.sel)
-        QTimer.singleShot(0, lambda: self._set_formas([formas[k] for k in nuevo],
-                                                      "reorder the layers"))
+        sel = self.selected_layer_ids()
+        QTimer.singleShot(0, lambda: self._commit(capas=[por_id[i] for i in nuevo],
+                                                  descripcion="reorder the layers", elegir=sel))
 
-    def _with_opacity(self, f: dict, v: int) -> dict:
-        return ({k: x for k, x in f.items() if k != "opacidad"} if v >= 100
-                else dict(f, opacidad=int(v)))
+    # --- opacidad (de la capa) y dureza (de sus trazos), con un paso de deshacer
+    def _drag_start(self, clave: str):
+        self._drag[clave] = dict(self.edit)
 
-    def _on_opacity_pressed(self):
-        f = self.selected_shape()
-        self._op_drag = (dict(self.edit), shape_opacity(f)) if f else None
+    def _drag_end(self, clave: str, descripcion: str):
+        antes = self._drag.pop(clave, None)
+        if antes is not None and (antes.get("capas") != self.edit.get("capas")
+                                  or antes.get("draw") != self.edit.get("draw")):
+            self._undo.append((descripcion, antes))     # el arrastre, un solo paso
+            del self._undo[:-UNDO_LIMIT]
+            self._redo.clear()
+            self.update_undo_buttons()
 
     def _on_opacity(self, v: int):
         self.lbl_opacity.setText("%d %%" % v)
-        f = self.selected_shape()
-        if f is None or shape_opacity(f) == v:
+        sel = set(self.selected_layer_ids())
+        if not sel:
             return
-        if self.sld_opacity.isSliderDown():             # arrastrando: se ve al momento
-            formas = self.formas()
-            formas[self.sel] = self._with_opacity(f, v)
-            self._set_formas(formas)
+        capas = [({k: x for k, x in c.items() if k != "opacidad"} if v >= 100
+                  else dict(c, opacidad=int(v))) if c["id"] in sel else c for c in self.capas()]
+        if capas == self.capas():
             return
-        self._replace_shape(self.sel, self._with_opacity(f, v), "layer opacity")
-
-    def _on_opacity_released(self):
-        if self._op_drag is None:
-            return
-        antes, op = self._op_drag
-        self._op_drag = None
-        f = self.selected_shape()
-        if f is not None and shape_opacity(f) != op:
-            self._undo.append(("layer opacity", antes))  # el arrastre, un solo paso
-            del self._undo[:-UNDO_LIMIT]
-            self._redo.clear()
-            self.update_undo_buttons()
-
-    def _with_hardness(self, f: dict, v: int) -> dict:
-        return ({k: x for k, x in f.items() if k != "dureza"} if v >= 100
-                else dict(f, dureza=int(v)))
-
-    def _on_hard_pressed(self):
-        f = self.selected_shape()
-        self._hard_drag = (dict(self.edit), shape_hardness(f)) if f else None
+        arrastrando = self.sld_opacity.isSliderDown()
+        self._commit(capas=capas, descripcion=None if arrastrando else "layer opacity",
+                     elegir=self.selected_layer_ids())
 
     def _on_hard(self, v: int):
         self.lbl_hard.setText("%d" % v)
-        f = self.selected_shape()
-        if f is None or shape_hardness(f) == v or f.get("tipo") in ("solido", "difuminar", "guia"):
+        trazos = set(self._strokes_in(self.selected_layer_ids()))
+        if not trazos:
             return
-        if self.sld_hard.isSliderDown():
-            formas = self.formas()
-            formas[self.sel] = self._with_hardness(f, v)
-            self._set_formas(formas)
+        formas = [(({k: x for k, x in f.items() if k != "dureza"} if v >= 100
+                    else dict(f, dureza=int(v))) if i in trazos else f)
+                  for i, f in enumerate(self.formas())]
+        if formas == self.formas():
             return
-        self._replace_shape(self.sel, self._with_hardness(f, v), "layer hardness")
-
-    def _on_hard_released(self):
-        if self._hard_drag is None:
-            return
-        antes, du = self._hard_drag
-        self._hard_drag = None
-        f = self.selected_shape()
-        if f is not None and shape_hardness(f) != du:
-            self._undo.append(("layer hardness", antes))
-            del self._undo[:-UNDO_LIMIT]
-            self._redo.clear()
-            self.update_undo_buttons()
+        arrastrando = self.sld_hard.isSliderDown()
+        self._commit(formas, descripcion=None if arrastrando else "layer hardness",
+                     elegir=self.selected_layer_ids())
 
     def on_color(self, c: QColor):
-        """Elige el color de lo siguiente que dibujes; con una capa elegida,
-        tambien se lo pone a ella."""
+        """Elige el color de lo siguiente que dibujes. Solo si has elegido un
+        trazo con Select and move, tambien se lo pone a el. Para repintar una
+        capa entera esta el boton del panel de capas."""
         self.set_color(c)
         f = self.selected_shape()
-        if f is not None and f.get("tipo") != "difuminar" \
+        if f is not None and f.get("tipo") not in ("difuminar", "borrar") \
                 and f.get("color", "").lower() != c.name().lower():
-            self._replace_shape(self.sel, dict(f, color=c.name()), "recolour a drawing")
+            self._replace_shape(self.sel, dict(f, color=c.name()), "recolour a stroke")
+
+    def recolour_layers(self):
+        """El color elegido para todo lo de las capas elegidas."""
+        sel = set(self.selected_layer_ids())
+        color = self.view.color.name()
+        formas = self.formas()
+        nuevas = [dict(f, color=color) if f.get("capa") in sel
+                  and f.get("tipo") not in ("difuminar", "borrar") else f for f in formas]
+        if nuevas != formas:
+            self._commit(nuevas, descripcion="recolour layers", elegir=self.selected_layer_ids())
 
     def edit_text(self, i=None):
         i = self.sel if i is None else i
@@ -8398,7 +8769,7 @@ class EditorDialog(QDialog):
 
     @Slot(object)
     def on_pick(self, punto):
-        """Seleccionar: elige el dibujo de encima y lo prepara para moverlo."""
+        """Seleccionar: elige el trazo de encima (y su capa) y lo prepara para moverlo."""
         i = self.shape_at(punto, interior=True)
         self.select_shape(i)
         f = self.selected_shape()
@@ -8430,7 +8801,7 @@ class EditorDialog(QDialog):
         if m is None or not m["movido"]:
             return
         self._drag_timer.stop()
-        self._undo.append(("move a drawing", m["antes"]))
+        self._undo.append(("move a stroke", m["antes"]))
         del self._undo[:-UNDO_LIMIT]
         self._redo.clear()
         self.update_undo_buttons()
@@ -8444,9 +8815,11 @@ class EditorDialog(QDialog):
             self.edit_text(i)
 
     def clear_drawings(self):
-        if self.edit.get("draw"):
+        if self.edit.get("draw") or self.edit.get("capas"):
             self.push("clear all drawings")
             self.edit["draw"] = []
+            self.edit["capas"] = []
+            self.sel = None
             self.render_preview(reajustar=False)
 
     def uncrop(self):
@@ -8616,7 +8989,8 @@ A → Z / Z → A. This order decides the order of the thumbnails too.</li>
 <li><b>Preview below</b> (key <b>V</b>) splits the column and shows the selected
 image large underneath, at full resolution. Move through the thumbnails with
 the arrow keys and the preview follows.</li>
-<li>Wheel zooms, drag pans, <i>Fit</i> (key <b>0</b>) reframes.</li>
+<li>Wheel zooms, drag (or the middle mouse button) pans, <i>Fit</i> (key <b>0</b>)
+reframes.</li>
 <li><b>Double-click an image to open the editor</b> (videos and GIFs open in the
 large window). <i>Open large</i>, under the preview, opens the large window: ← → change
 image, <b>F11</b> is fullscreen, <b>Esc</b> closes.</li>
@@ -8639,6 +9013,8 @@ one comes out as a PNG of its first frame.</li>
 <li>Under the categories, <b>Grade &amp; comment</b> belongs to the thumbnail
 you have chosen: a grade from 0 to 10 (decimals allowed) and a free comment,
 for images, GIFs and videos alike.</li>
+<li>Select one or more files and press a number from <b>1</b> to <b>9</b>: that becomes
+their grade (one undo step).</li>
 <li>Press <b>[[note]]</b> (or right-click ▸ <i>Grade / comment…</i>) to jump to the
 grade box; <b>Tab</b> goes on to the comment. They are saved as you type.
 <i>Copy comment</i> puts its text on the clipboard. Drag the little handle under
@@ -8737,14 +9113,19 @@ the exact value). A grid appears while you turn, to straighten a photo by
 eye. The uncovered corners stay transparent, and turn white when you export
 to JPG. Crop afterwards to trim them.</li>
 <li><b>Drawing tools</b> like a snipping tool: pen, highlighter, line, arrow,
-rectangle, ellipse and text, in ten colours. The <b>eraser removes the whole
-stroke you click on</b> — each one is an object, not pixels.</li>
-<li><b>Layers</b> (the panel at the right of the editor): every drawing is a layer,
-the top of the list in front. Click the <b>eye</b> to hide one (hidden layers stay out
-of exports and PDFs), drag them to reorder, use the arrows to bring one forward or
-send it back, <b>Opacity</b> to make it see-through, and the bin (or Delete) to remove it.
-With <b>Select and move</b> click a drawing to select it and drag it somewhere else;
-click a colour to recolour the selected one, double-click a text to change it.</li>
+rectangle, ellipse and text, in ten colours, with a brush up to 200 wide. The
+<b>Eraser</b> rubs out what you drew on the selected layer, with the brush size and
+hardness (the image underneath is never touched); <b>Remove stroke</b> takes away the
+whole stroke you click on. Hold the <b>middle mouse button</b> to move around the image
+with any tool. Undo and redo keep your zoom.</li>
+<li><b>Layers</b> (the panel at the right of the editor), the top of the list in front.
+What you draw goes into the <b>selected layer</b>; with none selected, the first stroke
+makes a new one. <b>+</b> adds an empty layer; double-click one to rename it.
+Cmd/Shift-click to select <b>several</b>: the eye, <b>Opacity</b>, <b>Hardness</b>, the
+arrows (bring forward / send back), <b>merge</b> and the bin (or Delete) act on all of
+them; the paint button gives them the chosen colour. Hidden layers stay out of exports
+and PDFs. With <b>Select and move</b> click a stroke to pick it (and its layer) and drag
+it; click a colour to recolour it, double-click a text to change it.</li>
 <li><b>Opacity</b> and <b>Hardness</b>, next to <i>Size</i>, set the next stroke: a lower
 hardness softens its edge like an airbrush (the centre stays solid). The Layers panel
 changes both for the selected drawing.</li>
@@ -9373,6 +9754,7 @@ class MainWindow(QMainWindow):
         self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self.image_menu)
         self.view.doubleClicked.connect(self.on_grid_double_click)
+        self.view.installEventFilter(self)          # 1-9: la nota de lo elegido
         # el cronometro empieza con un clic o un doble clic en un archivo
         self.view.clicked.connect(lambda i: self.tracker.file_clicked(i.data(PATH_ROLE)))
         self.view.doubleClicked.connect(lambda i: self.tracker.file_clicked(i.data(PATH_ROLE)))
@@ -9768,6 +10150,38 @@ class MainWindow(QMainWindow):
         for e in self.live_note_editors():
             pane = getattr(e, "pane", None)
             e.load(pane.note_path() if pane is not None else self.note_target())
+
+    def eventFilter(self, obj, e):
+        if obj is getattr(self, "view", None) and e.type() == QEvent.Type.KeyPress:
+            mods = e.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+            if mods == Qt.KeyboardModifier.NoModifier and \
+                    Qt.Key.Key_1 <= e.key() <= Qt.Key.Key_9:
+                self.grade_selected(e.key() - Qt.Key.Key_0)
+                return True
+        return super().eventFilter(obj, e)
+
+    def grade_selected(self, nota: float):
+        """Pone esa nota a los archivos elegidos (un solo paso de deshacer)."""
+        if not self.show_notes:
+            self.statusBar().showMessage("Grades are hidden: %s shows them."
+                                         % SK.text("show_notes"), 5000)
+            return
+        self.commit_note()
+        sel = self.selected_images() or ([self.note_target()] if self.note_target() else [])
+        cambian = [p for p in sel if (self.notes.get(p) or {}).get("grade") != nota]
+        if not cambian:
+            return
+        self.push_undo(with_name("grade", cambian[0]) if len(cambian) == 1
+                       else "grade of %d files" % len(cambian))
+        for p in cambian:
+            self.notes[p] = dict(self.notes.get(p) or {}, grade=nota)
+            for ed in self.live_note_editors():
+                if ed.path == p:
+                    ed.load(p)
+        self.refresh_note_views()
+        self.statusBar().showMessage("Grade %s \u2192 %s" % (
+            format_grade(nota), shown_name(cambian[0]) if len(cambian) == 1
+            else "%d files" % len(cambian)), 4000)
 
     def store_note(self, path: str, nueva: dict, origen=None):
         """Lo que guarda un editor: un paso de deshacer, y los demas se enteran."""

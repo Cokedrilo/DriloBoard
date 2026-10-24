@@ -21,7 +21,7 @@ botón *Export*.
 ## Arrancar
 
 **Versión portable (lo normal).** Descomprime
-`DriloBoard-1.13.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
+`DriloBoard-1.14.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
 red— y ejecuta `DriloBoard.exe`. No instala nada ni escribe en el registro.
 La biblioteca y la caché de miniaturas se crean **dentro de esa misma
 carpeta**, así que copiándola te llevas también toda la clasificación.
@@ -30,7 +30,7 @@ La primera vez Windows puede avisar de que el origen es desconocido (el
 ejecutable no está firmado): *Más información* → *Ejecutar de todas formas*.
 
 **Versión portable para Mac.** Descomprime
-`DriloBoard-1.13.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
+`DriloBoard-1.14.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
 `DriloBoard.app` dentro. Una sola app para Mac Intel y Apple Silicon, macOS 13
 Ventura o posterior. Igual que en Windows, la biblioteca y la caché se crean
 **en esa carpeta, junto a la app** (nunca dentro del `.app`), así que se puede
@@ -234,7 +234,12 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   mueve, `0` reencuadra,
   `F` o `F11` pantalla completa, `Esc` cierra.
 - Clic derecho: abrir, abrir la carpeta contenedora, copiar ruta, asignar o
-  quitar de categorías, poner nota o comentario.
+  quitar de categorías, poner nota o comentario, quitar de DriloBoard.
+- **Quitar archivos de DriloBoard**: `Supr` (o clic derecho ▸ *Remove from
+  DriloBoard*) quita los elegidos de la rejilla. **No se borran del disco**:
+  siguen en su carpeta, solo dejan de verse (y no cuentan en las carpetas
+  ni en los PDF). `Ctrl+Z` los trae, y en *Library ▸ Removed files…* ves
+  los quitados y los recuperas cuando quieras.
 - Las miniaturas seleccionadas llevan un **marco azul** bien visible.
 - Los puntos de color en la esquina indican a qué categorías pertenece.
 - *Uncategorised only* deja a la vista lo que aún no has clasificado.

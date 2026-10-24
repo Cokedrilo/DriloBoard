@@ -19,7 +19,7 @@ SUITES = ["test_bug_zoom.py", "test_edicion.py", "test_dibujo.py",
           "test_portable.py", "test_atajos.py", "test_gif.py", "test_notas.py",
           "test_bucle.py", "test_exportar_notas.py", "test_ciego.py",
           "test_pdf_reencuadre.py", "test_capas.py",
-          "test_banco.py", "test_tiempo.py", "test_trazo.py"]
+          "test_banco.py", "test_tiempo.py", "test_trazo.py", "test_quitar.py"]
 
 entorno = dict(os.environ, QT_QPA_PLATFORM="offscreen")
 entorno.setdefault("SCRATCH", str(RAIZ / "tests" / "_tmp"))

@@ -71,7 +71,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.13.0"
+VERSION = "1.14.0"
 
 
 def app_dir() -> Path:
@@ -9015,6 +9015,9 @@ you have chosen: a grade from 0 to 10 (decimals allowed) and a free comment,
 for images, GIFs and videos alike.</li>
 <li>Select one or more files and press a number from <b>1</b> to <b>9</b>: that becomes
 their grade (one undo step).</li>
+<li><b>Delete</b> (or right-click ▸ <i>Remove from DriloBoard</i>) takes the selected
+files out of DriloBoard — <b>they stay on the disk</b>, they just stop showing. Undo brings
+them back, and <b>Library ▸ Removed files…</b> lists them to bring back any time.</li>
 <li>Press <b>[[note]]</b> (or right-click ▸ <i>Grade / comment…</i>) to jump to the
 grade box; <b>Tab</b> goes on to the comment. They are saved as you type.
 <i>Copy comment</i> puts its text on the clipboard. Drag the little handle under
@@ -9562,6 +9565,7 @@ class MainWindow(QMainWindow):
         self.note_editors: list = []                 # los editores de notas abiertos
         self.note_heights = dict(NOTE_HEIGHTS)       # alto de la caja del comentario
         self.pdf_before_after = {"on": False, "labels": list(BEFORE_AFTER_LABELS)}
+        self.removed: set[str] = set()               # quitados de DriloBoard (no del disco)
         self.bank_store = PhraseBank(BANK_FILE)      # frases hechas para comentar
         self.bank_window: BankWindow | None = None
         self._bank_state: dict = {}
@@ -10158,7 +10162,89 @@ class MainWindow(QMainWindow):
                     Qt.Key.Key_1 <= e.key() <= Qt.Key.Key_9:
                 self.grade_selected(e.key() - Qt.Key.Key_0)
                 return True
+            if mods == Qt.KeyboardModifier.NoModifier and \
+                    e.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+                self.remove_selected()
+                return True
         return super().eventFilter(obj, e)
+
+    def remove_selected(self, paths=None):
+        """Quita archivos de DriloBoard: dejan de verse, pero siguen en su
+        carpeta. Se deshace con Ctrl+Z y se recuperan en Library."""
+        self.commit_note()
+        paths = [p for p in (paths if paths is not None else self.selected_images())
+                 if p not in self.removed]
+        if not paths:
+            return
+        self.push_undo(with_name("remove", paths[0]) if len(paths) == 1
+                       else "remove %d files" % len(paths))
+        for p in (self.mark_a, self.mark_b):
+            if p in paths:
+                self.clear_marks()
+                break
+        self.removed |= set(paths)
+        fila = self.view.currentIndex().row()
+        self.refresh_folders()
+        self.refresh_images()
+        if self.model.rowCount():               # sigues por donde ibas
+            self.view.setCurrentIndex(self.model.index(min(max(fila, 0),
+                                                           self.model.rowCount() - 1)))
+        self.touch()
+        self.statusBar().showMessage(
+            "%s removed from DriloBoard (not from the disk). %s undoes it; Library \u25b8 "
+            "Removed files brings them back." % (
+                shown_name(paths[0]) if len(paths) == 1 else "%d files" % len(paths),
+                keys_text("Ctrl+Z")), 8000)
+
+    def restore_removed(self, paths):
+        paths = [p for p in paths if p in self.removed]
+        if not paths:
+            return
+        self.push_undo("bring back %d file%s" % (len(paths), "" if len(paths) == 1 else "s"))
+        self.removed -= set(paths)
+        self.refresh_folders()
+        self.refresh_images()
+        self.touch()
+
+    def show_removed(self):
+        """Los quitados de DriloBoard, para traerlos de vuelta."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Removed files")
+        dlg.resize(560, 420)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("Files removed from DriloBoard. They are still on the disk; "
+                             "bring back the ones you want to see again."))
+        lista = QListWidget()
+        lista.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        for p in sorted(self.removed, key=natural_key):
+            it = QListWidgetItem("%s   \u2014   %s" % (
+                shown_name(p) or "(name hidden)", os.path.basename(os.path.dirname(p))))
+            it.setData(Qt.ItemDataRole.UserRole, p)
+            if not os.path.exists(p):
+                it.setForeground(QColor(theme_color("dim")))
+                it.setToolTip("This file is no longer on the disk")
+            elif not _blind:
+                it.setToolTip(p)
+            lista.addItem(it)
+        lay.addWidget(lista, 1)
+        if not self.removed:
+            lay.addWidget(QLabel("<i>Nothing removed.</i>"))
+        fila = QHBoxLayout()
+        b_sel = QPushButton("Bring back the selected")
+        b_todos = QPushButton("Bring back all")
+        b_cerrar = QPushButton("Close")
+        b_sel.clicked.connect(lambda: (self.restore_removed(
+            [it.data(Qt.ItemDataRole.UserRole) for it in lista.selectedItems()]),
+            [lista.takeItem(lista.row(it)) for it in lista.selectedItems()]))
+        b_todos.clicked.connect(lambda: (self.restore_removed(list(self.removed)), lista.clear()))
+        b_cerrar.clicked.connect(dlg.accept)
+        for b in (b_sel, b_todos):
+            b.setEnabled(bool(self.removed))
+            fila.addWidget(b)
+        fila.addStretch(1)
+        fila.addWidget(b_cerrar)
+        lay.addLayout(fila)
+        dlg.exec()
 
     def grade_selected(self, nota: float):
         """Pone esa nota a los archivos elegidos (un solo paso de deshacer)."""
@@ -10647,6 +10733,11 @@ class MainWindow(QMainWindow):
 
     def _make_item(self, node: dict, root: bool = False) -> QTreeWidgetItem:
         count = node["total"] if self.recursive else node["own"]
+        if self.removed:
+            raiz = os.path.normpath(node["path"])
+            dentro = (lambda d: d == raiz or d.startswith(raiz + os.sep)) if self.recursive \
+                else (lambda d: d == raiz)
+            count -= sum(1 for p in self.removed if dentro(os.path.normpath(os.path.dirname(p))))
         it = QTreeWidgetItem(["%s   (%d)" % (node["name"], count)])
         it.setData(0, Qt.ItemDataRole.UserRole, node["path"])
         if self.recursive and node["children"]:
@@ -10896,6 +10987,8 @@ class MainWindow(QMainWindow):
             # un video clasificado cuando la casilla estaba puesta no asoma
             # por una categoria al quitarla
             paths = [p for p in paths if not is_video(p)]
+        if self.removed:                    # lo quitado de DriloBoard no se ve
+            paths = [p for p in paths if p not in self.removed]
         if self.chk_unassigned.isChecked():
             paths = [p for p in paths if p not in self._index]
         self.model.set_paths(paths)
@@ -10971,6 +11064,8 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         a = m.addAction("Export grades and comments…", self.export_notes)
         a.setToolTip("PDF, spreadsheet or Word with the grades and comments of the files in view")
+        a = m.addAction("Removed files…", self.show_removed)
+        a.setToolTip("Files you removed from DriloBoard (they stay on the disk): bring them back")
         a = m.addAction("Marking time…", self.show_time_report)
         a.setToolTip("The time spent on each student and file, to review it or export it")
         a = m.addAction("One PDF per folder (per student)…", self.export_folders_pdf)
@@ -11278,6 +11373,7 @@ class MainWindow(QMainWindow):
             "edits": copy.deepcopy(self.edits),
             "video_marks": copy.deepcopy(self.video_marks),
             "notes": copy.deepcopy(self.notes),
+            "removed": set(self.removed),
             "folder_order": self.cmb_folder_order.currentData(),
             "category_order": self.cmb_cat_order.currentData(),
         }
@@ -11300,6 +11396,7 @@ class MainWindow(QMainWindow):
         self.edits = snap["edits"]
         self.video_marks = snap.get("video_marks", {})
         self.notes = snap.get("notes", {})
+        self.removed = set(snap.get("removed", set()))
         self._set_mode(self.cmb_folder_order, snap["folder_order"])
         self._set_mode(self.cmb_cat_order, snap["category_order"])
         self.refresh_folders()
@@ -11676,6 +11773,10 @@ class MainWindow(QMainWindow):
             if any(self.is_edited(p) for p in sel):
                 ed.addSeparator()
                 ed.addAction("Remove the edits", lambda: self.quick_edit("reset"))
+        m.addAction("Remove from DriloBoard (%d)  \u2014  not from the disk" % len(sel)
+                    if len(sel) > 1 else "Remove from DriloBoard  \u2014  not from the disk",
+                    lambda: self.remove_selected(sel))
+        m.addSeparator()
         m.addAction("Export images with the edits applied\u2026", self.export_selected)
         m.addAction("Export to PDF\u2026", self.export_selected_pdf)
         m.addAction("One PDF per folder (per student)\u2026", self.export_folders_pdf)
@@ -11731,6 +11832,7 @@ class MainWindow(QMainWindow):
             "note_height_compact": self.note_heights[True],
             "bank_window": self.bank_state(),
             "pdf_before_after": self.pdf_before_after,
+            "removed": sorted(self.removed),
             "track_time": self.tracker.enabled,
             "show_timer": self.show_timer,
             "times": self.times,
@@ -11770,6 +11872,9 @@ class MainWindow(QMainWindow):
         self.chk_names.setChecked(bool(data.get("show_names", True)))
         self.set_blind(bool(data.get("blind", False)))
         self.viewer_notes = bool(data.get("viewer_notes", True))
+        quitados = data.get("removed")
+        self.removed = {p for p in quitados if isinstance(p, str)} \
+            if isinstance(quitados, list) else set()
         ba = data.get("pdf_before_after")
         if isinstance(ba, dict) and isinstance(ba.get("labels"), list) and len(ba["labels"]) == 2:
             rotulos = [str(x) for x in ba["labels"]]

@@ -3415,6 +3415,11 @@ class BankList(QListWidget):
                 return
         super().mousePressEvent(e)
 
+    def mouseDoubleClickEvent(self, e):
+        # dos clics seguidos (la casilla y luego el lapiz, o dos frases) son dos
+        # clics, no un doble clic: si no, el segundo se perdia
+        self.mousePressEvent(e)
+
     def mouseReleaseEvent(self, e):
         pos = e.position().toPoint()
         if self._zone is not None:

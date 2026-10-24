@@ -160,6 +160,11 @@ assert win.note_editor.txt.toPlainText() == antes + " Muy buen ejercicio :) ", "
 QTest.mouseClick(lst.viewport(), Qt.MouseButton.LeftButton, pos=z["edit"].center())
 assert bank.edit_idx == 1 and bank.in_title.text() == "Muy bueno" and bank.b_update.isVisibleTo(bank)
 bank.cancel_edit()
+# un doble clic de verdad (como lo ve Windows) tambien llega a la zona
+QTest.mouseDClick(lst.viewport(), Qt.MouseButton.LeftButton, pos=z["edit"].center())
+QTest.mouseRelease(lst.viewport(), Qt.MouseButton.LeftButton, pos=z["edit"].center())
+assert bank.edit_idx == 1, "el segundo clic seguido no se pierde"
+bank.cancel_edit()
 bank.clear_checks()
 print("   clic, huecos {}, cancelar, parrafo, cursor, deshacer, casilla y lapiz ok")
 

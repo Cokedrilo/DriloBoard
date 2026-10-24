@@ -21,7 +21,7 @@ botón *Export*.
 ## Arrancar
 
 **Versión portable (lo normal).** Descomprime
-`DriloBoard-1.7.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
+`DriloBoard-1.8.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
 red— y ejecuta `DriloBoard.exe`. No instala nada ni escribe en el registro.
 La biblioteca y la caché de miniaturas se crean **dentro de esa misma
 carpeta**, así que copiándola te llevas también toda la clasificación.
@@ -30,7 +30,7 @@ La primera vez Windows puede avisar de que el origen es desconocido (el
 ejecutable no está firmado): *Más información* → *Ejecutar de todas formas*.
 
 **Versión portable para Mac.** Descomprime
-`DriloBoard-1.7.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
+`DriloBoard-1.8.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
 `DriloBoard.app` dentro. Una sola app para Mac Intel y Apple Silicon, macOS 13
 Ventura o posterior. Igual que en Windows, la biblioteca y la caché se crean
 **en esa carpeta, junto a la app** (nunca dentro del `.app`), así que se puede
@@ -271,6 +271,24 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
 - La caja del comentario se agranda o achica arrastrando el **tirador** de
   cuatro puntitos que tiene debajo; doble clic la deja como siempre. El alto
   se recuerda y vale para todas las cajas del mismo sitio.
+- **Banco de frases** (como Feedback 3000): botón *Phrases* bajo el comentario,
+  `Ctrl+Shift+F` o *View ▸ Comment bank*. Tus frases hechas en dos columnas de
+  tarjetas de color, con título y categoría. **Un clic en una tarjeta** y su
+  texto va al comentario, donde esté el cursor; si la frase lleva `{}`, te pide
+  el dato (un número de plano, una fecha) al usarla. *Paragraph* hace punto y
+  aparte.
+  - Cada columna se filtra por categoría o con el buscador. Las tarjetas se
+    arrastran para ordenarlas o pasarlas a la otra columna; el lápiz la edita,
+    la papelera la borra. Marcando varias, se les cambia el color, la
+    categoría o la columna, o se borran, de una vez.
+  - Puedes tener varios **bancos** (uno por idioma, por asignatura) y
+    **importarlos / exportarlos** en .json: los `feedback3000_ESP.json` y
+    `_ENG.json` de Feedback 3000 se abren tal cual, y lo que exportas lo abre
+    Feedback 3000.
+  - Se abre en su propia ventana (con *Keep on top* no se esconde detrás); en
+    la ventana grande sale a la derecha de la imagen. Escribe en el comentario
+    que tocaste el último. Las frases se guardan en `frases.json`, junto a
+    `biblioteca.json`.
 - Sin nota se ve una raya: baja con la flecha por debajo de 0, o *Clear*, que
   borra nota y comentario.
 - La nota sale en la miniatura, abajo a la derecha: **roja** por debajo de 5,

@@ -7,7 +7,16 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
-Novedades de la 1.7:
+Novedades de la 1.8:
+
+  - Banco de frases para los comentarios, como Feedback 3000: boton "Phrases"
+    bajo el comentario, Ctrl+Shift+F o View > Comment bank. Dos columnas de
+    tarjetas de color; un clic mete la frase en el comentario, y los {} piden
+    el dato. Filtro por categoria, buscador, arrastrar, editar, borrar y
+    acciones sobre varias a la vez. Varios bancos, e importar / exportar
+    .json (los de Feedback 3000 se abren tal cual). Se guarda en frases.json.
+
+De la 1.7:
 
   - Un PDF por alumno: Export > "One PDF per folder (per student)". Con la
     carpeta de la clase elegida, cada subcarpeta sale como un PDF con su

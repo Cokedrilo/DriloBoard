@@ -70,7 +70,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 
 
 def app_dir() -> Path:
@@ -206,6 +206,7 @@ SHORTCUT_DEFS = [
     ("note", "Grade / comment the image", "N"),
     ("show_notes", "Show / hide grades and comments", "Ctrl+G"),
     ("blind", "Blind marking: hide / show file names", "Ctrl+B"),
+    ("bank", "Show / hide the comment bank (phrases)", "Ctrl+Shift+F"),
     ("before", "Before / after (hold to see the original)", "Z"),
     ("refresh", "Refresh folders", "F5"),
     ("theme", "Switch dark / light theme", "Ctrl+T"),
@@ -2930,6 +2931,13 @@ class NoteEditor(QWidget):
         themed(self.b_copy, icon="copy")
         self.b_copy.setToolTip("Copy the text of the comment to the clipboard")
         self.b_copy.clicked.connect(self.copy)
+        self.b_bank = QPushButton("" if compact else "  Phrases")
+        themed(self.b_bank, icon="bank")
+        self.b_bank.setToolTip("Comment bank: ready-made phrases to add to the comment (%s)"
+                               % SK.text("bank"))
+        self.b_bank.clicked.connect(lambda: host.toggle_bank(self))
+        for w in (self.txt, self.spn):          # el banco escribe en el ultimo que tocaste
+            w.installEventFilter(self)
 
         self.lbl_file = QLabel("")
         themed(self.lbl_file, css="color:%(dim)s; font-size:11px;")
@@ -2954,6 +2962,7 @@ class NoteEditor(QWidget):
             lay.addLayout(caja, 1)
             col = QVBoxLayout()
             col.setSpacing(2)
+            col.addWidget(self.b_bank)
             col.addWidget(self.b_copy)
             col.addWidget(self.b_clear)
             lay.addLayout(col)
@@ -2972,6 +2981,7 @@ class NoteEditor(QWidget):
             lay.addWidget(self.txt)
             lay.addWidget(self.grip)
             fila = QHBoxLayout()
+            fila.addWidget(self.b_bank)
             fila.addStretch(1)
             fila.addWidget(self.b_copy)
             lay.addLayout(fila)
@@ -3060,6 +3070,983 @@ class NoteEditor(QWidget):
     def focus_grade(self):
         self.spn.setFocus(Qt.FocusReason.ShortcutFocusReason)
         self.spn.selectAll()
+
+    def eventFilter(self, obj, e):
+        if e.type() == QEvent.Type.FocusIn and hasattr(self.host, "note_focused"):
+            self.host.note_focused(self)
+        return False
+
+    def insert_text(self, texto: str) -> bool:
+        """Mete una frase donde esta el cursor, con un espacio de separacion."""
+        if not self.path or not texto:
+            return False
+        c = self.txt.textCursor()
+        doc = self.txt.toPlainText()
+        antes = doc[c.position() - 1] if c.position() > 0 else ""
+        despues = doc[c.position()] if c.position() < len(doc) else ""
+        if antes and not antes.isspace() and not texto[:1].isspace():
+            texto = " " + texto
+        if not texto[-1:].isspace() and not despues.isspace():   # "".isspace() es False
+            texto += " "
+        c.insertText(texto)
+        self.txt.setTextCursor(c)
+        self.txt.ensureCursorVisible()
+        return True
+
+    def insert_paragraph(self) -> bool:
+        if not self.path:
+            return False
+        c = self.txt.textCursor()
+        while c.position() > 0 and self.txt.toPlainText()[c.position() - 1] == " ":
+            c.deletePreviousChar()              # sin espacios colgando al final de la linea
+        c.insertText("\n\n")
+        self.txt.setTextCursor(c)
+        self.txt.ensureCursorVisible()
+        return True
+
+
+# --------------------------------------------------------------------------- #
+#  Banco de frases para los comentarios (lo de Feedback 3000)
+#
+#  Frases hechas en dos columnas, con titulo, categoria y color. Un clic y van
+#  al comentario del archivo; los {} piden el dato al insertarlas. Se guardan
+#  en frases.json, junto a biblioteca.json pero aparte: son tuyas, no de una
+#  clase. El formato de cada frase es el de Feedback 3000, asi que sus
+#  exportaciones (feedback3000_*.json) se importan tal cual y al reves.
+# --------------------------------------------------------------------------- #
+BANK_FILE = DATA_DIR / "frases.json"
+# clave, nombre, fondo, borde (los de Feedback 3000)
+BANK_COLORS = (("white", "White", "#ffffff", "#e2e8f0"),
+               ("info", "Blue", "#e0f2fe", "#7dd3fc"),
+               ("success", "Green", "#dcfce7", "#86efac"),
+               ("warning", "Yellow", "#fef9c3", "#fde047"),
+               ("error", "Red", "#fee2e2", "#fca5a5"),
+               ("purple", "Purple", "#f3e8ff", "#d8b4fe"),
+               ("pink", "Pink", "#fce7f3", "#f9a8d4"),
+               ("orange", "Orange", "#ffedd5", "#fdba74"),
+               ("gray", "Grey", "#f1f5f9", "#cbd5e1"))
+BANK_COLOR = {k: (bg, borde) for k, _n, bg, borde in BANK_COLORS}
+PHRASE_INK = "#1e293b"                  # las tarjetas son claras en los dos temas
+PHRASE_ROLE = Qt.ItemDataRole.UserRole + 11
+BLANK = "___"                           # lo que queda de un {} sin rellenar
+
+
+def clean_phrase(d) -> dict | None:
+    """Una frase valida, o None. Tolera exportaciones con huecos o erratas."""
+    if not isinstance(d, dict):
+        return None
+    plano = str(d.get("plano") or "").strip()
+    texto = d.get("texto")
+    if not isinstance(texto, str):
+        texto = ""
+    if not plano and not texto.strip():
+        return None
+    color = d.get("color")
+    return {"plano": plano, "texto": texto, "tag": str(d.get("tag") or "").strip(),
+            "col": 2 if d.get("col") in (2, "2") else 1,
+            "color": color if color in BANK_COLOR else "white"}
+
+
+def clean_phrases(crudo) -> list[dict]:
+    return [f for f in (clean_phrase(x) for x in (crudo if isinstance(crudo, list) else []))
+            if f is not None]
+
+
+def bank_name_from_file(path: str) -> str:
+    """feedback3000_ESP.json -> ESP."""
+    stem = Path(path).stem
+    nombre = re.sub(r"^feedback\s*3000[\s_-]*", "", stem, flags=re.I).strip(" _-")
+    return nombre or stem or "Phrases"
+
+
+def fill_blanks(texto: str, ask) -> str | None:
+    """Rellena cada {} con lo que devuelva ask(n, total); None la cancela."""
+    partes = texto.split("{}")
+    out = partes[0]
+    for n, resto in enumerate(partes[1:], 1):
+        valor = ask(n, len(partes) - 1)
+        if valor is None:
+            return None
+        out += (valor.strip() or BLANK) + resto
+    return out
+
+
+def phrase_html(f: dict) -> str:
+    tag = ('<span style="background-color:rgba(0,0,0,0.09); font-size:8pt; '
+           'font-weight:bold;">&nbsp;%s&nbsp;</span>&nbsp; ' % html.escape(f["tag"])
+           if f.get("tag") else "")
+    titulo = "<b>%s</b>" % html.escape(f["plano"]) if f.get("plano") else ""
+    texto = html.escape(f.get("texto", "").replace("{}", BLANK)).replace("\n", "<br>")
+    raya = ' <span style="color:#94a3b8;">—</span> ' if titulo and texto.strip() else ""
+    return '<div style="color:%s;">%s%s%s%s</div>' % (PHRASE_INK, tag, titulo, raya, texto)
+
+
+class PhraseBank(QObject):
+    """Los bancos de frases (uno por idioma, por asignatura...) y el elegido."""
+    changed = Signal()
+
+    def __init__(self, path: Path | None = None):
+        super().__init__()
+        self.path = Path(path) if path else BANK_FILE
+        self.banks: list[dict] = []
+        self.current = 0
+        self.load()
+
+    def load(self):
+        crudo = None
+        try:
+            if self.path.exists():
+                crudo = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            crudo = None
+        if isinstance(crudo, list):             # un banco suelto, como Feedback 3000
+            crudo = {"banks": [{"name": "Phrases", "phrases": crudo}]}
+        bancos = []
+        for b in (crudo or {}).get("banks", []) if isinstance(crudo, dict) else []:
+            if isinstance(b, dict):
+                bancos.append({"name": str(b.get("name") or "Phrases").strip() or "Phrases",
+                               "phrases": clean_phrases(b.get("phrases"))})
+        self.banks = bancos or [{"name": "Phrases", "phrases": []}]
+        cur = (crudo or {}).get("current", 0) if isinstance(crudo, dict) else 0
+        self.current = cur if isinstance(cur, int) and 0 <= cur < len(self.banks) else 0
+
+    def save(self):
+        try:
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"current": self.current, "banks": self.banks},
+                                      indent=1, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(self.path)
+        except OSError:
+            pass
+
+    def _done(self):
+        self.save()
+        self.changed.emit()
+
+    @property
+    def name(self) -> str:
+        return self.banks[self.current]["name"]
+
+    @property
+    def phrases(self) -> list[dict]:
+        return self.banks[self.current]["phrases"]
+
+    def set_phrases(self, frases: list[dict]):
+        self.banks[self.current]["phrases"] = [dict(f) for f in frases]
+        self._done()
+
+    def tags(self) -> list[str]:
+        return sorted({f["tag"] for f in self.phrases if f.get("tag")}, key=str.lower)
+
+    def names(self) -> list[str]:
+        return [b["name"] for b in self.banks]
+
+    def unique_name(self, nombre: str) -> str:
+        usados = {n.lower() for n in self.names()}
+        nombre = nombre.strip() or "Phrases"
+        if nombre.lower() not in usados:
+            return nombre
+        n = 2
+        while ("%s (%d)" % (nombre, n)).lower() in usados:
+            n += 1
+        return "%s (%d)" % (nombre, n)
+
+    def select(self, i: int):
+        if 0 <= i < len(self.banks) and i != self.current:
+            self.current = i
+            self._done()
+
+    def add_bank(self, nombre: str, frases: list | None = None) -> int:
+        self.banks.append({"name": self.unique_name(nombre), "phrases": clean_phrases(frases)})
+        self.current = len(self.banks) - 1
+        self._done()
+        return self.current
+
+    def rename(self, nombre: str):
+        nombre = nombre.strip()
+        if nombre and nombre != self.name:
+            self.banks[self.current]["name"] = nombre
+            self._done()
+
+    def delete_bank(self):
+        del self.banks[self.current]
+        if not self.banks:
+            self.banks = [{"name": "Phrases", "phrases": []}]
+        self.current = min(self.current, len(self.banks) - 1)
+        self._done()
+
+    def index_of(self, nombre: str) -> int | None:
+        for i, n in enumerate(self.names()):
+            if n.lower() == nombre.strip().lower():
+                return i
+        return None
+
+
+def tinted_icon(kind: str, color: str, size: int = 16) -> QPixmap:
+    """Un icono de tool_icon pintado de un color fijo (sobre las tarjetas claras)."""
+    pm = tool_icon(kind, size).pixmap(size, size)
+    p = QPainter(pm)
+    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    p.fillRect(pm.rect(), QColor(color))
+    p.end()
+    return pm
+
+
+class PhraseDelegate(QStyledItemDelegate):
+    """Cada frase como una tarjeta de color: casilla, texto, lapiz y papelera."""
+    PAD = 8
+    ICON = 16
+
+    def __init__(self, view):
+        super().__init__(view)
+        self.view = view
+
+    def _rect(self, rect: QRect) -> QRect:
+        return rect.adjusted(2, 2, -4, -3)
+
+    def zones(self, rect: QRect) -> dict:
+        r = self._rect(rect)
+        P, I = self.PAD, self.ICON
+        check = QRect(r.left() + P, r.top() + (r.height() - 16) // 2, 16, 16)
+        borrar = QRect(r.right() - I - 5, r.top() + 5, I, I)
+        editar = QRect(borrar.left() - I - 4, r.top() + 5, I, I)
+        x0 = check.right() + 9
+        texto = QRect(x0, r.top() + P, max(20, editar.left() - 6 - x0), r.height() - 2 * P)
+        return {"check": check, "edit": editar, "delete": borrar, "text": texto}
+
+    def zone_at(self, rect: QRect, pos) -> str | None:
+        for clave in ("check", "edit", "delete"):
+            if self.zones(rect)[clave].adjusted(-3, -3, 3, 3).contains(pos):
+                return clave
+        return None
+
+    def _doc(self, f: dict, ancho: int) -> QTextDocument:
+        doc = QTextDocument()
+        doc.setDefaultFont(self.view.font())
+        doc.setDocumentMargin(0)
+        doc.setHtml(phrase_html(f))
+        doc.setTextWidth(ancho)
+        return doc
+
+    def sizeHint(self, option, index):
+        f = index.data(PHRASE_ROLE + 1) or {}
+        ancho = max(120, self.view.viewport().width())
+        z = self.zones(QRect(0, 0, ancho, 40))
+        alto = self._doc(f, z["text"].width()).size().height()
+        return QSize(ancho, int(max(40, alto + 2 * self.PAD)) + 5)
+
+    def paint(self, p: QPainter, option, index):
+        f = index.data(PHRASE_ROLE + 1) or {}
+        r = self._rect(option.rect)
+        z = self.zones(option.rect)
+        bg, borde = BANK_COLOR.get(f.get("color"), BANK_COLOR["white"])
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        elegida = bool(option.state & QStyle.StateFlag.State_Selected)
+        p.setPen(QPen(QColor(theme_color("accent") if elegida else borde), 2 if elegida else 1))
+        p.setBrush(QColor(bg))
+        p.drawRoundedRect(QRectF(r).adjusted(0.5, 0.5, -0.5, -0.5), 7, 7)
+        # la casilla de la seleccion multiple
+        marcada = bool(index.data(Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked)
+        c = QRectF(z["check"]).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(QColor("#64748b"), 1.2))
+        p.setBrush(QColor(theme_color("accent")) if marcada else QColor(255, 255, 255, 200))
+        p.drawRoundedRect(c, 3, 3)
+        if marcada:
+            pen = QPen(QColor("white"), 2)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            p.drawPolyline([QPointF(c.left() + 3.5, c.center().y()),
+                            QPointF(c.left() + 6.5, c.bottom() - 4),
+                            QPointF(c.right() - 3, c.top() + 4)])
+        # el texto
+        doc = self._doc(f, z["text"].width())
+        p.translate(z["text"].topLeft())
+        doc.drawContents(p, QRectF(0, 0, z["text"].width(), z["text"].height() + 2))
+        p.translate(-z["text"].topLeft())
+        # lapiz y papelera: se encienden al pasar por encima
+        p.setOpacity(1.0 if option.state & QStyle.StateFlag.State_MouseOver else 0.3)
+        p.drawPixmap(z["edit"].topLeft(), tinted_icon("pencil", "#334155", self.ICON))
+        p.drawPixmap(z["delete"].topLeft(), tinted_icon("trash", "#dc2626", self.ICON))
+        p.restore()
+
+
+class BankList(QListWidget):
+    """Una columna de frases. Arrastrar reordena, y tambien a la otra columna."""
+    insert_requested = Signal(int)
+    edit_requested = Signal(int)
+    delete_requested = Signal(int)
+    check_toggled = Signal(int)
+    reordered = Signal()
+
+    def __init__(self, col: int, parent=None):
+        super().__init__(parent)
+        self.col = col
+        self.setObjectName("bank%d" % col)
+        self.setMouseTracking(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDropIndicatorShown(True)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setResizeMode(QListView.ResizeMode.Adjust)
+        self.setUniformItemSizes(False)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.delegate = PhraseDelegate(self)
+        self.setItemDelegate(self.delegate)
+        self._press = None
+        self._zone = None
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.doItemsLayout()                    # el alto de cada tarjeta depende del ancho
+
+    def mousePressEvent(self, e):
+        pos = e.position().toPoint()
+        self._press = pos
+        self._zone = None
+        idx = self.indexAt(pos)
+        if idx.isValid() and e.button() == Qt.MouseButton.LeftButton:
+            zona = self.delegate.zone_at(self.visualRect(idx), pos)
+            if zona:                            # la casilla y los botones no arrastran
+                self._zone = (idx.row(), zona)
+                e.accept()
+                return
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        pos = e.position().toPoint()
+        if self._zone is not None:
+            fila, zona = self._zone
+            self._zone = None
+            idx = self.indexAt(pos)
+            if idx.isValid() and idx.row() == fila and \
+                    self.delegate.zone_at(self.visualRect(idx), pos) == zona:
+                n = self.item(fila).data(PHRASE_ROLE)
+                {"check": self.check_toggled, "edit": self.edit_requested,
+                 "delete": self.delete_requested}[zona].emit(n)
+            return
+        quieto = self._press is not None and \
+            (pos - self._press).manhattanLength() < QApplication.startDragDistance()
+        super().mouseReleaseEvent(e)
+        idx = self.indexAt(pos)
+        if quieto and idx.isValid() and e.button() == Qt.MouseButton.LeftButton:
+            self.insert_requested.emit(self.item(idx.row()).data(PHRASE_ROLE))
+
+    def dropEvent(self, e):
+        if not isinstance(e.source(), BankList):
+            e.ignore()
+            return
+        super().dropEvent(e)
+        # la fila de origen se quita despues, al volver del arrastre
+        QTimer.singleShot(0, self.reordered.emit)
+
+
+class CommentBank(QWidget):
+    """El banco de frases: dos columnas de tarjetas y el formulario de alta.
+
+    target() da el editor de nota en el que se escribe. Puede haber varios
+    bancos a la vez (la ventana suelta y el de la ventana grande): comparten
+    el PhraseBank y se repintan cuando cambia."""
+
+    def __init__(self, store: PhraseBank, host, target, parent=None):
+        super().__init__(parent)
+        self.store = store
+        self.host = host
+        self.target = target
+        self.checked: set[int] = set()
+        self.edit_idx: int | None = None
+        self.say = lambda t: host.statusBar().showMessage(t, 4000)
+
+        raiz = QVBoxLayout(self)
+        raiz.setContentsMargins(8, 8, 8, 8)
+        raiz.setSpacing(6)
+
+        # --- el banco elegido y sus botones
+        arriba = QHBoxLayout()
+        arriba.addWidget(QLabel("Bank"))
+        self.cmb_bank = QComboBox()
+        self.cmb_bank.setToolTip("Your phrase banks: one per language, per subject…")
+        self.cmb_bank.activated.connect(lambda i: self.store.select(i))
+        arriba.addWidget(self.cmb_bank, 1)
+        self.b_menu = QToolButton()
+        self.b_menu.setText("⋯")
+        self.b_menu.setToolTip("New, rename or delete a bank")
+        self.b_menu.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(self.b_menu)
+        menu.addAction("New bank…", self.new_bank)
+        menu.addAction("Rename this bank…", self.rename_bank)
+        menu.addSeparator()
+        menu.addAction("Delete this bank…", self.delete_bank)
+        self.b_menu.setMenu(menu)
+        arriba.addWidget(self.b_menu)
+        b_imp = QPushButton("  Import…")
+        themed(b_imp, std="SP_DialogOpenButton")
+        b_imp.setToolTip("Load a bank exported from Feedback 3000 or from DriloBoard (.json)")
+        b_imp.clicked.connect(self.import_bank)
+        b_exp = QPushButton("  Export…")
+        themed(b_exp, std="SP_DialogSaveButton")
+        b_exp.setToolTip("Save this bank as .json (Feedback 3000 opens it too)")
+        b_exp.clicked.connect(self.export_bank)
+        arriba.addWidget(b_imp)
+        arriba.addWidget(b_exp)
+        raiz.addLayout(arriba)
+
+        # --- las dos columnas
+        self.split = QSplitter(Qt.Orientation.Horizontal)
+        self.lists: dict[int, BankList] = {}
+        self.lbl_col: dict[int, QLabel] = {}
+        self.cmb_tag: dict[int, QComboBox] = {}
+        self.txt_find: dict[int, QLineEdit] = {}
+        for col in (1, 2):
+            w = QWidget()
+            v = QVBoxLayout(w)
+            v.setContentsMargins(0, 0, 0, 0)
+            v.setSpacing(4)
+            cab = QHBoxLayout()
+            et = QLabel()
+            themed(et, css="color:%(dim)s; font-size:11px; font-weight:600;")
+            self.lbl_col[col] = et
+            cab.addWidget(et)
+            cab.addStretch(1)
+            b_all = QToolButton()
+            b_all.setText("Select all")
+            b_all.setAutoRaise(True)
+            b_all.setToolTip("Tick every phrase shown in this column")
+            b_all.clicked.connect(lambda _c, c=col: self.select_all(c))
+            cab.addWidget(b_all)
+            v.addLayout(cab)
+            cmb = QComboBox()
+            cmb.setToolTip("Show only one category")
+            cmb.currentIndexChanged.connect(lambda _i, c=col: self.apply_filter(c))
+            self.cmb_tag[col] = cmb
+            v.addWidget(cmb)
+            busca = QLineEdit()
+            busca.setPlaceholderText("Search…")
+            busca.setClearButtonEnabled(True)
+            busca.textChanged.connect(lambda _t, c=col: self.apply_filter(c))
+            self.txt_find[col] = busca
+            v.addWidget(busca)
+            lst = BankList(col)
+            lst.insert_requested.connect(self.insert_phrase)
+            lst.edit_requested.connect(self.start_edit)
+            lst.delete_requested.connect(self.delete_phrase)
+            lst.check_toggled.connect(self.toggle_check)
+            lst.reordered.connect(self.on_reordered)
+            self.lists[col] = lst
+            v.addWidget(lst, 1)
+            self.split.addWidget(w)
+            self.split.setCollapsible(col - 1, False)
+        raiz.addWidget(self.split, 1)
+
+        # --- acciones sobre las marcadas
+        self.bulk = QFrame()
+        self.bulk.setFrameShape(QFrame.Shape.StyledPanel)
+        b = QHBoxLayout(self.bulk)
+        b.setContentsMargins(8, 4, 8, 4)
+        self.lbl_bulk = QLabel()
+        b.addWidget(self.lbl_bulk)
+        self.cmb_bulk_color = self._color_combo("Colour…")
+        self.cmb_bulk_color.activated.connect(self.bulk_color)
+        b.addWidget(self.cmb_bulk_color)
+        for txt, fn, tip in (("Category…", self.bulk_tag, "Give them all the same category"),
+                             ("To A", lambda: self.bulk_column(1), "Move them to column A"),
+                             ("To B", lambda: self.bulk_column(2), "Move them to column B")):
+            bb = QPushButton(txt)
+            bb.setToolTip(tip)
+            bb.clicked.connect(fn)
+            b.addWidget(bb)
+        b_del = QPushButton()
+        themed(b_del, icon="trash")
+        b_del.setToolTip("Delete the ticked phrases")
+        b_del.clicked.connect(self.bulk_delete)
+        b.addWidget(b_del)
+        b.addStretch(1)
+        b_x = QToolButton()
+        b_x.setText("✕")
+        b_x.setAutoRaise(True)
+        b_x.setToolTip("Untick them all")
+        b_x.clicked.connect(self.clear_checks)
+        b.addWidget(b_x)
+        raiz.addWidget(self.bulk)
+
+        # --- alta y edicion
+        caja = QFrame()
+        caja.setFrameShape(QFrame.Shape.StyledPanel)
+        f = QVBoxLayout(caja)
+        f.setContentsMargins(8, 6, 8, 8)
+        f.setSpacing(5)
+        self.lbl_form = QLabel("New phrase")
+        themed(self.lbl_form, css="font-weight:600;")
+        f.addWidget(self.lbl_form)
+        fila = QHBoxLayout()
+        self.in_title = QLineEdit()
+        self.in_title.setPlaceholderText("Title")
+        self.in_tag = QComboBox()
+        self.in_tag.setEditable(True)
+        self.in_tag.lineEdit().setPlaceholderText("Category")
+        self.in_tag.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        fila.addWidget(self.in_title, 1)
+        fila.addWidget(self.in_tag, 1)
+        f.addLayout(fila)
+        self.in_text = QPlainTextEdit()
+        self.in_text.setPlaceholderText("Text…  Write {} where a piece of data goes "
+                                        "(a shot number, a name): you are asked for it "
+                                        "when you use the phrase.")
+        self.in_text.setTabChangesFocus(True)
+        self.in_text.setFixedHeight(64)
+        f.addWidget(self.in_text)
+        fila2 = QHBoxLayout()
+        self.in_color = self._color_combo()
+        fila2.addWidget(self.in_color, 1)
+        self.b_add_a = QPushButton("+ A")
+        self.b_add_b = QPushButton("+ B")
+        self.b_add_a.setToolTip("Add it to column A")
+        self.b_add_b.setToolTip("Add it to column B")
+        self.b_add_a.clicked.connect(lambda: self.add_phrase(1))
+        self.b_add_b.clicked.connect(lambda: self.add_phrase(2))
+        self.b_update = QPushButton("Update")
+        self.b_update.setProperty("primary", True)
+        self.b_update.clicked.connect(self.confirm_edit)
+        self.b_cancel = QPushButton("Cancel")
+        self.b_cancel.clicked.connect(self.cancel_edit)
+        for w in (self.b_add_a, self.b_add_b, self.b_update, self.b_cancel):
+            fila2.addWidget(w)
+        f.addLayout(fila2)
+        raiz.addWidget(caja)
+
+        # --- donde se escribe
+        abajo = QHBoxLayout()
+        self.b_par = QPushButton("⏎  Paragraph")
+        self.b_par.setToolTip("Start a new paragraph in the comment")
+        self.b_par.clicked.connect(self.insert_paragraph)
+        abajo.addWidget(self.b_par)
+        self.lbl_target = QLabel()
+        self.lbl_target.setWordWrap(True)
+        themed(self.lbl_target, css="color:%(dim)s; font-size:11px;")
+        abajo.addWidget(self.lbl_target, 1)
+        raiz.addLayout(abajo)
+
+        self._mostrando_edicion(False)
+        self.store.changed.connect(self.rebuild)
+        self._tick = QTimer(self)                # el rotulo sigue al editor activo
+        self._tick.setInterval(400)
+        self._tick.timeout.connect(self.refresh_target)
+        self._tick.start()
+        self.rebuild()
+        self.refresh_target()
+
+    # --- utilidades ---------------------------------------------------------
+    def _color_combo(self, primero: str | None = None) -> QComboBox:
+        c = QComboBox()
+        if primero:
+            c.addItem(primero, None)
+        for clave, nombre, bg, _b in BANK_COLORS:
+            c.addItem(swatch_icon(bg), nombre, clave)
+        return c
+
+    def _mostrando_edicion(self, si: bool):
+        self.b_update.setVisible(si)
+        self.b_cancel.setVisible(si)
+        self.b_add_a.setVisible(not si)
+        self.b_add_b.setVisible(not si)
+        self.lbl_form.setText("Edit phrase" if si else "New phrase")
+
+    def _editor(self):
+        ed = self.target() if self.target else None
+        try:
+            if ed is not None:
+                ed.isVisible()
+        except RuntimeError:
+            ed = None
+        return ed
+
+    def refresh_target(self):
+        ed = self._editor()
+        if ed is None or not ed.path:
+            self.lbl_target.setText("Choose a file: the phrases go into its comment.")
+            return
+        nombre = shown_name(ed.path) or "this file"
+        n = len(ed.txt.toPlainText())
+        texto = "Writing into the comment of %s  ·  %d character%s" % (
+            nombre, n, "" if n == 1 else "s")
+        if self.lbl_target.text() != texto:
+            self.lbl_target.setText(texto)
+
+    # --- dibujar ------------------------------------------------------------
+    def rebuild(self):
+        frases = self.store.phrases
+        self.checked = {i for i in self.checked if i < len(frases)}
+        self.cmb_bank.blockSignals(True)
+        self.cmb_bank.clear()
+        self.cmb_bank.addItems(self.store.names())
+        self.cmb_bank.setCurrentIndex(self.store.current)
+        self.cmb_bank.blockSignals(False)
+        tags = self.store.tags()
+        for col in (1, 2):
+            cmb = self.cmb_tag[col]
+            antes = cmb.currentData()
+            cmb.blockSignals(True)
+            cmb.clear()
+            cmb.addItem("All categories", "")
+            for t in tags:
+                cmb.addItem(t, t)
+            cmb.setCurrentIndex(max(0, cmb.findData(antes)))
+            cmb.blockSignals(False)
+        actual = self.in_tag.currentText()
+        self.in_tag.blockSignals(True)
+        self.in_tag.clear()
+        self.in_tag.addItems(tags)
+        self.in_tag.setEditText(actual)
+        self.in_tag.blockSignals(False)
+        for col, lst in self.lists.items():
+            pos = lst.verticalScrollBar().value()
+            lst.clear()
+            for i, f in enumerate(frases):
+                if f["col"] != col:
+                    continue
+                it = QListWidgetItem()
+                it.setData(PHRASE_ROLE, i)
+                it.setData(PHRASE_ROLE + 1, f)
+                it.setData(Qt.ItemDataRole.CheckStateRole,
+                           Qt.CheckState.Checked if i in self.checked else Qt.CheckState.Unchecked)
+                it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                            | Qt.ItemFlag.ItemIsDragEnabled)
+                it.setToolTip(f["texto"] or f["plano"])
+                lst.addItem(it)
+            self.apply_filter(col)
+            lst.verticalScrollBar().setValue(pos)
+        if self.edit_idx is not None and self.edit_idx >= len(frases):
+            self.cancel_edit()
+        self.update_bulk()
+
+    def apply_filter(self, col: int):
+        tag = self.cmb_tag[col].currentData() or ""
+        q = self.txt_find[col].text().strip().lower()
+        lst = self.lists[col]
+        vistas = 0
+        for r in range(lst.count()):
+            f = lst.item(r).data(PHRASE_ROLE + 1)
+            ok = (not tag or f["tag"] == tag) and (
+                not q or q in ("%s %s %s" % (f["tag"], f["plano"], f["texto"])).lower())
+            lst.item(r).setHidden(not ok)
+            vistas += ok
+        total = lst.count()
+        self.lbl_col[col].setText("COLUMN %s  (%s)" % (
+            "AB"[col - 1], total if vistas == total else "%d / %d" % (vistas, total)))
+
+    # --- usar una frase -----------------------------------------------------
+    def _target_ready(self):
+        ed = self._editor()
+        if ed is None or not ed.path:
+            self.say("Choose a file first: the phrase goes into its comment.")
+            return None
+        if not getattr(self.host, "show_notes", True):
+            self.say("Grades and comments are hidden: %s shows them." % SK.text("show_notes"))
+            return None
+        pane = getattr(ed, "pane", None)
+        if ed.isHidden() and pane is not None and hasattr(pane, "b_notes"):
+            pane.b_notes.setChecked(True)          # la barra de nota del visor, a la vista
+        return ed
+
+    def insert_phrase(self, i: int):
+        if not 0 <= i < len(self.store.phrases):
+            return
+        ed = self._target_ready()
+        if ed is None:
+            return
+        f = self.store.phrases[i]
+        titulo = f["plano"] or "Phrase"
+
+        def pedir(n, total):
+            txt, ok = QInputDialog.getText(
+                self, titulo, "Value %d of %d for:\n%s" % (n, total, f["texto"])
+                if total > 1 else "Value for:\n%s" % f["texto"])
+            return txt if ok else None
+        texto = fill_blanks(f["texto"] or f["plano"], pedir)
+        if texto is None:
+            return
+        ed.insert_text(texto)
+        self.refresh_target()
+
+    def insert_paragraph(self):
+        ed = self._target_ready()
+        if ed is not None:
+            ed.insert_paragraph()
+
+    # --- editar el banco ----------------------------------------------------
+    def _form(self) -> dict | None:
+        titulo = self.in_title.text().strip()
+        texto = self.in_text.toPlainText().strip()
+        if not titulo and not texto:
+            self.say("Write a title and a text first.")
+            return None
+        return {"plano": titulo or texto[:30], "texto": texto or titulo,
+                "tag": self.in_tag.currentText().strip(),
+                "color": self.in_color.currentData() or "white"}
+
+    def _clear_form(self):
+        self.in_title.clear()
+        self.in_text.clear()
+
+    def add_phrase(self, col: int):
+        datos = self._form()
+        if datos is None:
+            return
+        self.store.set_phrases(self.store.phrases + [dict(datos, col=col)])
+        self._clear_form()
+        self.in_title.setFocus()
+
+    def start_edit(self, i: int):
+        f = self.store.phrases[i]
+        self.edit_idx = i
+        self.in_title.setText(f["plano"])
+        self.in_tag.setEditText(f["tag"])
+        self.in_text.setPlainText(f["texto"])
+        self.in_color.setCurrentIndex(max(0, self.in_color.findData(f["color"])))
+        self._mostrando_edicion(True)
+        self.in_text.setFocus()
+
+    def confirm_edit(self):
+        if self.edit_idx is None:
+            return
+        datos = self._form()
+        if datos is None:
+            return
+        frases = [dict(f) for f in self.store.phrases]
+        frases[self.edit_idx].update(datos)
+        self.edit_idx = None
+        self._mostrando_edicion(False)
+        self._clear_form()
+        self.store.set_phrases(frases)
+
+    def cancel_edit(self):
+        self.edit_idx = None
+        self._mostrando_edicion(False)
+        self._clear_form()
+
+    def delete_phrase(self, i: int):
+        f = self.store.phrases[i]
+        if QMessageBox.question(self, APP_NAME, "Delete the phrase “%s”?"
+                                % (f["plano"] or f["texto"][:40])) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        frases = [x for n, x in enumerate(self.store.phrases) if n != i]
+        self.checked = {n - (n > i) for n in self.checked if n != i}
+        if self.edit_idx is not None:
+            self.cancel_edit()
+        self.store.set_phrases(frases)
+
+    def on_reordered(self):
+        """Tras arrastrar: el orden de las dos columnas pasa al banco."""
+        viejas = self.store.phrases
+        nuevas, vistas = [], set()
+        for col, lst in self.lists.items():
+            for r in range(lst.count()):
+                n = lst.item(r).data(PHRASE_ROLE)
+                if isinstance(n, int) and 0 <= n < len(viejas) and n not in vistas:
+                    vistas.add(n)
+                    nuevas.append(dict(viejas[n], col=col))
+        if len(nuevas) != len(viejas):          # algo raro: se vuelve a lo guardado
+            self.rebuild()
+            return
+        self.checked.clear()
+        if self.edit_idx is not None:
+            self.cancel_edit()
+        if nuevas != viejas:
+            self.store.set_phrases(nuevas)
+        else:
+            self.rebuild()
+
+    # --- varias a la vez ----------------------------------------------------
+    def toggle_check(self, i: int):
+        self.checked ^= {i}
+        for lst in self.lists.values():
+            for r in range(lst.count()):
+                it = lst.item(r)
+                if it.data(PHRASE_ROLE) == i:
+                    it.setData(Qt.ItemDataRole.CheckStateRole,
+                               Qt.CheckState.Checked if i in self.checked
+                               else Qt.CheckState.Unchecked)
+        self.update_bulk()
+
+    def select_all(self, col: int):
+        lst = self.lists[col]
+        for r in range(lst.count()):
+            if not lst.item(r).isHidden():
+                self.checked.add(lst.item(r).data(PHRASE_ROLE))
+        self.rebuild()
+
+    def clear_checks(self):
+        self.checked.clear()
+        self.rebuild()
+
+    def update_bulk(self):
+        n = len(self.checked)
+        self.bulk.setVisible(n > 0)
+        self.lbl_bulk.setText("%d ticked" % n)
+
+    def _bulk_apply(self, fn):
+        frases = [dict(f) for f in self.store.phrases]
+        for i in self.checked:
+            if 0 <= i < len(frases):
+                fn(frases[i])
+        self.checked.clear()
+        self.store.set_phrases(frases)
+
+    def bulk_color(self, _i=None):
+        clave = self.cmb_bulk_color.currentData()
+        self.cmb_bulk_color.setCurrentIndex(0)
+        if clave:
+            self._bulk_apply(lambda f: f.update(color=clave))
+
+    def bulk_tag(self):
+        tag, ok = QInputDialog.getItem(self, "Category", "Category for the %d ticked phrases:"
+                                       % len(self.checked), [""] + self.store.tags(), 0, True)
+        if ok:
+            self._bulk_apply(lambda f: f.update(tag=tag.strip()))
+
+    def bulk_column(self, col: int):
+        frases = self.store.phrases
+        movidas = [dict(frases[i], col=col) for i in sorted(self.checked) if i < len(frases)]
+        quedan = [f for i, f in enumerate(frases) if i not in self.checked]
+        self.checked.clear()
+        self.store.set_phrases(quedan + movidas)        # al final de su columna nueva
+
+    def bulk_delete(self):
+        n = len(self.checked)
+        if QMessageBox.question(self, APP_NAME, "Delete %d phrase%s?" % (n, "" if n == 1 else "s")) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        frases = [f for i, f in enumerate(self.store.phrases) if i not in self.checked]
+        self.checked.clear()
+        if self.edit_idx is not None:
+            self.cancel_edit()
+        self.store.set_phrases(frases)
+
+    # --- bancos -------------------------------------------------------------
+    def new_bank(self):
+        nombre, ok = QInputDialog.getText(self, "New bank", "Name of the new bank:")
+        if ok and nombre.strip():
+            self.checked.clear()
+            self.store.add_bank(nombre)
+
+    def rename_bank(self):
+        nombre, ok = QInputDialog.getText(self, "Rename bank", "New name:",
+                                          QLineEdit.EchoMode.Normal, self.store.name)
+        if ok:
+            self.store.rename(nombre)
+
+    def delete_bank(self):
+        n = len(self.store.phrases)
+        if QMessageBox.question(
+                self, APP_NAME, "Delete the bank “%s” and its %d phrase%s?\n"
+                "Export it first if you may want it back." % (self.store.name, n, "" if n == 1 else "s")) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self.checked.clear()
+        self.store.delete_bank()
+
+    def import_bank(self):
+        ruta, _ = QFileDialog.getOpenFileName(self, "Import phrases",
+                                              getattr(self.host, "export_dir", "") or str(Path.home()),
+                                              "Phrases (*.json)")
+        if ruta:
+            self.import_file(ruta)
+
+    def import_file(self, ruta: str, reemplazar: bool | None = None) -> bool:
+        """reemplazar: None pregunta si ya hay un banco con ese nombre."""
+        try:
+            crudo = json.loads(Path(ruta).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            QMessageBox.warning(self, APP_NAME, "Could not read that file:\n%s" % e)
+            return False
+        if isinstance(crudo, dict) and "banks" in crudo:      # una exportacion de DriloBoard
+            crudo = (crudo["banks"] or [{}])[0].get("phrases")
+        elif isinstance(crudo, dict):
+            crudo = crudo.get("phrases")
+        frases = clean_phrases(crudo)
+        if not frases:
+            QMessageBox.warning(self, APP_NAME, "There are no phrases in that file.")
+            return False
+        nombre = bank_name_from_file(ruta)
+        ya = self.store.index_of(nombre)
+        if ya is not None and reemplazar is None:
+            caja = QMessageBox(self)
+            caja.setWindowTitle(APP_NAME)
+            caja.setText("You already have a bank called “%s”." % self.store.names()[ya])
+            b_rep = caja.addButton("Replace it", QMessageBox.ButtonRole.DestructiveRole)
+            b_new = caja.addButton("Keep both", QMessageBox.ButtonRole.AcceptRole)
+            caja.addButton(QMessageBox.StandardButton.Cancel)
+            caja.exec()
+            if caja.clickedButton() not in (b_rep, b_new):
+                return False
+            reemplazar = caja.clickedButton() is b_rep
+        self.checked.clear()
+        if ya is not None and reemplazar:
+            self.store.current = ya
+            self.store.set_phrases(frases)
+        else:
+            self.store.add_bank(nombre, frases)
+        self.say("%d phrases in the bank “%s”." % (len(frases), self.store.name))
+        return True
+
+    def export_bank(self):
+        nombre = safe_file_name("feedback3000_%s" % self.store.name)
+        ruta, _ = QFileDialog.getSaveFileName(
+            self, "Export phrases", os.path.join(getattr(self.host, "export_dir", "")
+                                                 or str(Path.home()), nombre + ".json"),
+            "Phrases (*.json)")
+        if not ruta:
+            return
+        if not ruta.lower().endswith(".json"):
+            ruta += ".json"
+        try:
+            Path(ruta).write_text(json.dumps(self.store.phrases, ensure_ascii=False, indent=1),
+                                  encoding="utf-8")
+        except OSError as e:
+            QMessageBox.warning(self, APP_NAME, "Could not save:\n%s" % e)
+            return
+        self.say("Bank saved to %s" % ruta)
+
+
+class BankWindow(QWidget):
+    """El banco en su propia ventana, para dejarla al lado (o en otra pantalla)."""
+
+    def __init__(self, host):
+        super().__init__(None, Qt.WindowType.Window)
+        self.host = host
+        self.setWindowTitle("Comment bank — %s" % APP_NAME)
+        self.setWindowIcon(app_icon())
+        self.resize(640, 760)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.bank = CommentBank(host.bank_store, host, host.active_note_editor, self)
+        lay.addWidget(self.bank, 1)
+        fila = QHBoxLayout()
+        fila.setContentsMargins(8, 0, 8, 8)
+        self.chk_top = QCheckBox("Keep on top")
+        self.chk_top.setToolTip("Keep this window above DriloBoard and other windows")
+        self.chk_top.toggled.connect(self.set_on_top)
+        fila.addWidget(self.chk_top)
+        fila.addStretch(1)
+        lay.addLayout(fila)
+        SK.bind(self, "bank", self.close)
+
+    def set_on_top(self, si: bool):
+        if bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint) == si:
+            return
+        visible = self.isVisible()
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, si)
+        if visible:
+            self.show()
+        self.host.touch()
+
+    def closeEvent(self, e):
+        if not getattr(self.host, "_closing", False):
+            self.host.touch()
+        super().closeEvent(e)
 
 
 class PreviewPane(QWidget):
@@ -4822,6 +5809,11 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
         p.drawLine(m, M, M, M)
         p.drawLine(m, M, M - 2, m + 1)
         p.drawArc(QRectF(m - 7, M - 7, 14, 14), 0, 60 * 16)
+    elif kind == "bank":                        # un mazo de tarjetas con texto
+        p.drawRoundedRect(QRectF(m + 3, m, M - m - 3, M - m - 5), 2, 2)
+        p.drawPolyline([QPointF(m, m + 3), QPointF(m, M), QPointF(M - 3, M)])
+        p.drawLine(QPointF(m + 6, m + 4), QPointF(M - 3, m + 4))
+        p.drawLine(QPointF(m + 6, m + 7.5), QPointF(M - 5, m + 7.5))
     elif kind == "select":                      # el puntero del raton
         p.setBrush(tinta)
         p.drawPolygon([QPointF(m + 2, m), QPointF(m + 2, M - 2), QPointF(m + 6, M - 6),
@@ -6523,6 +7515,18 @@ for images, GIFs and videos alike.</li>
 grade box; <b>Tab</b> goes on to the comment. They are saved as you type.
 <i>Copy comment</i> puts its text on the clipboard. Drag the little handle under
 the comment box to make it taller or shorter (double-click it for the usual size).</li>
+<li><b>Comment bank</b> (<i>Phrases</i> under the comment, <b>[[bank]]</b>, or
+<i>View ▸ Comment bank</i>): your ready-made phrases, as in Feedback 3000, in two
+columns of coloured cards with a title and a category. <b>Click a card</b> and its text
+goes into the comment where the cursor is; a <b>{}</b> in a phrase asks you for that piece
+of data (a shot number, a date) when you use it. <i>Paragraph</i> starts a new paragraph.
+Filter each column by category or search it; drag cards to reorder them or to move them
+to the other column; the pencil edits a card, the bin deletes it, and ticking several
+lets you recolour, recategorise, move or delete them at once. Keep several banks (one per
+language, per subject) and <b>Import</b> / <b>Export</b> them as .json — the files of
+Feedback 3000 open as they are. The bank opens in its own window (tick <i>Keep on
+top</i> to keep it in sight); in the large viewer it opens at the right of the image.
+It writes into the comment you clicked last.</li>
 <li>The grade shows on the thumbnail, red below 5, amber up to 7, green from
 there; a speech bubble means there is a comment. Hover over the thumbnail to
 read it. The preview and the large window show both under the image.</li>
@@ -6825,7 +7829,13 @@ class ImageViewer(QDialog):
         self.pane = PreviewPane(self, max_side=0, with_button=False)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.pane)
+        # el banco de frases va dentro: esta ventana no deja usar las demas
+        self.split = QSplitter(Qt.Orientation.Horizontal)
+        self.split.addWidget(self.pane)
+        self.split.setCollapsible(0, False)
+        lay.addWidget(self.split)
+        self.bank: CommentBank | None = None
+        self.host = parent
         # las ediciones tambien: sin esto la ventana grande ensenaba el archivo
         # tal cual, sin recortes, giros ni dibujos, al contrario que la vista previa
         if hasattr(parent, "edit_of"):
@@ -6841,6 +7851,8 @@ class ImageViewer(QDialog):
                 parent.touch()
             self.pane.on_notes_toggled = recordar
             SK.bind(self, "note", self.pane.open_notes)
+            if hasattr(parent, "bank_store"):
+                SK.bind(self, "bank", self.toggle_bank)
         # los fotogramas clave son de la biblioteca: se leen y se guardan en la
         # ventana principal, y Ctrl+Z los deshace tambien desde aqui
         if hasattr(parent, "marks_of"):
@@ -6864,6 +7876,25 @@ class ImageViewer(QDialog):
             self.pane.compare(compare_pair[0], compare_pair[1], opacity)
         else:
             self.load()
+
+    def toggle_bank(self):
+        """Muestra u oculta el banco de frases a la derecha de la imagen."""
+        if self.bank is None:
+            if not hasattr(self.host, "bank_store"):
+                return
+            self.bank = CommentBank(self.host.bank_store, self.host,
+                                    lambda: self.pane.notes_box, self)
+            self.bank.say = self.pane.flash
+            self.split.addWidget(self.bank)
+            ancho = self.width()
+            if ancho < 1300 and not self.isFullScreen() and not self.isMaximized():
+                self.resize(ancho + 520, self.height())
+                ancho += 520
+            self.split.setSizes([max(400, ancho - 540), 540])
+            QTimer.singleShot(60, self.pane.fit)
+            return
+        self.bank.setVisible(not self.bank.isVisible())
+        QTimer.singleShot(60, self.pane.fit)
 
     def _toggle_full(self):
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
@@ -6984,6 +8015,10 @@ class MainWindow(QMainWindow):
         self.notes: dict[str, dict] = {}             # ruta -> {grade, comment}
         self.note_editors: list = []                 # los editores de notas abiertos
         self.note_heights = dict(NOTE_HEIGHTS)       # alto de la caja del comentario
+        self.bank_store = PhraseBank(BANK_FILE)      # frases hechas para comentar
+        self.bank_window: BankWindow | None = None
+        self._bank_state: dict = {}
+        self._active_note = None                     # el editor de nota que tocaste ultimo
         self.show_notes = True                       # verlas u ocultarlas (Ctrl+G)
         self.preview_notes = True                    # barra de nota bajo la vista previa
         self.viewer_notes = True                     # y en la ventana grande
@@ -7406,6 +8441,55 @@ class MainWindow(QMainWindow):
     def sync_note_panel(self, *_):
         """El panel sigue al archivo elegido en la rejilla."""
         self.note_editor.set_path(self.note_target())
+
+    def note_focused(self, editor):
+        self._active_note = editor
+
+    def active_note_editor(self):
+        """Donde escribe el banco: el editor de nota que tocaste ultimo."""
+        ed = self._active_note
+        if ed is not None and ed in self.live_note_editors() \
+                and not isinstance(ed.window(), ImageViewer):
+            return ed
+        return self.note_editor
+
+    def toggle_bank(self, editor=None):
+        """El boton Phrases: en la ventana grande abre su panel; si no, la ventana."""
+        ventana = editor.window() if editor is not None else QApplication.activeWindow()
+        if isinstance(ventana, ImageViewer):
+            ventana.toggle_bank()
+            return
+        if editor is not None:
+            self._active_note = editor
+        if self.bank_window is not None and self.bank_window.isVisible():
+            self.bank_window.close()
+        else:
+            self.show_bank()
+
+    def show_bank(self):
+        if self.bank_window is None:
+            self.bank_window = BankWindow(self)
+            st = self._bank_state
+            g = st.get("geometry")
+            if isinstance(g, list) and len(g) == 4:
+                self.bank_window.setGeometry(*g)
+            else:                                    # al lado de la ventana principal
+                geo = self.frameGeometry()
+                self.bank_window.move(max(0, geo.right() - self.bank_window.width() - 40),
+                                      geo.top() + 60)
+            self.bank_window.chk_top.setChecked(bool(st.get("on_top")))
+        self.bank_window.show()
+        self.bank_window.raise_()
+        self.bank_window.activateWindow()
+        self.touch()
+
+    def bank_state(self) -> dict:
+        w = self.bank_window
+        if w is None:
+            return dict(self._bank_state, visible=False) if self._bank_state else {}
+        g = w.geometry()
+        return {"visible": w.isVisible(), "geometry": [g.x(), g.y(), g.width(), g.height()],
+                "on_top": w.chk_top.isChecked()}
 
     def note_height(self, compact: bool) -> int:
         return getattr(self, "note_heights", NOTE_HEIGHTS)[bool(compact)]
@@ -8243,6 +9327,8 @@ class MainWindow(QMainWindow):
         SK.bind_action(self.act_notes, "show_notes")
         self._sync_notes_tip()
         SK.listeners.append(self._sync_notes_tip)
+        a = v.addAction("Comment bank (phrases)…", self.toggle_bank)
+        SK.bind_action(a, "bank")
         self.act_blind = v.addAction("Blind marking (hide file names)")
         self.act_blind.setCheckable(True)
         self.act_blind.setChecked(_blind)
@@ -8916,6 +10002,7 @@ class MainWindow(QMainWindow):
             "viewer_notes": self.viewer_notes,
             "note_height": self.note_heights[False],
             "note_height_compact": self.note_heights[True],
+            "bank_window": self.bank_state(),
         }
         try:
             tmp = STATE_FILE.with_suffix(".tmp")
@@ -8952,6 +10039,10 @@ class MainWindow(QMainWindow):
         self.chk_names.setChecked(bool(data.get("show_names", True)))
         self.set_blind(bool(data.get("blind", False)))
         self.viewer_notes = bool(data.get("viewer_notes", True))
+        if isinstance(data.get("bank_window"), dict):
+            self._bank_state = data["bank_window"]
+            if self._bank_state.get("visible"):
+                QTimer.singleShot(300, self.show_bank)
         for compacta, clave in ((False, "note_height"), (True, "note_height_compact")):
             h = data.get(clave)
             if isinstance(h, (int, float)):
@@ -8986,9 +10077,13 @@ class MainWindow(QMainWindow):
             self.setGeometry(x, y, ancho, alto)
 
     def closeEvent(self, e):
+        self._closing = True
         self.commit_note()
         self._save_timer.stop()
         self.save_state()
+        if self.bank_window is not None:        # se queda apuntado si estaba abierta
+            self.bank_window.close()
+            self.bank_window.deleteLater()
         self.preview.stop_video()
         self.preview.stop_gif()
         if self.model.videos is not None:

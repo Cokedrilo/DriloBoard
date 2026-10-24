@@ -7,7 +7,15 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
-Novedades de la 1.9:
+Novedades de la 1.9.1:
+
+  - Banco de frases: avisa en la propia ventana de lo que ha hecho (donde
+    puso la frase, o por que no pudo) y el doble clic la pone una sola vez.
+  - Casilla "Time" arriba, junto a "Grades", para encender el tiempo.
+  - Si algo falla por dentro, queda apuntado en errores.log, junto a la
+    biblioteca.
+
+De la 1.9:
 
   - Tiempo de correccion, por archivo y por alumno (View > Track marking
     time; viene apagado). Empieza al hacer clic o doble clic en un archivo y

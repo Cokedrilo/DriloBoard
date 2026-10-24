@@ -71,7 +71,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 
 
 def app_dir() -> Path:
@@ -3418,9 +3418,16 @@ class BankList(QListWidget):
         super().mousePressEvent(e)
 
     def mouseDoubleClickEvent(self, e):
-        # dos clics seguidos (la casilla y luego el lapiz, o dos frases) son dos
-        # clics, no un doble clic: si no, el segundo se perdia
-        self.mousePressEvent(e)
+        """En la casilla o el lapiz, el segundo clic seguido cuenta como clic
+        (si no, se perdia). En la frase, doble clic la pone una sola vez."""
+        pos = e.position().toPoint()
+        idx = self.indexAt(pos)
+        if idx.isValid() and self.delegate.zone_at(self.visualRect(idx), pos):
+            self.mousePressEvent(e)
+            return
+        self._press = None                  # el soltar de este clic no inserta otra vez
+        self._zone = None
+        e.accept()
 
     def mouseReleaseEvent(self, e):
         pos = e.position().toPoint()
@@ -3464,7 +3471,7 @@ class CommentBank(QWidget):
         self.target = target
         self.checked: set[int] = set()
         self.edit_idx: int | None = None
-        self.say = lambda t: host.statusBar().showMessage(t, 4000)
+        self.say = self.tell
 
         raiz = QVBoxLayout(self)
         raiz.setContentsMargins(8, 8, 8, 8)
@@ -3634,6 +3641,15 @@ class CommentBank(QWidget):
         themed(self.lbl_target, css="color:%(dim)s; font-size:11px;")
         abajo.addWidget(self.lbl_target, 1)
         raiz.addLayout(abajo)
+        # lo que acaba de pasar, aqui mismo: la ventana del banco tapa la barra
+        # de estado de la principal, y alli no se veia
+        self.lbl_msg = QLabel()
+        self.lbl_msg.setWordWrap(True)
+        self.lbl_msg.hide()
+        raiz.addWidget(self.lbl_msg)
+        self._msg_timer = QTimer(self)
+        self._msg_timer.setSingleShot(True)
+        self._msg_timer.timeout.connect(self.lbl_msg.hide)
 
         self._mostrando_edicion(False)
         self.store.changed.connect(self.rebuild)
@@ -3652,6 +3668,15 @@ class CommentBank(QWidget):
         for clave, nombre, bg, _b in BANK_COLORS:
             c.addItem(swatch_icon(bg), nombre, clave)
         return c
+
+    def tell(self, texto: str, ok: bool = False):
+        """Un aviso en el propio banco: verde si salio bien, ambar si no."""
+        color = "#16a34a" if ok else "#d97706"
+        self.lbl_msg.setStyleSheet("QLabel{color:white; background:%s; border-radius:6px; "
+                                   "padding:5px 8px; font-weight:600;}" % color)
+        self.lbl_msg.setText(texto)
+        self.lbl_msg.show()
+        self._msg_timer.start(4000 if ok else 7000)
 
     def _mostrando_edicion(self, si: bool):
         self.b_update.setVisible(si)
@@ -3747,10 +3772,12 @@ class CommentBank(QWidget):
     def _target_ready(self):
         ed = self._editor()
         if ed is None or not ed.path:
-            self.say("Choose a file first: the phrase goes into its comment.")
+            self.tell("Choose a file first (click its thumbnail): the phrase goes into its "
+                      "comment.")
             return None
         if not getattr(self.host, "show_notes", True):
-            self.say("Grades and comments are hidden: %s shows them." % SK.text("show_notes"))
+            self.tell("Grades and comments are hidden: tick Grades (or %s) to see them."
+                      % SK.text("show_notes"))
             return None
         pane = getattr(ed, "pane", None)
         if ed.isHidden() and pane is not None and hasattr(pane, "b_notes"):
@@ -3774,13 +3801,17 @@ class CommentBank(QWidget):
         texto = fill_blanks(f["texto"] or f["plano"], pedir)
         if texto is None:
             return
-        ed.insert_text(texto)
+        if ed.insert_text(texto):
+            self.tell("\u2713 Added to the comment of %s" % (shown_name(ed.path) or "this file"),
+                      ok=True)
+        else:
+            self.tell("Could not add it: choose a file first.")
         self.refresh_target()
 
     def insert_paragraph(self):
         ed = self._target_ready()
-        if ed is not None:
-            ed.insert_paragraph()
+        if ed is not None and ed.insert_paragraph():
+            self.tell("\u2713 New paragraph", ok=True)
 
     # --- editar el banco ----------------------------------------------------
     def _form(self) -> dict | None:
@@ -3996,7 +4027,7 @@ class CommentBank(QWidget):
             self.store.set_phrases(frases)
         else:
             self.store.add_bank(nombre, frases)
-        self.say("%d phrases in the bank “%s”." % (len(frases), self.store.name))
+        self.tell("✓ %d phrases in the bank “%s”." % (len(frases), self.store.name), ok=True)
         return True
 
     def export_bank(self):
@@ -7939,7 +7970,7 @@ the comment box to make it taller or shorter (double-click it for the usual size
 <li><b>Comment bank</b> (<i>Phrases</i> under the comment, <b>[[bank]]</b>, or
 <i>View ▸ Comment bank</i>): your ready-made phrases, as in Feedback 3000, in two
 columns of coloured cards with a title and a category. <b>Click a card</b> and its text
-goes into the comment where the cursor is; a <b>{}</b> in a phrase asks you for that piece
+goes into the comment where the cursor is (a double click puts it in once; the bank says where it went); a <b>{}</b> in a phrase asks you for that piece
 of data (a shot number, a date) when you use it. <i>Paragraph</i> starts a new paragraph.
 Filter each column by category or search it; drag cards to reorder them or to move them
 to the other column; the pencil edits a card, the bin deletes it, and ticking several
@@ -7948,7 +7979,7 @@ language, per subject) and <b>Import</b> / <b>Export</b> them as .json — the f
 Feedback 3000 open as they are. The bank opens in its own window (tick <i>Keep on
 top</i> to keep it in sight); in the large viewer it opens at the right of the image.
 It writes into the comment you clicked last.</li>
-<li><b>Marking time</b> (<i>View ▸ Track marking time</i>, off until you turn it on):
+<li><b>Marking time</b> (tick <b>Time</b> at the top, or <i>View ▸ Track marking time</i>; off until you turn it on):
 it starts counting when you <b>click or double-click a file</b>, follows you when you move
 to another one (arrows, the large viewer) and <b>stops after 2 minutes without touching
 anything</b> — what counts is up to the last thing you touched. The timer at the bottom
@@ -8320,7 +8351,6 @@ class ImageViewer(QDialog):
                 return
             self.bank = CommentBank(self.host.bank_store, self.host,
                                     lambda: self.pane.notes_box, self)
-            self.bank.say = self.pane.flash
             self.split.addWidget(self.bank)
             ancho = self.width()
             if ancho < 1300 and not self.isFullScreen() and not self.isMaximized():
@@ -8609,6 +8639,14 @@ class MainWindow(QMainWindow):
         self.chk_notes.setChecked(True)
         self.chk_notes.toggled.connect(self.set_show_notes)
         bar.addWidget(self.chk_notes)
+
+        self.chk_time = QCheckBox("Time")
+        self.chk_time.setToolTip("Count the marking time of each file and student: it starts "
+                                 "when you click a file and stops after %d minutes without "
+                                 "touching anything. Library \u25b8 Marking time\u2026 shows the "
+                                 "record." % (IDLE_SECONDS // 60))
+        self.chk_time.toggled.connect(self.set_track_time)
+        bar.addWidget(self.chk_time)
 
         bar.addWidget(QLabel("Size"))
         self.slider = QSlider(Qt.Orientation.Horizontal)
@@ -8902,8 +8940,9 @@ class MainWindow(QMainWindow):
                     "Marking time on: click a file to start. It stops after %d minutes "
                     "without touching anything." % (IDLE_SECONDS // 60), 6000)
             self.touch()
-        if hasattr(self, "act_track") and self.act_track.isChecked() != on:
-            self.act_track.setChecked(on)
+        for w in (getattr(self, "act_track", None), getattr(self, "chk_time", None)):
+            if w is not None and w.isChecked() != on:
+                w.setChecked(on)
 
     def set_show_timer(self, on: bool):
         self.show_timer = bool(on)
@@ -10679,7 +10718,30 @@ def selftest() -> int:
     return 0 if not fallos else 1
 
 
+ERROR_LOG = "errores.log"
+
+
+def log_errors(tipo, valor, tb):
+    """Un fallo por dentro no debe pasar en silencio: va a errores.log, junto a
+    la biblioteca, y la ventana avisa. Empaquetada, la app no tiene consola."""
+    import traceback
+    texto = "".join(traceback.format_exception(tipo, valor, tb))
+    if sys.__stderr__:
+        sys.__stderr__.write(texto)
+    try:
+        with open(DATA_DIR / ERROR_LOG, "a", encoding="utf-8") as f:
+            f.write("--- %s  DriloBoard %s\n%s\n" % (
+                datetime.datetime.now().isoformat(timespec="seconds"), VERSION, texto))
+    except OSError:
+        pass
+    for w in QApplication.topLevelWidgets():
+        if isinstance(w, MainWindow):
+            w.statusBar().showMessage("Something went wrong inside DriloBoard: the details "
+                                      "are in %s, next to the library." % ERROR_LOG, 10000)
+
+
 def main():
+    sys.excepthook = log_errors
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(VERSION)

@@ -145,7 +145,8 @@ if win.preview.notes_box is not None:
 # sin archivo elegido no se escribe
 win.note_editor.set_path(None)
 bank.insert_phrase(1)
-assert "Choose a file" in win.statusBar().currentMessage()
+assert "Choose a file" in bank.lbl_msg.text() and bank.lbl_msg.isVisibleTo(bank), \
+    "el aviso sale en el propio banco"
 win.note_editor.set_path(ana)
 # con un clic de raton sobre la tarjeta
 lst = bank.lists[2]
@@ -153,10 +154,19 @@ rect = lst.visualItemRect(lst.item(0))
 antes = win.note_editor.txt.toPlainText()
 QTest.mouseClick(lst.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
 assert win.note_editor.txt.toPlainText() == antes + " Muy buen ejercicio :) ", "el clic inserta"
+assert bank.lbl_msg.text().startswith("\u2713 Added to the comment of ana.png")
+# un doble clic de verdad (pulsar, soltar, doble, soltar) la pone una sola vez
+win.note_editor.txt.clear()
+for paso in ("press", "release", "dclick", "release"):
+    {"press": QTest.mousePress, "release": QTest.mouseRelease,
+     "dclick": QTest.mouseDClick}[paso](lst.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
+assert win.note_editor.txt.toPlainText() == "Muy buen ejercicio :) ", \
+    "doble clic = una frase: %r" % win.note_editor.txt.toPlainText()
+antes = win.note_editor.txt.toPlainText()
 z = lst.delegate.zones(rect)
 QTest.mouseClick(lst.viewport(), Qt.MouseButton.LeftButton, pos=z["check"].center())
 assert bank.checked == {1} and bank.bulk.isVisibleTo(bank)
-assert win.note_editor.txt.toPlainText() == antes + " Muy buen ejercicio :) ", "la casilla no inserta"
+assert win.note_editor.txt.toPlainText() == antes, "la casilla no inserta"
 # la barra de "varias a la vez" encoge la lista: en Windows sale una barra de
 # desplazamiento con anchura y las tarjetas se estrechan. Se mide de nuevo
 app.processEvents()
@@ -284,5 +294,18 @@ assert win2.bank_window is not None and win2.bank_window.chk_top.isChecked()
 assert win2.bank_store.name == win.bank_store.name
 win2.close()
 print("   panel en la ventana grande, el boton Phrases y la ventana recordada ok")
+
+print("\n6. LOS FALLOS QUEDAN APUNTADOS")
+visor.DATA_DIR = TMP
+win3 = visor.MainWindow()
+try:
+    raise ValueError("fallo de prueba")
+except ValueError:
+    visor.log_errors(*sys.exc_info())
+log = (TMP / visor.ERROR_LOG).read_text(encoding="utf-8")
+assert "fallo de prueba" in log and "DriloBoard %s" % visor.VERSION in log
+assert visor.ERROR_LOG in win3.statusBar().currentMessage()
+win3.close()
+print("   errores.log y aviso en la ventana ok")
 
 print("\nBANCO OK")

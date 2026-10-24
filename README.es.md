@@ -21,7 +21,7 @@ botón *Export*.
 ## Arrancar
 
 **Versión portable (lo normal).** Descomprime
-`DriloBoard-1.9.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
+`DriloBoard-1.9.1-portable-win64.zip` donde quieras —disco, USB, carpeta de
 red— y ejecuta `DriloBoard.exe`. No instala nada ni escribe en el registro.
 La biblioteca y la caché de miniaturas se crean **dentro de esa misma
 carpeta**, así que copiándola te llevas también toda la clasificación.
@@ -30,7 +30,7 @@ La primera vez Windows puede avisar de que el origen es desconocido (el
 ejecutable no está firmado): *Más información* → *Ejecutar de todas formas*.
 
 **Versión portable para Mac.** Descomprime
-`DriloBoard-1.9.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
+`DriloBoard-1.9.1-portable-macos.zip`: sale una carpeta `DriloBoard` con
 `DriloBoard.app` dentro. Una sola app para Mac Intel y Apple Silicon, macOS 13
 Ventura o posterior. Igual que en Windows, la biblioteca y la caché se crean
 **en esa carpeta, junto a la app** (nunca dentro del `.app`), así que se puede
@@ -274,7 +274,8 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
 - **Banco de frases** (como Feedback 3000): botón *Phrases* bajo el comentario,
   `Ctrl+Shift+F` o *View ▸ Comment bank*. Tus frases hechas en dos columnas de
   tarjetas de color, con título y categoría. **Un clic en una tarjeta** y su
-  texto va al comentario, donde esté el cursor; si la frase lleva `{}`, te pide
+  texto va al comentario, donde esté el cursor (con doble clic, una sola vez; el
+  banco te dice abajo dónde la ha puesto, o por qué no); si la frase lleva `{}`, te pide
   el dato (un número de plano, una fecha) al usarla. *Paragraph* hace punto y
   aparte.
   - Cada columna se filtra por categoría o con el buscador. Las tarjetas se
@@ -289,8 +290,8 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
     la ventana grande sale a la derecha de la imagen. Escribe en el comentario
     que tocaste el último. Las frases se guardan en `frases.json`, junto a
     `biblioteca.json`.
-- **Tiempo de corrección** (*View ▸ Track marking time*; viene apagado y se
-  enciende y apaga ahí). Empieza a contar al hacer **clic o doble clic en un
+- **Tiempo de corrección**: casilla **Time** arriba, junto a *Grades* (o
+  *View ▸ Track marking time*). Viene apagado. Empieza a contar al hacer **clic o doble clic en un
   archivo**; si pasas a otro (con las flechas o en la ventana grande), el
   tiempo pasa a ese. **Tras 2 minutos sin tocar nada se para**, y cuenta solo
   hasta lo último que tocaste; al volver a tocar algo, sigue.

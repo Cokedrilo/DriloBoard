@@ -80,6 +80,11 @@ assert tr.path is None, "apagado no cuenta"
 win.set_track_time(True)
 tr.timer.stop()
 assert win.act_track.isChecked() and win.timer_chip.isVisible()
+assert win.chk_time.isChecked(), "la casilla Time de arriba va a la par"
+win.chk_time.setChecked(False)
+assert not tr.enabled and not win.act_track.isChecked()
+win.chk_time.setChecked(True)
+tr.timer.stop()
 
 tr.file_clicked(a1)
 reloj.pasa(30)

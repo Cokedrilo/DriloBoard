@@ -175,4 +175,72 @@ assert win2.pdf_before_after["labels"] == ["Original", "Corregida"]
 win2.close()
 print("   composicion lado a lado o apilada, rotulos, PDF, por alumno y se recuerda ok")
 
+print("\n6. GUIAS DE COMPOSICION")
+W, H = 300, 200
+tercios = visor.guide_path("tercios", W, H).boundingRect()
+assert tercios == visor.QRectF(0, 0, W, H)
+lienzo = QImage(W, H, QImage.Format.Format_RGB32)
+lienzo.fill(QColor("#ffffff"))
+guia = {"tipo": "guia", "regla": "tercios", "giro": 0, "color": "#000000", "grosor": 6,
+        "alpha": 255, "puntos": []}
+con = apply_edit(lienzo, dict(empty_edit(), draw=[guia]))
+assert gris(con, 100, 10) < 200 and gris(con, 200, 150) < 200 and gris(con, 50, 10) == 255, \
+    "las lineas caen en los tercios"
+assert gris(con, 10, 67) < 200 and gris(con, 10, 133) < 200
+assert gris(apply_edit(lienzo, dict(empty_edit(), draw=[dict(guia, oculto=True)])), 100, 10) == 255
+# sobre el encuadre final, aunque este recortado y girado
+rec = apply_edit(lienzo, dict(empty_edit(), crop=[0, 0, 150, 120], rot=90, draw=[guia]))
+assert (rec.width(), rec.height()) == (120, 150) and gris(rec, 40, 5) < 200 and gris(rec, 5, 50) < 200
+phi = apply_edit(lienzo, dict(empty_edit(), draw=[dict(guia, regla="phi")]))
+assert gris(phi, round(W * 0.382), 10) < 200 and gris(phi, 100, 10) == 255
+diag = apply_edit(lienzo, dict(empty_edit(), draw=[dict(guia, regla="diagonales")]))
+assert gris(diag, 150, 100) < 200 and gris(diag, 30, 20) < 200 and gris(diag, 150, 20) == 255
+# simetria dinamica: la reciproca desde (W,0) es perpendicular a la diagonal (0,0)-(W,H)
+arm = visor.guide_path("armadura", W, H)
+pie = visor._foot(QPointF(W, 0), QPointF(0, 0), QPointF(W, H))
+assert abs((pie.x() - W) * W + (pie.y() - 0) * H) < 1e-6, "perpendicular"
+assert arm.elementCount() == 12, "dos diagonales y cuatro reciprocas"
+tri = visor.guide_path("triangulos", W, H, 0)
+assert tri.elementCount() == 6
+# espiral: llena el encuadre, y cada giro la voltea
+esp = [visor.guide_path("espiral", W, H, g) for g in range(4)]
+for e in esp:
+    r = e.boundingRect()
+    assert r.width() > W * 0.98 and r.height() > H * 0.98, r
+inicio = [e.elementAt(0) for e in esp]
+assert inicio[0].x < W / 2 and inicio[1].x > W / 2, "volteada en horizontal"
+assert inicio[0].y > H / 2 and inicio[2].y < H / 2, "volteada en vertical"
+alta = visor.guide_path("espiral", 200, 300, 0).boundingRect()
+assert alta.width() > 196 and alta.height() > 294, "en vertical tambien llena"
+# en el editor
+dlg = visor.EditorDialog(str(TMP / "lienzo.png"), empty_edit())
+dlg.show()
+app.processEvents()
+dlg.on_color(QColor("#fcd116"))
+dlg.add_guide("espiral", 3)
+g = dlg.edit["draw"][-1]
+assert g["tipo"] == "guia" and g["regla"] == "espiral" and g["giro"] == 3 and g["color"] == "#fcd116"
+assert dlg.layers.item(0).text() == "Golden spiral" and not dlg.sld_hard.isEnabled()
+assert dlg.shape_at(dlg.screen_transform().map(QPointF(200, 150)), interior=True) is None
+menu = dlg.b_guides.menu()
+assert [a.text() for a in menu.actions()][:3] == ["Rule of thirds", "Centre", "Diagonals"]
+dlg.sld_opacity.setValue(40)
+assert dlg.edit["draw"][-1]["opacidad"] == 40
+dlg.undo()
+dlg.undo()
+assert dlg.edit["draw"] == []
+dlg.reject()
+print("   tercios, phi, diagonales, simetria dinamica, triangulos, espiral y en el editor ok")
+
+print("\n7. ROTULOS ORIGINAL / EDITED")
+assert visor.BEFORE_AFTER_LABELS == ("Original", "Edited")
+datos = json.loads(visor.STATE_FILE.read_text(encoding="utf-8"))
+datos["pdf_before_after"] = {"on": True, "labels": ["Original", "Corrected"]}
+visor.STATE_FILE.write_text(json.dumps(datos), encoding="utf-8")
+win4 = visor.MainWindow()
+assert win4.pdf_before_after == {"on": True, "labels": ["Original", "Edited"]}, \
+    "los rotulos de la 1.11.0 pasan a los nuevos"
+win4.close()
+print("   por defecto y los guardados de antes ok")
+
 print("\nTRAZO OK")

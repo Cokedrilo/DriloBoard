@@ -71,7 +71,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.11.0"
+VERSION = "1.12.0"
 
 
 def app_dir() -> Path:
@@ -793,7 +793,7 @@ def soft_layer(forma: dict, t: QTransform, area: QRect):
 
 
 def paint_shape(p: QPainter, forma: dict):
-    if forma.get("tipo") in ("difuminar", "solido") or forma.get("oculto"):
+    if forma.get("tipo") in ("difuminar", "solido", "guia") or forma.get("oculto"):
         return                               # difuminar y el color de fondo, aparte
     color = QColor(forma.get("color", "#e6542f"))
     color.setAlpha(shape_alpha(forma))
@@ -842,6 +842,143 @@ def blur_regions(img: QImage, formas: list, t: QTransform) -> QImage:
     return img
 
 
+# --------------------------------------------------------------------------- #
+#  Guias de composicion: se dibujan sobre el encuadre final (lo que se ve),
+#  se ajustan a su proporcion y son una capa mas (ojo, color, opacidad).
+# --------------------------------------------------------------------------- #
+PHI = (1 + 5 ** 0.5) / 2
+GUIDES = (("tercios", "Rule of thirds"), ("centro", "Centre"), ("diagonales", "Diagonals"),
+          ("phi", "Golden ratio grid"), ("armadura", "Dynamic symmetry"),
+          ("triangulos", "Golden triangles"), ("espiral", "Golden spiral"))
+GUIDE_NAMES = dict(GUIDES)
+
+
+def _ray_to_border(p: QPointF, d: QPointF, W: float, H: float) -> QPointF:
+    """Desde p (dentro o en el borde) en la direccion d, hasta el borde."""
+    ts = []
+    if abs(d.x()) > 1e-9:
+        ts += [(0 - p.x()) / d.x(), (W - p.x()) / d.x()]
+    if abs(d.y()) > 1e-9:
+        ts += [(0 - p.y()) / d.y(), (H - p.y()) / d.y()]
+    t = min((t for t in ts if t > 1e-6), default=0)
+    return QPointF(p.x() + d.x() * t, p.y() + d.y() * t)
+
+
+def _foot(p: QPointF, a: QPointF, b: QPointF) -> QPointF:
+    """El pie de la perpendicular desde p a la recta ab."""
+    dx, dy = b.x() - a.x(), b.y() - a.y()
+    t = ((p.x() - a.x()) * dx + (p.y() - a.y()) * dy) / (dx * dx + dy * dy or 1)
+    return QPointF(a.x() + dx * t, a.y() + dy * t)
+
+
+def golden_spiral(W: float, H: float, giro: int = 0, vueltas: int = 10) -> QPainterPath:
+    """La espiral aurea y sus cuadrados, estirada al encuadre. giro 0-3 la
+    voltea en horizontal (bit 1) y en vertical (bit 2)."""
+    vertical = H > W
+    w, h = (PHI, 1.0)
+    x, y = 0.0, 0.0
+    curva, cortes = [], []
+
+    def cuarto(c, a, b):
+        a0 = math.atan2(a[1] - c[1], a[0] - c[0])
+        a1 = math.atan2(b[1] - c[1], b[0] - c[0])
+        da = (a1 - a0 + math.pi) % (2 * math.pi) - math.pi
+        r = math.hypot(a[0] - c[0], a[1] - c[1])
+        return [(c[0] + r * math.cos(a0 + da * i / 16), c[1] + r * math.sin(a0 + da * i / 16))
+                for i in range(17)]
+    for k in range(vueltas):
+        lado = min(w, h)
+        if k % 4 == 0:              # cuadrado a la izquierda
+            curva += cuarto((x + lado, y + lado), (x, y + lado), (x + lado, y))
+            cortes.append(((x + lado, y), (x + lado, y + h)))
+            x, w = x + lado, w - lado
+        elif k % 4 == 1:            # arriba
+            curva += cuarto((x, y + lado), (x, y), (x + lado, y + lado))
+            cortes.append(((x, y + lado), (x + w, y + lado)))
+            y, h = y + lado, h - lado
+        elif k % 4 == 2:            # a la derecha
+            curva += cuarto((x + w - lado, y), (x + w, y), (x + w - lado, y + lado))
+            cortes.append(((x + w - lado, y), (x + w - lado, y + h)))
+            w = w - lado
+        else:                       # abajo
+            curva += cuarto((x + lado, y + h - lado), (x + lado, y + h), (x, y + h - lado))
+            cortes.append(((x, y + h - lado), (x + w, y + h - lado)))
+            h = h - lado
+
+    def mapa(pt):
+        u, v = pt[0] / PHI, pt[1]               # 0-1 en los dos ejes
+        if vertical:
+            u, v = v, u                         # en vertical, la espiral se tumba
+        if giro & 1:
+            u = 1 - u
+        if giro & 2:
+            v = 1 - v
+        return QPointF(u * W, v * H)
+    path = QPainterPath()
+    path.moveTo(mapa(curva[0]))
+    for pt in curva[1:]:
+        path.lineTo(mapa(pt))
+    for a, b in cortes:
+        path.moveTo(mapa(a))
+        path.lineTo(mapa(b))
+    return path
+
+
+def guide_path(regla: str, W: float, H: float, giro: int = 0) -> QPainterPath:
+    path = QPainterPath()
+
+    def linea(a: QPointF, b: QPointF):
+        path.moveTo(a)
+        path.lineTo(b)
+    esq = [QPointF(0, 0), QPointF(W, 0), QPointF(W, H), QPointF(0, H)]
+    if regla in ("tercios", "phi"):
+        cortes = (1 / 3, 2 / 3) if regla == "tercios" else (1 - 1 / PHI, 1 / PHI)
+        for f in cortes:
+            linea(QPointF(W * f, 0), QPointF(W * f, H))
+            linea(QPointF(0, H * f), QPointF(W, H * f))
+    elif regla == "centro":
+        linea(QPointF(W / 2, 0), QPointF(W / 2, H))
+        linea(QPointF(0, H / 2), QPointF(W, H / 2))
+        r = min(W, H) * 0.04
+        path.addEllipse(QPointF(W / 2, H / 2), r, r)
+    elif regla == "diagonales":
+        linea(esq[0], esq[2])
+        linea(esq[1], esq[3])
+    elif regla == "armadura":
+        # las dos diagonales y, desde cada esquina, la reciproca: perpendicular
+        # a la diagonal que no pasa por ella, hasta el lado de enfrente
+        linea(esq[0], esq[2])
+        linea(esq[1], esq[3])
+        for desde, a, b in ((esq[1], esq[0], esq[2]), (esq[3], esq[0], esq[2]),
+                            (esq[0], esq[1], esq[3]), (esq[2], esq[1], esq[3])):
+            pie = _foot(desde, a, b)
+            d = QPointF(pie.x() - desde.x(), pie.y() - desde.y())
+            linea(desde, _ray_to_border(desde, d, W, H))
+    elif regla == "triangulos":
+        a, b = (esq[0], esq[2]) if giro % 2 == 0 else (esq[1], esq[3])
+        linea(a, b)
+        for desde in [e for e in esq if e not in (a, b)]:
+            linea(desde, _foot(desde, a, b))
+    elif regla == "espiral":
+        return golden_spiral(W, H, giro)
+    return path
+
+
+def paint_guide(p: QPainter, forma: dict, W: int, H: int):
+    """La guia sobre lo que se ve; el grosor va con el tamano de la imagen."""
+    c = QColor(forma.get("color", "#ffffff"))
+    c.setAlpha(shape_alpha(forma))
+    pen = QPen(c, max(1.5, min(W, H) * 0.0035 * float(forma.get("grosor", 6)) / 6))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawPath(guide_path(forma.get("regla", "tercios"), W, H, int(forma.get("giro", 0))))
+    p.restore()
+
+
 def draw_annotations(img: QImage, edit: dict | None, src_w: int, src_h: int) -> QImage:
     formas = (edit or {}).get("draw") or []
     if not formas or img.isNull():
@@ -860,7 +997,11 @@ def draw_annotations(img: QImage, edit: dict | None, src_w: int, src_h: int) -> 
     for forma in formas:
         if forma.get("oculto"):
             continue
-        if forma.get("tipo") == "solido":       # una capa de color: toda la imagen
+        if forma.get("tipo") == "guia":         # guia de composicion: sobre lo que se ve
+            p.resetTransform()
+            paint_guide(p, forma, img.width(), img.height())
+            p.setTransform(t)
+        elif forma.get("tipo") == "solido":     # una capa de color: toda la imagen
             c = QColor(forma.get("color", "#ffffff"))
             c.setAlpha(shape_alpha(forma))
             p.resetTransform()
@@ -1447,7 +1588,8 @@ def pdf_page_image(path: str, edit: dict | None, lado: int = PDF_IMG_MAX) -> QIm
     return fondo
 
 
-BEFORE_AFTER_LABELS = ("Original", "Corrected")
+BEFORE_AFTER_LABELS = ("Original", "Edited")
+OLD_BEFORE_AFTER_LABELS = ["Original", "Corrected"]      # los de la 1.11.0
 
 
 def before_after_image(antes: QImage, despues: QImage, rotulos=BEFORE_AFTER_LABELS) -> QImage:
@@ -6633,6 +6775,11 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
         p.drawLine(m, M, M, M)
         p.drawLine(m, M, M - 2, m + 1)
         p.drawArc(QRectF(m - 7, M - 7, 14, 14), 0, 60 * 16)
+    elif kind == "guides":                      # tercios y una diagonal
+        p.drawRect(QRectF(m, m, M - m, M - m))
+        for f in (1 / 3, 2 / 3):
+            p.drawLine(QPointF(m + (M - m) * f, m), QPointF(m + (M - m) * f, M))
+            p.drawLine(QPointF(m, m + (M - m) * f), QPointF(M, m + (M - m) * f))
     elif kind == "fill":                        # una capa de color entera
         relleno = QColor(tinta)
         relleno.setAlpha(110)
@@ -6686,16 +6833,19 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
 # --------------------------------------------------------------------------- #
 LAYER_NAMES = {"trazo": "Pen", "rotulador": "Highlighter", "linea": "Line",
                "flecha": "Arrow", "rect": "Rectangle", "elipse": "Ellipse",
-               "texto": "Text", "difuminar": "Blur area", "solido": "Colour layer"}
+               "texto": "Text", "difuminar": "Blur area", "solido": "Colour layer",
+               "guia": "Guide"}
 LAYER_ICONS = {"trazo": "pencil", "rotulador": "marker", "linea": "line", "flecha": "arrow",
                "rect": "rect", "elipse": "ellipse", "texto": "text", "difuminar": "blurarea",
-               "solido": "fill"}
+               "solido": "fill", "guia": "guides"}
 LAYER_ROLE = Qt.ItemDataRole.UserRole + 7
 EYE_WIDTH = 22                      # el ojo de cada capa: un clic ahi la oculta o muestra
 
 
 def shape_label(forma: dict) -> str:
     nombre = LAYER_NAMES.get(forma.get("tipo"), "Drawing")
+    if forma.get("tipo") == "guia":
+        nombre = GUIDE_NAMES.get(forma.get("regla"), "Guide")
     if forma.get("tipo") == "texto":
         linea = (forma.get("texto") or "").split("\n")[0].strip()
         if len(linea) > 22:
@@ -6704,7 +6854,8 @@ def shape_label(forma: dict) -> str:
     op = shape_opacity(forma)
     du = shape_hardness(forma)
     return nombre + ("  \u00b7  %d %%" % op if op < 100 else "") + \
-        ("  \u00b7  soft %d" % (100 - du) if du < 100 and forma.get("tipo") != "solido" else "")
+        ("  \u00b7  soft %d" % (100 - du) if du < 100 and forma.get("tipo") not in ("solido", "guia")
+         else "")
 
 
 def text_font(forma: dict) -> QFont:
@@ -7300,6 +7451,29 @@ class EditorDialog(QDialog):
                                "to draw on top of it. Change its opacity in Layers")
         self.b_fill.clicked.connect(self.add_colour_layer)
         dibujo.addWidget(self.b_fill)
+        self.b_guides = QToolButton()
+        self.b_guides.setText("  Composition")
+        themed(self.b_guides, icon="guides")
+        self.b_guides.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.b_guides.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.b_guides.setToolTip("Add a composition guide over the frame, as a layer: hide it, "
+                                 "recolour it or change its opacity in Layers. It goes into "
+                                 "exports and PDFs while it is visible")
+        menu = QMenu(self.b_guides)
+        for clave, nombre in GUIDES:
+            if clave == "espiral":
+                sub = menu.addMenu(nombre)
+                for giro, txt in ((0, "Ends bottom right \u2198"), (1, "Ends bottom left \u2199"),
+                                  (2, "Ends top right \u2197"), (3, "Ends top left \u2196")):
+                    sub.addAction(txt, lambda c=clave, g=giro: self.add_guide(c, g))
+            elif clave == "triangulos":
+                sub = menu.addMenu(nombre)
+                sub.addAction("Diagonal \u2198", lambda c=clave: self.add_guide(c, 0))
+                sub.addAction("Diagonal \u2199", lambda c=clave: self.add_guide(c, 1))
+            else:
+                menu.addAction(nombre, lambda c=clave: self.add_guide(c))
+        self.b_guides.setMenu(menu)
+        dibujo.addWidget(self.b_guides)
         self.b_undraw = QPushButton("  Clear drawings")
         themed(self.b_undraw, icon="eraser")
         self.b_undraw.clicked.connect(self.clear_drawings)
@@ -7810,6 +7984,18 @@ class EditorDialog(QDialog):
         fila.addWidget(lbl)
         return sld, lbl
 
+    def add_guide(self, regla: str, giro: int = 0):
+        """Una guia de composicion encima de todo, del color y grosor elegidos."""
+        guia = {"tipo": "guia", "regla": regla, "giro": int(giro),
+                "color": self.view.color.name(), "grosor": self.sld_width.value(),
+                "alpha": 255, "puntos": []}
+        op = self.sld_tool_op.value()
+        if op < 100:
+            guia["opacidad"] = op
+        formas = self.formas() + [guia]
+        self.sel = len(formas) - 1
+        self._set_formas(formas, "add a composition guide")
+
     def add_colour_layer(self):
         """Una capa de color encima de todo, transparente, para dibujar sobre ella."""
         op = self.sld_tool_op.value()
@@ -8018,7 +8204,7 @@ class EditorDialog(QDialog):
         n = len(self.formas())
         for w in (self.sld_opacity, self.lbl_op_title, self.lbl_opacity, self.b_del_layer):
             w.setEnabled(hay)
-        con_borde = hay and f.get("tipo") not in ("solido", "difuminar")
+        con_borde = hay and f.get("tipo") not in ("solido", "difuminar", "guia")
         for w in (self.sld_hard, self.lbl_hard_title, self.lbl_hard):
             w.setEnabled(con_borde)
         self.b_raise.setEnabled(hay and self.sel < n - 1)
@@ -8169,7 +8355,7 @@ class EditorDialog(QDialog):
     def _on_hard(self, v: int):
         self.lbl_hard.setText("%d" % v)
         f = self.selected_shape()
-        if f is None or shape_hardness(f) == v or f.get("tipo") in ("solido", "difuminar"):
+        if f is None or shape_hardness(f) == v or f.get("tipo") in ("solido", "difuminar", "guia"):
             return
         if self.sld_hard.isSliderDown():
             formas = self.formas()
@@ -8562,6 +8748,11 @@ click a colour to recolour the selected one, double-click a text to change it.</
 <li><b>Opacity</b> and <b>Hardness</b>, next to <i>Size</i>, set the next stroke: a lower
 hardness softens its edge like an airbrush (the centre stays solid). The Layers panel
 changes both for the selected drawing.</li>
+<li><b>Composition</b> adds a guide over the final frame — rule of thirds, centre,
+diagonals, golden ratio grid, dynamic symmetry, golden triangles or the golden spiral
+(four ways round) — fitted to its proportions. It is a layer: hide it, recolour it,
+change its opacity or delete it in Layers; while visible it also goes into exports and
+PDFs, so the student sees it.</li>
 <li><b>Colour layer</b> covers the image with the chosen colour, half see-through, as a
 layer: draw on top of it to make your marks stand out, and set its opacity (or hide it)
 in Layers.</li>
@@ -8588,7 +8779,7 @@ resolution into the folder you choose. Existing files are never overwritten.</li
 puts the selected images, edits applied, in a PDF. Tick what goes under each
 image: the <b>file name</b>, the <b>grade</b> and the <b>comments</b>. Tick <b>The original
 next to the edited one</b> and every edited file shows both, with a label above each
-(write your own, e.g. <i>Original</i> / <i>Corregida</i>), so the student sees the change.</li>
+(<i>Original</i> / <i>Edited</i>, or write your own), so the student sees the change.</li>
 <li><i>Export…</i> ▸ <i>One PDF per folder</i> (also in the right-click menu and in
 <b>Library</b>) makes <b>one PDF for each student</b>: choose the class folder, with a
 subfolder per student, and every subfolder becomes <i>Name of the folder.pdf</i>, with
@@ -11167,8 +11358,10 @@ class MainWindow(QMainWindow):
         self.viewer_notes = bool(data.get("viewer_notes", True))
         ba = data.get("pdf_before_after")
         if isinstance(ba, dict) and isinstance(ba.get("labels"), list) and len(ba["labels"]) == 2:
-            self.pdf_before_after = {"on": bool(ba.get("on")),
-                                     "labels": [str(x) for x in ba["labels"]]}
+            rotulos = [str(x) for x in ba["labels"]]
+            if rotulos == OLD_BEFORE_AFTER_LABELS:          # el de antes pasa al nuevo
+                rotulos = list(BEFORE_AFTER_LABELS)
+            self.pdf_before_after = {"on": bool(ba.get("on")), "labels": rotulos}
         self.times = clean_times(data.get("times"))
         self.set_show_timer(bool(data.get("show_timer", True)))
         self.set_track_time(bool(data.get("track_time", False)))

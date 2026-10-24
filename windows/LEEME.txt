@@ -7,7 +7,16 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
-Novedades de la 1.11:
+Novedades de la 1.12:
+
+  - Guias de composicion en el editor (boton "Composition"): tercios,
+    centro, diagonales, rejilla aurea, simetria dinamica, triangulos aureos
+    y espiral aurea en cuatro orientaciones. Van sobre el encuadre final y
+    son una capa mas (ojo, color, opacidad); visibles, salen tambien al
+    exportar y en el PDF.
+  - Los rotulos del PDF con la original al lado son ahora Original / Edited.
+
+De la 1.11:
 
   - Doble clic en una imagen: se abre el editor (videos y GIF, la ventana
     grande; esta sigue en "Open large").

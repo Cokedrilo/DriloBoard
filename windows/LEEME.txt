@@ -7,7 +7,16 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
-Novedades de la 1.8:
+Novedades de la 1.9:
+
+  - Tiempo de correccion, por archivo y por alumno (View > Track marking
+    time; viene apagado). Empieza al hacer clic o doble clic en un archivo y
+    se para tras 2 minutos sin tocar nada. El reloj de abajo se pliega en un
+    icono (Ctrl+Shift+T) y sigue contando. Library > Marking time: el
+    registro por alumno y archivo, con total, media y lo de hoy; sumar o
+    quitar minutos, borrar y exportar a CSV.
+
+De la 1.8:
 
   - Banco de frases para los comentarios, como Feedback 3000: boton "Phrases"
     bajo el comentario, Ctrl+Shift+F o View > Comment bank. Dos columnas de

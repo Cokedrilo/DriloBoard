@@ -21,7 +21,7 @@ botón *Export*.
 ## Arrancar
 
 **Versión portable (lo normal).** Descomprime
-`DriloBoard-1.8.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
+`DriloBoard-1.9.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
 red— y ejecuta `DriloBoard.exe`. No instala nada ni escribe en el registro.
 La biblioteca y la caché de miniaturas se crean **dentro de esa misma
 carpeta**, así que copiándola te llevas también toda la clasificación.
@@ -30,7 +30,7 @@ La primera vez Windows puede avisar de que el origen es desconocido (el
 ejecutable no está firmado): *Más información* → *Ejecutar de todas formas*.
 
 **Versión portable para Mac.** Descomprime
-`DriloBoard-1.8.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
+`DriloBoard-1.9.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
 `DriloBoard.app` dentro. Una sola app para Mac Intel y Apple Silicon, macOS 13
 Ventura o posterior. Igual que en Windows, la biblioteca y la caché se crean
 **en esa carpeta, junto a la app** (nunca dentro del `.app`), así que se puede
@@ -288,6 +288,21 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   - Se abre en su propia ventana (con *Keep on top* no se esconde detrás); en
     la ventana grande sale a la derecha de la imagen. Escribe en el comentario
     que tocaste el último. Las frases se guardan en `frases.json`, junto a
+    `biblioteca.json`.
+- **Tiempo de corrección** (*View ▸ Track marking time*; viene apagado y se
+  enciende y apaga ahí). Empieza a contar al hacer **clic o doble clic en un
+  archivo**; si pasas a otro (con las flechas o en la ventana grande), el
+  tiempo pasa a ese. **Tras 2 minutos sin tocar nada se para**, y cuenta solo
+  hasta lo último que tocaste; al volver a tocar algo, sigue.
+  - Abajo, el reloj: alumno (la carpeta), este archivo y el total del alumno.
+    `⏸` lo pausa hasta el siguiente clic en un archivo. Un clic en `⏱` (o
+    `Ctrl+Shift+T`, o *View ▸ Show the timer*) lo pliega en un icono para que
+    no distraiga: sigue contando, con el punto rojo mientras cuenta.
+  - *Library ▸ Marking time…*: el registro por alumno y por archivo, con el
+    total, la media por alumno y lo de hoy. Puedes sumar o quitar minutos a
+    un archivo (lo corregido en papel), borrar tiempos y exportarlo a **CSV**
+    (una fila por archivo y el total de cada alumno, con las horas en
+    decimal para sumarlas en la hoja de cálculo). Se guarda en
     `biblioteca.json`.
 - Sin nota se ve una raya: baja con la flecha por debajo de 0, o *Clear*, que
   borra nota y comentario.

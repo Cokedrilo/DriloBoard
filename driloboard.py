@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from collections import OrderedDict, deque
 from pathlib import Path
@@ -70,7 +71,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 
 
 def app_dir() -> Path:
@@ -207,6 +208,7 @@ SHORTCUT_DEFS = [
     ("show_notes", "Show / hide grades and comments", "Ctrl+G"),
     ("blind", "Blind marking: hide / show file names", "Ctrl+B"),
     ("bank", "Show / hide the comment bank (phrases)", "Ctrl+Shift+F"),
+    ("timer", "Show / hide the marking timer", "Ctrl+Shift+T"),
     ("before", "Before / after (hold to see the original)", "Z"),
     ("refresh", "Refresh folders", "F5"),
     ("theme", "Switch dark / light theme", "Ctrl+T"),
@@ -4054,6 +4056,419 @@ class BankWindow(QWidget):
         super().closeEvent(e)
 
 
+# --------------------------------------------------------------------------- #
+#  Tiempo de correccion
+#
+#  Al hacer clic (o doble clic) en un archivo empieza a contar para el; si
+#  pasas a otro, el tiempo pasa a ese. Tras IDLE_SECONDS sin tocar nada se
+#  para, y lo que cuenta es hasta lo ultimo que tocaste. Se guarda por archivo
+#  (en biblioteca.json, "times": ruta -> [[inicio, segundos], ...]); el alumno
+#  es la carpeta, la misma que usa el PDF por alumno.
+# --------------------------------------------------------------------------- #
+IDLE_SECONDS = 120
+TIME_MERGE_GAP = 5                      # dos tramos seguidos se juntan en uno
+TIME_FLUSH = 60                         # cada tanto se guarda lo que va contando
+
+
+def format_clock(s: float) -> str:
+    s = max(0, int(round(s)))
+    h, resto = divmod(s, 3600)
+    m, seg = divmod(resto, 60)
+    return "%d:%02d:%02d" % (h, m, seg) if h else "%02d:%02d" % (m, seg)
+
+
+def format_hours(s: float) -> str:
+    s = max(0, int(round(s)))
+    h, resto = divmod(s, 3600)
+    m = resto // 60
+    if h:
+        return "%d h %02d min" % (h, m)
+    return "%d min" % m if m else "%d s" % s
+
+
+def clean_times(crudo) -> dict[str, list[list[int]]]:
+    out = {}
+    for p, tramos in (crudo.items() if isinstance(crudo, dict) else []):
+        buenos = []
+        for t in tramos if isinstance(tramos, list) else []:
+            if isinstance(t, (list, tuple)) and len(t) == 2 and \
+                    all(isinstance(x, (int, float)) for x in t):
+                buenos.append([int(t[0]), int(t[1])])
+        if buenos:
+            out[p] = buenos
+    return out
+
+
+def time_total(tramos) -> int:
+    return max(0, sum(s for _t, s in tramos or []))
+
+
+def add_time(times: dict, path: str, inicio: float, segundos: float):
+    """Apunta un tramo; si empieza donde acabo el anterior, lo alarga."""
+    tramos = times.setdefault(path, [])
+    if segundos > 0 and tramos and tramos[-1][1] > 0 and \
+            abs(tramos[-1][0] + tramos[-1][1] - inicio) <= TIME_MERGE_GAP:
+        tramos[-1][1] = int(round(inicio + segundos - tramos[-1][0]))
+    else:
+        tramos.append([int(inicio), int(round(segundos))])
+
+
+class TimeTracker(QObject):
+    """El cronometro: sabe que archivo se esta corrigiendo y desde cuando."""
+    changed = Signal()
+
+    def __init__(self, host, clock=None):
+        super().__init__(host)
+        self.host = host
+        self.clock = clock or time.time
+        self.enabled = False
+        self.path: str | None = None        # el archivo al que va el tiempo
+        self.start: float | None = None     # desde cuando cuenta (None: parado)
+        self.last = 0.0                     # lo ultimo que tocaste
+        self.timer = QTimer(self)
+        self.timer.setInterval(1000)
+        self.timer.timeout.connect(self.tick)
+
+    @property
+    def counting(self) -> bool:
+        return self.start is not None
+
+    def set_enabled(self, on: bool):
+        if not on:
+            self.stop()
+        self.enabled = bool(on)
+        self.timer.start() if on else self.timer.stop()
+        self.changed.emit()
+
+    def file_clicked(self, path: str | None):
+        """Clic o doble clic en un archivo: empieza (o sigue) a contar para el."""
+        if not self.enabled or not path:
+            return
+        ahora = self.clock()
+        if path != self.path:
+            self._close(ahora)
+            self.path = path
+        if self.start is None:
+            self.start = ahora
+        self.last = ahora
+        self.changed.emit()
+
+    def follow(self, path: str | None):
+        """Otro archivo sin clic (flechas, ventana grande): solo si ya se cuenta."""
+        if self.enabled and self.path is not None and path and path != self.path:
+            self.file_clicked(path)
+
+    def activity(self):
+        """Tocaste algo: si estaba parado por inactividad, vuelve a contar."""
+        if not self.enabled or self.path is None:
+            return
+        ahora = self.clock()
+        if self.start is None:
+            self.start = ahora
+            self.changed.emit()
+        self.last = ahora
+
+    def tick(self):
+        if self.start is not None:
+            ahora = self.clock()
+            if ahora - self.last > IDLE_SECONDS:
+                self._close(self.last)          # lo que pasaste sin tocar nada, fuera
+            elif ahora - self.start >= TIME_FLUSH:
+                self._close(ahora)              # se guarda a ratos, por si se cierra mal
+                self.start = ahora
+        self.changed.emit()
+
+    def _close(self, fin: float):
+        if self.start is None or self.path is None:
+            self.start = None
+            return
+        segundos = fin - self.start
+        self.start = None
+        if segundos >= 1:
+            add_time(self.host.times, self.path, fin - segundos, segundos)
+            self.host.touch()
+
+    def stop(self):
+        """Pausa: no vuelve a contar hasta el siguiente clic en un archivo."""
+        self._close(self.clock())
+        self.path = None
+        self.changed.emit()
+
+    def flush(self):
+        if self.start is not None:
+            ahora = self.clock()
+            self._close(min(ahora, self.last + IDLE_SECONDS))
+            self.start = ahora
+
+    def live(self) -> float:
+        return (self.clock() - self.start) if self.start is not None else 0.0
+
+    def seconds(self, path: str) -> float:
+        extra = self.live() if path == self.path else 0.0
+        return time_total(self.host.times.get(path)) + extra
+
+
+class ActivityFilter(QObject):
+    """Cualquier clic, tecla o rueda en DriloBoard cuenta como 'sigo aqui'."""
+    TIPOS = {QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick,
+             QEvent.Type.KeyPress, QEvent.Type.Wheel, QEvent.Type.MouseMove}
+
+    def __init__(self, tracker: TimeTracker):
+        super().__init__(tracker)
+        self.tracker = tracker
+        self._ultimo = 0.0
+
+    def eventFilter(self, obj, e):
+        if e.type() in self.TIPOS:
+            ahora = self.tracker.clock()
+            if ahora - self._ultimo > 0.5:      # mover el raton no lo llama mil veces
+                self._ultimo = ahora
+                self.tracker.activity()
+        return False
+
+
+class TimerChip(QWidget):
+    """El reloj: alumno, este archivo y el total del alumno. Se puede plegar
+    a un icono (sigue contando) para que no distraiga."""
+
+    def __init__(self, host, parent=None):
+        super().__init__(parent)
+        self.host = host
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(4, 0, 4, 0)
+        lay.setSpacing(4)
+        self.b_show = QToolButton()
+        self.b_show.setAutoRaise(True)
+        self.b_show.clicked.connect(lambda: host.set_show_timer(not host.show_timer))
+        lay.addWidget(self.b_show)
+        self.lbl = QLabel()
+        self.lbl.setTextFormat(Qt.TextFormat.RichText)
+        lay.addWidget(self.lbl)
+        self.b_stop = QToolButton()
+        self.b_stop.setAutoRaise(True)
+        self.b_stop.setText("⏸")
+        self.b_stop.setToolTip("Pause: it starts again when you click a file")
+        self.b_stop.clicked.connect(host.tracker.stop)
+        lay.addWidget(self.b_stop)
+        host.tracker.changed.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self):
+        try:
+            self.isVisible()
+        except RuntimeError:
+            return
+        t = self.host.tracker
+        self.setVisible(t.enabled)
+        if not t.enabled:
+            return
+        punto = "#e5484d" if t.counting else theme_color("dim")
+        self.b_show.setText("⏱")
+        self.b_show.setToolTip(("Counting" if t.counting else "Paused")
+                               + " — click to %s the timer (%s)"
+                               % ("hide" if self.host.show_timer else "show",
+                                  SK.text("timer")))
+        self.b_show.setStyleSheet("QToolButton{color:%s; font-size:14px;}" % punto)
+        abierto = self.host.show_timer
+        self.lbl.setVisible(abierto)
+        self.b_stop.setVisible(abierto and t.counting)
+        if not abierto:
+            return
+        if t.path is None:
+            self.lbl.setText("<span style='color:%s'>Paused — click a file to start</span>"
+                             % theme_color("dim"))
+            return
+        carpeta = self.host.student_of(t.path)
+        alumno = "Student" if _blind else os.path.basename(carpeta)
+        estado = "" if t.counting else " <span style='color:%s'>(paused)</span>" % theme_color("dim")
+        self.lbl.setText("<b>%s</b> &nbsp;·&nbsp; file %s &nbsp;·&nbsp; student %s%s" % (
+            html.escape(alumno), format_clock(t.seconds(t.path)),
+            format_clock(self.host.student_seconds(carpeta)), estado))
+
+
+class TimeReport(QDialog):
+    """El registro: tiempo por alumno y por archivo, para revisarlo y llevarlo
+    a una hoja de calculo."""
+    COLS = ("Student / file", "Time", "Sessions", "Last")
+
+    def __init__(self, host):
+        super().__init__(host)
+        self.host = host
+        self.setWindowTitle("Marking time")
+        self.resize(760, 560)
+        lay = QVBoxLayout(self)
+        arriba = QHBoxLayout()
+        self.chk_view = QCheckBox("Only the files in the grid")
+        self.chk_view.setToolTip("Leave it unticked to see every file you have timed")
+        self.chk_view.toggled.connect(self.rebuild)
+        arriba.addWidget(self.chk_view)
+        arriba.addStretch(1)
+        self.lbl_sum = QLabel()
+        arriba.addWidget(self.lbl_sum)
+        lay.addLayout(arriba)
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(len(self.COLS))
+        self.tree.setHeaderLabels(list(self.COLS))
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(self.tree, 1)
+        botones = QHBoxLayout()
+        b_add = QPushButton("Add / take off time…")
+        b_add.setToolTip("Correct the time of the selected file: minutes to add "
+                         "(negative to take off), for example marking done on paper")
+        b_add.clicked.connect(self.adjust)
+        b_del = QPushButton("Clear the time…")
+        themed(b_del, icon="trash")
+        b_del.setToolTip("Forget the time of the selected files or students")
+        b_del.clicked.connect(self.clear_selected)
+        b_csv = QPushButton("  Export CSV…")
+        themed(b_csv, std="SP_DialogSaveButton")
+        b_csv.clicked.connect(self.export_csv)
+        b_close = QPushButton("Close")
+        b_close.clicked.connect(self.accept)
+        for b in (b_add, b_del):
+            botones.addWidget(b)
+        botones.addStretch(1)
+        botones.addWidget(b_csv)
+        botones.addWidget(b_close)
+        lay.addLayout(botones)
+        self.rebuild()
+
+    def groups(self) -> list[tuple[str, list[str]]]:
+        self.host.tracker.flush()
+        paths = [p for p, t in self.host.times.items() if time_total(t) > 0]
+        if self.chk_view.isChecked():
+            vistos = set(self.host.model.paths())
+            paths = [p for p in paths if p in vistos]
+        paths.sort(key=lambda p: natural_key(p))
+        grupos = folder_groups(paths, self.host.folders or [])
+        return sorted(grupos, key=lambda g: natural_key(os.path.basename(g[0])))
+
+    def rebuild(self, *_):
+        self.tree.clear()
+        grupos = self.groups()
+        total = 0
+        hoy = datetime.date.today()
+        hoy_s = 0
+        for carpeta, ps in grupos:
+            alumno = QTreeWidgetItem([os.path.basename(carpeta)])
+            alumno.setData(0, Qt.ItemDataRole.UserRole, ("student", carpeta, ps))
+            f = alumno.font(0)
+            f.setBold(True)
+            alumno.setFont(0, f)
+            s_alumno, n_alumno, ultimo = 0, 0, 0
+            for p in ps:
+                tramos = self.host.times.get(p) or []
+                s = time_total(tramos)
+                fin = max((t + max(0, d) for t, d in tramos), default=0)
+                hoy_s += sum(max(0, d) for t, d in tramos
+                             if datetime.date.fromtimestamp(t) == hoy)
+                hijo = QTreeWidgetItem([shown_name(p) or "(name hidden)", format_clock(s),
+                                        str(len(tramos)), self._when(fin)])
+                hijo.setData(0, Qt.ItemDataRole.UserRole, ("file", p, [p]))
+                hijo.setToolTip(0, "" if _blind else p)
+                alumno.addChild(hijo)
+                s_alumno += s
+                n_alumno += len(tramos)
+                ultimo = max(ultimo, fin)
+            alumno.setText(1, format_clock(s_alumno))
+            alumno.setText(2, str(n_alumno))
+            alumno.setText(3, self._when(ultimo))
+            for c in (1, 2, 3):
+                alumno.setFont(c, f)
+            self.tree.addTopLevelItem(alumno)
+            total += s_alumno
+        self.tree.expandAll()
+        for c in (1, 2, 3):
+            self.tree.resizeColumnToContents(c)
+        n = len(grupos)
+        self.lbl_sum.setText("%d student%s  ·  total %s  ·  average %s  ·  today %s"
+                             % (n, "" if n == 1 else "s", format_hours(total),
+                                format_hours(total / n if n else 0), format_hours(hoy_s)))
+
+    @staticmethod
+    def _when(ts: float) -> str:
+        if not ts:
+            return ""
+        return datetime.datetime.fromtimestamp(ts).strftime("%d-%m-%Y %H:%M")
+
+    def _selected(self) -> list[str]:
+        out = []
+        for it in self.tree.selectedItems():
+            _k, _c, ps = it.data(0, Qt.ItemDataRole.UserRole)
+            out += [p for p in ps if p not in out]
+        return out
+
+    def adjust(self):
+        sel = [it for it in self.tree.selectedItems()
+               if it.data(0, Qt.ItemDataRole.UserRole)[0] == "file"]
+        if len(sel) != 1:
+            QMessageBox.information(self, APP_NAME, "Select one file (not a student) first.")
+            return
+        p = sel[0].data(0, Qt.ItemDataRole.UserRole)[1]
+        minutos, ok = QInputDialog.getInt(
+            self, "Add / take off time", "Minutes to add to %s\n(negative to take off):"
+            % (shown_name(p) or "this file"), 10, -6000, 6000)
+        if ok and minutos:
+            self.host.adjust_time(p, minutos * 60)
+            self.rebuild()
+
+    def clear_selected(self):
+        ps = self._selected()
+        if not ps:
+            return
+        if QMessageBox.question(self, APP_NAME, "Forget the time of %d file%s?"
+                                % (len(ps), "" if len(ps) == 1 else "s")) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self.host.clear_times(ps)
+        self.rebuild()
+
+    def rows(self) -> list[list]:
+        """Una fila por archivo, y despues el total de cada alumno."""
+        filas, totales = [], []
+        for carpeta, ps in self.groups():
+            alumno = os.path.basename(carpeta)
+            s_alumno = 0
+            for p in ps:
+                tramos = self.host.times.get(p) or []
+                s = time_total(tramos)
+                s_alumno += s
+                filas.append([alumno, os.path.basename(p), s, len(tramos),
+                              self._when(min((t for t, _d in tramos), default=0)),
+                              self._when(max((t + max(0, d) for t, d in tramos), default=0)), p])
+            totales.append([alumno, "TOTAL", s_alumno, sum(len(self.host.times.get(p) or [])
+                                                            for p in ps), "", "", carpeta])
+        return filas + totales
+
+    def write_csv(self, destino: str):
+        coma = QLocale().decimalPoint() == ","
+        with open(destino, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.writer(f, delimiter=";" if coma else ",")
+            w.writerow(["Student", "File", "Time", "Hours", "Sessions", "First", "Last", "Path"])
+            for alumno, archivo, s, n, primero, ultimo, ruta in self.rows():
+                horas = "%.2f" % (s / 3600)
+                w.writerow([alumno, archivo, format_clock(s),
+                            horas.replace(".", ",") if coma else horas, n, primero, ultimo, ruta])
+
+    def export_csv(self):
+        destino, _ = QFileDialog.getSaveFileName(
+            self, "Export marking time", os.path.join(self.host.export_dir or str(Path.home()),
+                                                      "Marking time.csv"), "CSV (*.csv)")
+        if not destino:
+            return
+        if not destino.lower().endswith(".csv"):
+            destino += ".csv"
+        try:
+            self.write_csv(destino)
+        except OSError as e:
+            QMessageBox.warning(self, APP_NAME, "Could not save:\n%s" % e)
+            return
+        self.host.export_dir = os.path.dirname(destino)
+        self.host.touch()
+
+
 class PreviewPane(QWidget):
     """Visor de una imagen. Se usa incrustado (abajo del centro) y en ventana.
 
@@ -4116,6 +4531,7 @@ class PreviewPane(QWidget):
         bar = QHBoxLayout()
         bar.setContentsMargins(0, 0, 0, 0)
         bar.addWidget(self.caption, 1)
+        self.bar = bar
         # nota y comentario de lo que se ve: la barra la pone attach_notes
         self.notes_box = None
         self.on_notes_toggled = lambda visible: None
@@ -7532,6 +7948,15 @@ language, per subject) and <b>Import</b> / <b>Export</b> them as .json — the f
 Feedback 3000 open as they are. The bank opens in its own window (tick <i>Keep on
 top</i> to keep it in sight); in the large viewer it opens at the right of the image.
 It writes into the comment you clicked last.</li>
+<li><b>Marking time</b> (<i>View ▸ Track marking time</i>, off until you turn it on):
+it starts counting when you <b>click or double-click a file</b>, follows you when you move
+to another one (arrows, the large viewer) and <b>stops after 2 minutes without touching
+anything</b> — what counts is up to the last thing you touched. The timer at the bottom
+shows the student (the folder), this file and the student's total; ⏸ pauses it until
+your next click on a file, and clicking ⏱ (or <b>[[timer]]</b>) folds it into a small
+icon that keeps counting (red dot while it counts). <b>Library ▸ Marking time…</b>
+lists the time per student and per file, with the total, the average per student and
+today's time; add or take off minutes, clear it, or export it as CSV.</li>
 <li>The grade shows on the thumbnail, red below 5, amber up to 7, green from
 there; a speech bubble means there is a comment. Hover over the thumbnail to
 read it. The preview and the large window show both under the image.</li>
@@ -7858,6 +8283,12 @@ class ImageViewer(QDialog):
             SK.bind(self, "note", self.pane.open_notes)
             if hasattr(parent, "bank_store"):
                 SK.bind(self, "bank", self.toggle_bank)
+        if hasattr(parent, "tracker"):
+            # el reloj tambien aqui (la ventana tapa la principal), y pasar de
+            # imagen pasa el tiempo a la nueva
+            self.timer_chip = TimerChip(parent, self)
+            self.pane.bar.insertWidget(1, self.timer_chip)
+            SK.bind(self, "timer", lambda: parent.set_show_timer(not parent.show_timer))
         # los fotogramas clave son de la biblioteca: se leen y se guardan en la
         # ventana principal, y Ctrl+Z los deshace tambien desde aqui
         if hasattr(parent, "marks_of"):
@@ -7918,6 +8349,8 @@ class ImageViewer(QDialog):
             self.pane.notes_box.detach()
             host = self.pane.notes_box.host
             host.note_editors = [e for e in host.note_editors if e is not self.pane.notes_box]
+        if hasattr(self.host, "tracker"):          # de vuelta, el tiempo al de la rejilla
+            self.host.tracker.follow(self.host.note_target())
         super().done(r)
 
     def step(self, d: int):
@@ -7930,6 +8363,8 @@ class ImageViewer(QDialog):
             return
         self.pane.prefix = "%d / %d   ·   " % (self.i + 1, len(self.paths))
         self.pane.show_path(self.paths[self.i], immediate=True)
+        if hasattr(self.host, "tracker"):
+            self.host.tracker.follow(self.paths[self.i])
 
 
 # --------------------------------------------------------------------------- #
@@ -8024,6 +8459,11 @@ class MainWindow(QMainWindow):
         self.bank_window: BankWindow | None = None
         self._bank_state: dict = {}
         self._active_note = None                     # el editor de nota que tocaste ultimo
+        self.times: dict[str, list] = {}             # ruta -> tramos de correccion
+        self.tracker = TimeTracker(self)             # el cronometro (apagado al empezar)
+        self.show_timer = True                       # el reloj abierto o plegado
+        self._activity = ActivityFilter(self.tracker)
+        QApplication.instance().installEventFilter(self._activity)
         self.show_notes = True                       # verlas u ocultarlas (Ctrl+G)
         self.preview_notes = True                    # barra de nota bajo la vista previa
         self.viewer_notes = True                     # y en la ventana grande
@@ -8199,10 +8639,15 @@ class MainWindow(QMainWindow):
         self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self.image_menu)
         self.view.doubleClicked.connect(self.open_viewer)
+        # el cronometro empieza con un clic o un doble clic en un archivo
+        self.view.clicked.connect(lambda i: self.tracker.file_clicked(i.data(PATH_ROLE)))
+        self.view.doubleClicked.connect(lambda i: self.tracker.file_clicked(i.data(PATH_ROLE)))
         themed(self.view, css="QListView{background:%(grid)s;} "
                            "QListView::item{color:%(grid_text)s;}")
         self.view.selectionModel().currentChanged.connect(self.on_current_image)
         self.view.selectionModel().currentChanged.connect(self.sync_note_panel)
+        self.view.selectionModel().currentChanged.connect(
+            lambda i, _a: self.tracker.follow(i.data(PATH_ROLE) if i.isValid() else None))
         self.view.selectionModel().selectionChanged.connect(self.on_selection_changed)
 
         self.preview = PreviewPane()
@@ -8446,6 +8891,52 @@ class MainWindow(QMainWindow):
     def sync_note_panel(self, *_):
         """El panel sigue al archivo elegido en la rejilla."""
         self.note_editor.set_path(self.note_target())
+
+    # ---------------- tiempo de correccion -------------------------------- #
+    def set_track_time(self, on: bool):
+        on = bool(on)
+        if on != self.tracker.enabled:
+            self.tracker.set_enabled(on)
+            if on:
+                self.statusBar().showMessage(
+                    "Marking time on: click a file to start. It stops after %d minutes "
+                    "without touching anything." % (IDLE_SECONDS // 60), 6000)
+            self.touch()
+        if hasattr(self, "act_track") and self.act_track.isChecked() != on:
+            self.act_track.setChecked(on)
+
+    def set_show_timer(self, on: bool):
+        self.show_timer = bool(on)
+        if hasattr(self, "act_timer") and self.act_timer.isChecked() != self.show_timer:
+            self.act_timer.setChecked(self.show_timer)
+        self.tracker.changed.emit()
+        self.touch()
+
+    def student_of(self, path: str) -> str:
+        """La carpeta del alumno de un archivo (la que cuelga de la de la clase)."""
+        return folder_groups([path], self.folders or [])[0][0]
+
+    def student_seconds(self, carpeta: str) -> float:
+        rutas = set(self.times) | ({self.tracker.path} if self.tracker.path else set())
+        return sum(self.tracker.seconds(p) for p in rutas if self.student_of(p) == carpeta)
+
+    def adjust_time(self, path: str, segundos: int):
+        """Suma (o quita) tiempo a mano; nunca deja el total por debajo de 0."""
+        actual = time_total(self.times.get(path))
+        segundos = max(-actual, int(segundos))
+        if segundos:
+            self.times.setdefault(path, []).append([int(time.time()), segundos])
+            self.touch()
+            self.tracker.changed.emit()
+
+    def clear_times(self, paths):
+        for p in paths:
+            self.times.pop(p, None)
+        self.touch()
+        self.tracker.changed.emit()
+
+    def show_time_report(self):
+        TimeReport(self).exec()
 
     def note_focused(self, editor):
         self._active_note = editor
@@ -9303,6 +9794,8 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         a = m.addAction("Export grades and comments…", self.export_notes)
         a.setToolTip("PDF, spreadsheet or Word with the grades and comments of the files in view")
+        a = m.addAction("Marking time…", self.show_time_report)
+        a.setToolTip("The time spent on each student and file, to review it or export it")
         a = m.addAction("One PDF per folder (per student)…", self.export_folders_pdf)
         a.setToolTip("A PDF for each student folder in view, named after the folder, "
                      "with the edits applied")
@@ -9332,6 +9825,19 @@ class MainWindow(QMainWindow):
         SK.bind_action(self.act_notes, "show_notes")
         self._sync_notes_tip()
         SK.listeners.append(self._sync_notes_tip)
+        v.addSeparator()
+        self.act_track = v.addAction("Track marking time")
+        self.act_track.setCheckable(True)
+        self.act_track.setToolTip("Count the time you spend on each file and student: it "
+                                  "starts when you click a file and stops after %d minutes "
+                                  "without touching anything" % (IDLE_SECONDS // 60))
+        self.act_track.toggled.connect(self.set_track_time)
+        self.act_timer = v.addAction("Show the timer")
+        self.act_timer.setCheckable(True)
+        self.act_timer.setChecked(True)
+        self.act_timer.toggled.connect(self.set_show_timer)
+        SK.bind_action(self.act_timer, "timer")
+        v.addSeparator()
         a = v.addAction("Comment bank (phrases)…", self.toggle_bank)
         SK.bind_action(a, "bank")
         self.act_blind = v.addAction("Blind marking (hide file names)")
@@ -9360,6 +9866,8 @@ class MainWindow(QMainWindow):
         self.b_help.setToolTip("How DriloBoard works (F1)")
         self.b_help.setFlat(True)
         self.b_help.clicked.connect(self.show_help)
+        self.timer_chip = TimerChip(self)
+        self.statusBar().addPermanentWidget(self.timer_chip)
         self.corner = QWidget()
         fila = QHBoxLayout(self.corner)
         fila.setContentsMargins(0, 0, 0, 0)
@@ -10008,6 +10516,9 @@ class MainWindow(QMainWindow):
             "note_height": self.note_heights[False],
             "note_height_compact": self.note_heights[True],
             "bank_window": self.bank_state(),
+            "track_time": self.tracker.enabled,
+            "show_timer": self.show_timer,
+            "times": self.times,
         }
         try:
             tmp = STATE_FILE.with_suffix(".tmp")
@@ -10044,6 +10555,9 @@ class MainWindow(QMainWindow):
         self.chk_names.setChecked(bool(data.get("show_names", True)))
         self.set_blind(bool(data.get("blind", False)))
         self.viewer_notes = bool(data.get("viewer_notes", True))
+        self.times = clean_times(data.get("times"))
+        self.set_show_timer(bool(data.get("show_timer", True)))
+        self.set_track_time(bool(data.get("track_time", False)))
         if isinstance(data.get("bank_window"), dict):
             self._bank_state = data["bank_window"]
             if self._bank_state.get("visible"):
@@ -10083,6 +10597,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         self._closing = True
+        self.tracker.flush()                    # lo que iba contando, apuntado
+        self.tracker.timer.stop()
         self.commit_note()
         self._save_timer.stop()
         self.save_state()

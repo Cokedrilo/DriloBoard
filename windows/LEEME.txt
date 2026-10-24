@@ -7,7 +7,13 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
-Novedades de la 1.14:
+Novedades de la 1.15:
+
+  - Un PDF por alumno: prefijo y sufijo para el nombre de cada PDF (por
+    ejemplo "Composicion - Ana Perez - Ej 1.pdf"), con vista previa. Se
+    recuerdan.
+
+De la 1.14:
 
   - Quitar archivos de DriloBoard sin borrarlos del disco: Supr (o boton
     derecho > Remove from DriloBoard). Ctrl+Z los trae, y en Library >

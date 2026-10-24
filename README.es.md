@@ -21,7 +21,7 @@ botón *Export*.
 ## Arrancar
 
 **Versión portable (lo normal).** Descomprime
-`DriloBoard-1.14.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
+`DriloBoard-1.15.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
 red— y ejecuta `DriloBoard.exe`. No instala nada ni escribe en el registro.
 La biblioteca y la caché de miniaturas se crean **dentro de esa misma
 carpeta**, así que copiándola te llevas también toda la clasificación.
@@ -30,7 +30,7 @@ La primera vez Windows puede avisar de que el origen es desconocido (el
 ejecutable no está firmado): *Más información* → *Ejecutar de todas formas*.
 
 **Versión portable para Mac.** Descomprime
-`DriloBoard-1.14.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
+`DriloBoard-1.15.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
 `DriloBoard.app` dentro. Una sola app para Mac Intel y Apple Silicon, macOS 13
 Ventura o posterior. Igual que en Windows, la biblioteca y la caché se crean
 **en esa carpeta, junto a la app** (nunca dentro del `.app`), así que se puede
@@ -506,7 +506,9 @@ después.
 - **Un PDF por alumno**: *Export…* ▸ *One PDF per folder (per student)*
   (también en el botón derecho y en *Library*). Elige la carpeta de la clase,
   con una subcarpeta por alumno: cada subcarpeta sale como
-  `Nombre de la carpeta.pdf`, con todo lo que tenga dentro (también lo que esté
+  `Nombre de la carpeta.pdf`. En el diálogo puedes poner un **prefijo** y un
+  **sufijo** al nombre del alumno, con vista previa (por ejemplo
+  `Composición - Ana Pérez - Ej 1.pdf`); se recuerdan. Lleva todo lo que tenga dentro (también lo que esté
   en carpetas más hondas, como `intento_1`). Si hay varias imágenes
   seleccionadas, solo van esas. Si ya existe alguno, pregunta antes de
   sustituirlo.

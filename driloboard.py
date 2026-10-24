@@ -71,7 +71,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.14.0"
+VERSION = "1.15.0"
 
 
 def app_dir() -> Path:
@@ -1866,12 +1866,12 @@ def folder_groups(paths: list[str], raices: list[str]) -> list[tuple[str, list[s
     return list(grupos.items())
 
 
-def folder_pdf_names(carpetas: list[str]) -> list[str]:
-    """El nombre de cada PDF: el de la carpeta, sin repetir."""
+def folder_pdf_names(carpetas: list[str], prefijo: str = "", sufijo: str = "") -> list[str]:
+    """El nombre de cada PDF: prefijo + el de la carpeta + sufijo, sin repetir."""
     usados: dict[str, int] = {}
     out = []
     for c in carpetas:
-        base = safe_file_name(os.path.basename(os.path.normpath(c)))
+        base = safe_file_name(prefijo + os.path.basename(os.path.normpath(c)) + sufijo)
         n = usados.get(base.lower(), 0) + 1
         usados[base.lower()] = n
         out.append(base if n == 1 else "%s (%d)" % (base, n))
@@ -9166,7 +9166,8 @@ next to the edited one</b> and every edited file shows both, with a label above 
 (<i>Original</i> / <i>Edited</i>, or write your own), so the student sees the change.</li>
 <li><i>Export…</i> ▸ <i>One PDF per folder</i> (also in the right-click menu and in
 <b>Library</b>) makes <b>one PDF for each student</b>: choose the class folder, with a
-subfolder per student, and every subfolder becomes <i>Name of the folder.pdf</i>, with
+subfolder per student, and every subfolder becomes <i>Name of the folder.pdf</i> (add a
+<b>prefix</b> and a <b>suffix</b> in the dialog, e.g. <i>Composition - Ana - Exercise 1.pdf</i>), with
 everything inside it (submissions in deeper folders included). With several images
 selected, only those go in.</li>
 <li><b>Library ▸ Export library…</b> saves the whole classification —
@@ -9565,6 +9566,7 @@ class MainWindow(QMainWindow):
         self.note_editors: list = []                 # los editores de notas abiertos
         self.note_heights = dict(NOTE_HEIGHTS)       # alto de la caja del comentario
         self.pdf_before_after = {"on": False, "labels": list(BEFORE_AFTER_LABELS)}
+        self.pdf_affixes = ["", ""]                  # prefijo y sufijo de los PDF por alumno
         self.removed: set[str] = set()               # quitados de DriloBoard (no del disco)
         self.bank_store = PhraseBank(BANK_FILE)      # frases hechas para comentar
         self.bank_window: BankWindow | None = None
@@ -10377,12 +10379,42 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
-    def pdf_options(self, titulo: str, texto: str, paths: list[str]):
-        """Que va debajo de cada imagen. None si se cancela."""
+    def pdf_options(self, titulo: str, texto: str, paths: list[str], ejemplo: str | None = None):
+        """Que va debajo de cada imagen. None si se cancela. Con 'ejemplo' (el
+        nombre de un alumno) pide tambien prefijo y sufijo para los nombres."""
         dlg = QDialog(self)
         dlg.setWindowTitle(titulo)
         lay = QVBoxLayout(dlg)
         lay.addWidget(QLabel(texto))
+        txt_pre = txt_suf = None
+        if ejemplo is not None:
+            caja = QFrame()
+            caja.setFrameShape(QFrame.Shape.StyledPanel)
+            cl = QVBoxLayout(caja)
+            cl.addWidget(QLabel("<b>Name of each PDF</b>"))
+            fila_n = QHBoxLayout()
+            txt_pre = QLineEdit(self.pdf_affixes[0])
+            txt_suf = QLineEdit(self.pdf_affixes[1])
+            txt_pre.setPlaceholderText("Prefix")
+            txt_suf.setPlaceholderText("Suffix")
+            txt_pre.setToolTip("Goes before the student's name, e.g. \u201cComposition - \u201d")
+            txt_suf.setToolTip("Goes after the student's name, e.g. \u201c - Exercise 1\u201d")
+            fila_n.addWidget(txt_pre, 1)
+            fila_n.addWidget(QLabel("+  <i>student</i>  +"))
+            fila_n.addWidget(txt_suf, 1)
+            cl.addLayout(fila_n)
+            vista = QLabel()
+            themed(vista, css="color:%(dim)s;")
+            vista.setTextFormat(Qt.TextFormat.PlainText)
+            cl.addWidget(vista)
+
+            def ver(*_):
+                vista.setText("e.g.  " + folder_pdf_names(
+                    [ejemplo], txt_pre.text(), txt_suf.text())[0] + ".pdf")
+            txt_pre.textChanged.connect(ver)
+            txt_suf.textChanged.connect(ver)
+            ver()
+            lay.addWidget(caja)
         chk_name = QCheckBox("File name")
         chk_grade = QCheckBox("Grade")
         chk_comment = QCheckBox("Comments")
@@ -10430,9 +10462,14 @@ class MainWindow(QMainWindow):
         if editadas:                            # se recuerda para la proxima vez
             self.pdf_before_after = {"on": chk_ba.isChecked(), "labels": list(rotulos)}
             self.touch()
-        return {"show_name": chk_name.isChecked(), "show_grade": chk_grade.isChecked(),
-                "show_comment": chk_comment.isChecked(),
-                "before_after": chk_ba.isChecked(), "labels": rotulos}
+        opciones = {"show_name": chk_name.isChecked(), "show_grade": chk_grade.isChecked(),
+                    "show_comment": chk_comment.isChecked(),
+                    "before_after": chk_ba.isChecked(), "labels": rotulos}
+        if txt_pre is not None:                 # el nombre de los PDF, y se recuerda
+            self.pdf_affixes = [txt_pre.text(), txt_suf.text()]
+            self.touch()
+            opciones["prefix"], opciones["suffix"] = self.pdf_affixes
+        return opciones
 
     def export_selected_pdf(self):
         """Las imagenes elegidas, con su edicion, a un PDF de una por pagina."""
@@ -10470,7 +10507,8 @@ class MainWindow(QMainWindow):
         if caja.clickedButton() is b_abrir:
             QDesktopServices.openUrl(QUrl.fromLocalFile(destino))
 
-    def folder_pdf_plan(self, paths: list[str] | None = None) -> list[tuple[str, str, list[str]]]:
+    def folder_pdf_plan(self, paths: list[str] | None = None, prefijo: str = "",
+                        sufijo: str = "") -> list[tuple[str, str, list[str]]]:
         """[(nombre del PDF, carpeta, imagenes)]: un PDF por alumno.
 
         Sin 'paths', todo lo que se ve en la rejilla (los videos no van)."""
@@ -10478,7 +10516,7 @@ class MainWindow(QMainWindow):
             paths = list(self.model.paths())
         paths = [p for p in paths if not is_video(p)]
         grupos = folder_groups(paths, self.selected_folders())
-        nombres = folder_pdf_names([c for c, _ in grupos])
+        nombres = folder_pdf_names([c for c, _ in grupos], prefijo, sufijo)
         return [(n, c, ps) for n, (c, ps) in zip(nombres, grupos)]
 
     def write_folder_pdfs(self, plan, carpeta: str, **opciones) -> list[str]:
@@ -10511,13 +10549,17 @@ class MainWindow(QMainWindow):
         muestra = ", ".join(n for n, _c, _p in plan[:4]) + (u", \u2026" if len(plan) > 4 else "")
         opciones = self.pdf_options(
             "One PDF per folder",
-            "%d PDF%s (%s), %d image%s in all.\nEach PDF takes the name of its folder."
+            "%d PDF%s (%s), %d image%s in all.\nEach PDF takes the name of its folder, "
+            "with the prefix and suffix you write below."
             % (len(plan), "" if len(plan) == 1 else "s", muestra, n_img,
                "" if n_img == 1 else "s")
             + ("\nOnly the selected images." if len(sel) > 1 else ""),
-            [p for _n, _c, ps in plan for p in ps])
+            [p for _n, _c, ps in plan for p in ps],
+            ejemplo=os.path.basename(os.path.normpath(plan[0][1])))
         if opciones is None:
             return
+        prefijo, sufijo = opciones.pop("prefix", ""), opciones.pop("suffix", "")
+        plan = self.folder_pdf_plan(sel if len(sel) > 1 else None, prefijo, sufijo)
         carpeta = QFileDialog.getExistingDirectory(
             self, "Where to save the PDFs", self.export_dir or str(Path.home()))
         if not carpeta:
@@ -11832,6 +11874,7 @@ class MainWindow(QMainWindow):
             "note_height_compact": self.note_heights[True],
             "bank_window": self.bank_state(),
             "pdf_before_after": self.pdf_before_after,
+            "pdf_name_affixes": self.pdf_affixes,
             "removed": sorted(self.removed),
             "track_time": self.tracker.enabled,
             "show_timer": self.show_timer,
@@ -11872,6 +11915,9 @@ class MainWindow(QMainWindow):
         self.chk_names.setChecked(bool(data.get("show_names", True)))
         self.set_blind(bool(data.get("blind", False)))
         self.viewer_notes = bool(data.get("viewer_notes", True))
+        af = data.get("pdf_name_affixes")
+        if isinstance(af, list) and len(af) == 2 and all(isinstance(x, str) for x in af):
+            self.pdf_affixes = list(af)
         quitados = data.get("removed")
         self.removed = {p for p in quitados if isinstance(p, str)} \
             if isinstance(quitados, list) else set()

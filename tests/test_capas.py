@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """1.7: capas del editor (como en DriloReview), un PDF por carpeta y la caja
 del comentario que cambia de alto."""
+import json
 import os
 import shutil
 import sys
@@ -269,7 +270,39 @@ assert sorted(os.path.basename(h) for h in hechos) == ["Ana Pérez.pdf", "Luis.p
 import re
 paginas = lambda n: len(re.findall(rb"/Type\s*/Page\b", (salida / n).read_bytes()))
 assert paginas("Ana Pérez.pdf") == 2 and paginas("Luis.pdf") == 1
-print("   agrupa por alumno, nombres sin repetir y escribe un PDF por carpeta")
+assert visor.folder_pdf_names(["/a/Ana"], "Comp - ", " - Ej1") == ["Comp - Ana - Ej1"]
+assert visor.folder_pdf_names(["/a/Ana", "/b/Ana"], "1/2 ", "") == ["1-2 Ana", "1-2 Ana (2)"]
+assert [n for n, _c, _p in win.folder_pdf_plan(paths, "P ", " S")] == ["P Ana P\u00e9rez S", "P Luis S"]
+# el flujo entero: el dialogo pide prefijo y sufijo, y se recuerdan
+from PySide6.QtWidgets import QDialog, QLineEdit, QMessageBox as QMB, QFileDialog as QFD
+vistas = []
+
+
+def rellenar(self):
+    if isinstance(self, QMB):
+        return 0
+    campos = {w.placeholderText(): w for w in self.findChildren(QLineEdit)}
+    campos["Prefix"].setText("Composici\u00f3n - ")
+    campos["Suffix"].setText(" - Ej 1")
+    vistas.extend(l.text() for l in self.findChildren(visor.QLabel) if l.text().startswith("e.g."))
+    return QDialog.DialogCode.Accepted
+
+
+QDialog.exec = rellenar
+salida2 = TMP / "pdfs2"
+salida2.mkdir()
+QFD.getExistingDirectory = staticmethod(lambda *a, **k: str(salida2))
+win.view.clearSelection()
+win.export_folders_pdf()
+import unicodedata                                     # macOS lista los acentos en NFD
+hechos = sorted(unicodedata.normalize("NFC", p.name) for p in salida2.iterdir())
+assert hechos == ["Composici\u00f3n - Ana P\u00e9rez - Ej 1.pdf", "Composici\u00f3n - Luis - Ej 1.pdf"], hechos
+assert vistas and vistas[-1] == "e.g.  Composici\u00f3n - Ana P\u00e9rez - Ej 1.pdf", vistas
+assert win.pdf_affixes == ["Composici\u00f3n - ", " - Ej 1"]
+win.save_state()
+assert json.loads(visor.STATE_FILE.read_text(encoding="utf-8"))["pdf_name_affixes"] == \
+    ["Composici\u00f3n - ", " - Ej 1"]
+print("   agrupa por alumno, nombres sin repetir, prefijo y sufijo, y escribe un PDF por carpeta")
 
 print("\n4. LA CAJA DEL COMENTARIO CAMBIA DE ALTO")
 ed = win.note_editor

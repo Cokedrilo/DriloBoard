@@ -21,7 +21,7 @@ botón *Export*.
 ## Arrancar
 
 **Versión portable (lo normal).** Descomprime
-`DriloBoard-1.9.1-portable-win64.zip` donde quieras —disco, USB, carpeta de
+`DriloBoard-1.10.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
 red— y ejecuta `DriloBoard.exe`. No instala nada ni escribe en el registro.
 La biblioteca y la caché de miniaturas se crean **dentro de esa misma
 carpeta**, así que copiándola te llevas también toda la clasificación.
@@ -30,7 +30,7 @@ La primera vez Windows puede avisar de que el origen es desconocido (el
 ejecutable no está firmado): *Más información* → *Ejecutar de todas formas*.
 
 **Versión portable para Mac.** Descomprime
-`DriloBoard-1.9.1-portable-macos.zip`: sale una carpeta `DriloBoard` con
+`DriloBoard-1.10.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
 `DriloBoard.app` dentro. Una sola app para Mac Intel y Apple Silicon, macOS 13
 Ventura o posterior. Igual que en Windows, la biblioteca y la caché se crean
 **en esa carpeta, junto a la app** (nunca dentro del `.app`), así que se puede
@@ -301,10 +301,21 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
     no distraiga: sigue contando, con el punto rojo mientras cuenta.
   - *Library ▸ Marking time…*: el registro por alumno y por archivo, con el
     total, la media por alumno y lo de hoy. Puedes sumar o quitar minutos a
-    un archivo (lo corregido en papel), borrar tiempos y exportarlo a **CSV**
-    (una fila por archivo y el total de cada alumno, con las horas en
-    decimal para sumarlas en la hoja de cálculo). Se guarda en
-    `biblioteca.json`.
+    un archivo (lo corregido en papel) y borrar tiempos. **Export…** lo guarda
+    para analizarlo después, en cuatro formatos:
+    - *Summary per student and file* (CSV): una fila por archivo y el total de
+      cada alumno, con la nota y las horas en decimal.
+    - *Every session* (CSV): una fila por sesión (día, hora de inicio y fin,
+      minutos, cronometrada o a mano, nota). Lo mejor para tablas dinámicas.
+    - *Report for Claude / Nexus* (Markdown): con propiedades de Obsidian
+      (fechas DD-MM-AAAA) y tablas por alumno (media, mediana, mínimo y
+      máximo), por día y por archivo, con las notas. Déjalo en la bóveda y
+      pídele a Nexus o a Claude que lo analice.
+    - *All the data* (JSON): todo, sesión a sesión.
+  - Se guarda en `biblioteca.json`.
+- **Nota media de la selección**: elige dos o más archivos y abajo, junto a
+  los botones, sale la media y cuántos tienen nota (los que no, no cuentan);
+  con el ratón encima, la más baja y la más alta.
 - Sin nota se ve una raya: baja con la flecha por debajo de 0, o *Clear*, que
   borra nota y comentario.
 - La nota sale en la miniatura, abajo a la derecha: **roja** por debajo de 5,

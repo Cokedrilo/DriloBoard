@@ -71,7 +71,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.9.1"
+VERSION = "1.10.0"
 
 
 def app_dir() -> Path:
@@ -1579,6 +1579,16 @@ def clean_notes(crudo) -> dict[str, dict]:
 def format_grade(g: float) -> str:
     """8.0 -> 8, 7.5 -> 7.5, 6.25 -> 6.25."""
     return ("%.2f" % g).rstrip("0").rstrip(".")
+
+
+def grade_stats(paths, notes: dict) -> dict:
+    """Media, minima y maxima de las notas de esos archivos (los sin nota no cuentan)."""
+    notas = [notes[p]["grade"] for p in paths
+             if isinstance(notes.get(p), dict) and notes[p].get("grade") is not None]
+    if not notas:
+        return {"n": len(paths), "graded": 0, "avg": None, "min": None, "max": None}
+    return {"n": len(paths), "graded": len(notas), "avg": sum(notas) / len(notas),
+            "min": min(notas), "max": max(notas)}
 
 
 def grade_color(g: float) -> str:
@@ -4122,26 +4132,192 @@ def clean_times(crudo) -> dict[str, list[list[int]]]:
     for p, tramos in (crudo.items() if isinstance(crudo, dict) else []):
         buenos = []
         for t in tramos if isinstance(tramos, list) else []:
-            if isinstance(t, (list, tuple)) and len(t) == 2 and \
-                    all(isinstance(x, (int, float)) for x in t):
-                buenos.append([int(t[0]), int(t[1])])
+            if isinstance(t, (list, tuple)) and len(t) in (2, 3) and \
+                    all(isinstance(x, (int, float)) for x in t[:2]):
+                # un tercer "m": minutos puestos o quitados a mano
+                buenos.append([int(t[0]), int(t[1])] + (["m"] if t[2:] == ["m"] else []))
         if buenos:
             out[p] = buenos
     return out
 
 
 def time_total(tramos) -> int:
-    return max(0, sum(s for _t, s in tramos or []))
+    return max(0, sum(t[1] for t in tramos or []))
 
 
 def add_time(times: dict, path: str, inicio: float, segundos: float):
     """Apunta un tramo; si empieza donde acabo el anterior, lo alarga."""
     tramos = times.setdefault(path, [])
-    if segundos > 0 and tramos and tramos[-1][1] > 0 and \
+    if segundos > 0 and tramos and tramos[-1][1] > 0 and len(tramos[-1]) == 2 and \
             abs(tramos[-1][0] + tramos[-1][1] - inicio) <= TIME_MERGE_GAP:
         tramos[-1][1] = int(round(inicio + segundos - tramos[-1][0]))
     else:
         tramos.append([int(inicio), int(round(segundos))])
+
+
+# --- el registro de tiempos, para analizarlo fuera (hoja de calculo, Claude, Nexus)
+def fecha(ts: float) -> str:
+    """DD-MM-AAAA, como el resto de Cerebro."""
+    return datetime.datetime.fromtimestamp(ts).strftime("%d-%m-%Y") if ts else ""
+
+
+def hora(ts: float) -> str:
+    return datetime.datetime.fromtimestamp(ts).strftime("%H:%M") if ts else ""
+
+
+def median(valores: list) -> float:
+    v = sorted(valores)
+    if not v:
+        return 0.0
+    m = len(v) // 2
+    return float(v[m]) if len(v) % 2 else (v[m - 1] + v[m]) / 2
+
+
+def time_dataset(grupos, times: dict, notes: dict) -> list[dict]:
+    """Alumno -> archivo -> sesiones, con la nota: de aqui salen todos los formatos."""
+    out = []
+    for carpeta, ps in grupos:
+        archivos = []
+        for p in ps:
+            tramos = times.get(p) or []
+            nota = notes.get(p) if isinstance(notes.get(p), dict) else {}
+            archivos.append({
+                "name": os.path.basename(p), "path": p, "grade": nota.get("grade"),
+                "seconds": time_total(tramos),
+                "sessions": [{"start": int(t[0]), "seconds": int(t[1]),
+                              "manual": len(t) > 2 and t[2] == "m"} for t in tramos]})
+        out.append({"name": os.path.basename(os.path.normpath(carpeta)), "folder": carpeta,
+                    "files": archivos, "seconds": sum(a["seconds"] for a in archivos),
+                    "sessions": sum(len(a["sessions"]) for a in archivos)})
+    return out
+
+
+def time_days(datos: list[dict]) -> list[dict]:
+    """Por dia: tiempo cronometrado (los ajustes a mano no tienen dia de trabajo)."""
+    dias: dict[str, dict] = {}
+    for al in datos:
+        for a in al["files"]:
+            for s in a["sessions"]:
+                if s["manual"] or s["seconds"] <= 0:
+                    continue
+                d = datetime.date.fromtimestamp(s["start"])
+                x = dias.setdefault(d.isoformat(), {"date": d, "seconds": 0, "sessions": 0,
+                                                    "students": set()})
+                x["seconds"] += s["seconds"]
+                x["sessions"] += 1
+                x["students"].add(al["name"])
+    return [dias[k] for k in sorted(dias)]
+
+
+def _h(s: float) -> str:
+    return "%.2f" % (s / 3600)
+
+
+def write_time_sessions_csv(datos: list[dict], destino: str):
+    """Una fila por sesion: lo mas comodo para tablas dinamicas."""
+    coma = QLocale().decimalPoint() == ","
+    with open(destino, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f, delimiter=";" if coma else ",")
+        w.writerow(["Student", "File", "Date", "Start", "End", "Minutes", "Seconds", "Kind",
+                    "Grade", "Path"])
+        for al in datos:
+            for a in al["files"]:
+                g = "" if a["grade"] is None else format_grade(a["grade"])
+                for s in a["sessions"]:
+                    mins = "%.2f" % (s["seconds"] / 60)
+                    w.writerow([al["name"], a["name"], fecha(s["start"]), hora(s["start"]),
+                                "" if s["manual"] else hora(s["start"] + s["seconds"]),
+                                mins.replace(".", ",") if coma else mins, s["seconds"],
+                                "manual" if s["manual"] else "timed",
+                                g.replace(".", ",") if coma else g, a["path"]])
+
+
+def write_time_json(datos: list[dict], destino: str):
+    salida = {"app": APP_NAME, "version": VERSION,
+              "exported": datetime.datetime.now().isoformat(timespec="seconds"),
+              "idle_stop_seconds": IDLE_SECONDS,
+              "note": "seconds per session; 'manual' = minutes added or taken off by hand",
+              "students": [dict(al, files=[dict(a, sessions=[
+                  dict(s, start_iso=datetime.datetime.fromtimestamp(s["start"])
+                       .isoformat(timespec="minutes")) for s in a["sessions"]])
+                  for a in al["files"]]) for al in datos]}
+    Path(destino).write_text(json.dumps(salida, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def time_markdown(datos: list[dict], titulo: str) -> str:
+    """Un informe que se lee bien y que Claude o Nexus pueden analizar: con
+    propiedades para Obsidian (fechas DD-MM-AAAA) y tablas."""
+    ahora = datetime.datetime.now()
+    total = sum(al["seconds"] for al in datos)
+    por_alumno = [al["seconds"] for al in datos]
+    archivos = [a for al in datos for a in al["files"]]
+    n_ses = sum(al["sessions"] for al in datos)
+    dias = time_days(datos)
+    notas = [a["grade"] for a in archivos if a["grade"] is not None]
+    inicios = [s["start"] for a in archivos for s in a["sessions"] if not s["manual"]]
+    esc = lambda t: str(t).replace("|", "\\|")
+    L = ["---",
+         "type: marking-time",
+         "title: \"%s\"" % titulo.replace('"', "'"),
+         "exported: %s" % ahora.strftime("%d-%m-%Y"),
+         "from: %s" % fecha(min(inicios)) if inicios else "from: ",
+         "to: %s" % fecha(max(inicios)) if inicios else "to: ",
+         "students: %d" % len(datos),
+         "files: %d" % len(archivos),
+         "total_hours: %s" % _h(total),
+         "average_minutes_per_student: %.1f" % (total / len(datos) / 60 if datos else 0),
+         "app: DriloBoard %s" % VERSION,
+         "---", "",
+         "# Marking time \u2014 %s" % titulo, "",
+         "Exported on %s at %s from DriloBoard %s. The timer starts when a file is clicked and "
+         "stops after %d minutes without touching anything; *manual* means minutes added or "
+         "taken off by hand. Times in minutes unless said otherwise." % (
+             ahora.strftime("%d-%m-%Y"), ahora.strftime("%H:%M"), VERSION, IDLE_SECONDS // 60),
+         "", "## Summary", ""]
+    if datos:
+        mas = max(datos, key=lambda al: al["seconds"])
+        menos = min(datos, key=lambda al: al["seconds"])
+        L += ["- Students: %d \u00b7 files: %d \u00b7 sessions: %d" % (len(datos), len(archivos), n_ses),
+              "- Total: %s (%s h)" % (format_hours(total), _h(total)),
+              "- Per student: average %.1f min \u00b7 median %.1f min \u00b7 least %.1f min (%s) "
+              "\u00b7 most %.1f min (%s)" % (
+                  total / len(datos) / 60, median(por_alumno) / 60, menos["seconds"] / 60,
+                  menos["name"], mas["seconds"] / 60, mas["name"]),
+              "- Per file: average %.1f min" % (total / len(archivos) / 60 if archivos else 0)]
+        if dias:
+            L.append("- Days with marking: %d (%s \u2013 %s), %.1f min per day on average" % (
+                len(dias), dias[0]["date"].strftime("%d-%m-%Y"),
+                dias[-1]["date"].strftime("%d-%m-%Y"),
+                sum(d["seconds"] for d in dias) / len(dias) / 60))
+        if notas:
+            L.append("- Grades: average %s over %d graded files" % (
+                format_grade(round(sum(notas) / len(notas), 2)), len(notas)))
+    else:
+        L.append("- No time recorded.")
+    L += ["", "## Per student", "",
+          "| Student | Minutes | Hours | Files | Sessions | Min per file | Average grade | First day | Last day |",
+          "|---|---:|---:|---:|---:|---:|---:|---|---|"]
+    for al in sorted(datos, key=lambda x: -x["seconds"]):
+        ns = [a["grade"] for a in al["files"] if a["grade"] is not None]
+        ts = [s["start"] for a in al["files"] for s in a["sessions"] if not s["manual"]]
+        L.append("| %s | %.1f | %s | %d | %d | %.1f | %s | %s | %s |" % (
+            esc(al["name"]), al["seconds"] / 60, _h(al["seconds"]), len(al["files"]),
+            al["sessions"], al["seconds"] / len(al["files"]) / 60 if al["files"] else 0,
+            format_grade(round(sum(ns) / len(ns), 2)) if ns else "",
+            fecha(min(ts)) if ts else "", fecha(max(ts)) if ts else ""))
+    if dias:
+        L += ["", "## Per day", "", "| Date | Minutes | Students | Sessions |", "|---|---:|---:|---:|"]
+        for d in dias:
+            L.append("| %s | %.1f | %d | %d |" % (d["date"].strftime("%d-%m-%Y"), d["seconds"] / 60,
+                                                 len(d["students"]), d["sessions"]))
+    L += ["", "## Per file", "", "| Student | File | Minutes | Sessions | Grade |",
+          "|---|---|---:|---:|---:|"]
+    for al in datos:
+        for a in al["files"]:
+            L.append("| %s | %s | %.1f | %d | %s |" % (
+                esc(al["name"]), esc(a["name"]), a["seconds"] / 60, len(a["sessions"]),
+                "" if a["grade"] is None else format_grade(a["grade"])))
+    return "\n".join(L) + "\n"
 
 
 class TimeTracker(QObject):
@@ -4353,9 +4529,14 @@ class TimeReport(QDialog):
         themed(b_del, icon="trash")
         b_del.setToolTip("Forget the time of the selected files or students")
         b_del.clicked.connect(self.clear_selected)
-        b_csv = QPushButton("  Export CSV…")
+        b_csv = QPushButton("  Export…")
         themed(b_csv, std="SP_DialogSaveButton")
-        b_csv.clicked.connect(self.export_csv)
+        b_csv.setToolTip("Save the record to analyse it later: in a spreadsheet, or "
+                         "handing it to Claude / Nexus")
+        menu = QMenu(b_csv)
+        for txt, clave in self.FORMATS:
+            menu.addAction(txt, lambda c=clave: self.export_as(c))
+        b_csv.setMenu(menu)
         b_close = QPushButton("Close")
         b_close.clicked.connect(self.accept)
         for b in (b_add, b_del):
@@ -4392,9 +4573,9 @@ class TimeReport(QDialog):
             for p in ps:
                 tramos = self.host.times.get(p) or []
                 s = time_total(tramos)
-                fin = max((t + max(0, d) for t, d in tramos), default=0)
-                hoy_s += sum(max(0, d) for t, d in tramos
-                             if datetime.date.fromtimestamp(t) == hoy)
+                fin = max((t[0] + max(0, t[1]) for t in tramos), default=0)
+                hoy_s += sum(max(0, t[1]) for t in tramos
+                             if datetime.date.fromtimestamp(t[0]) == hoy)
                 hijo = QTreeWidgetItem([shown_name(p) or "(name hidden)", format_clock(s),
                                         str(len(tramos)), self._when(fin)])
                 hijo.setData(0, Qt.ItemDataRole.UserRole, ("file", p, [p]))
@@ -4456,48 +4637,93 @@ class TimeReport(QDialog):
         self.host.clear_times(ps)
         self.rebuild()
 
+    FORMATS = (("Summary per student and file (CSV)…", "csv"),
+               ("Every session (CSV)…", "sessions"),
+               ("Report for Claude / Nexus (Markdown)…", "md"),
+               ("All the data (JSON)…", "json"))
+    EXTS = {"csv": ".csv", "sessions": ".csv", "md": ".md", "json": ".json"}
+
+    def dataset(self) -> list[dict]:
+        return time_dataset(self.groups(), self.host.times, self.host.notes)
+
+    def title(self) -> str:
+        if self.chk_view.isChecked():
+            return self.host.view_title()
+        nombres = [os.path.basename(os.path.normpath(f)) for f in self.host.folders]
+        return ", ".join(nombres[:3]) + (" +%d" % (len(nombres) - 3) if len(nombres) > 3 else "") \
+            or APP_NAME
+
     def rows(self) -> list[list]:
         """Una fila por archivo, y despues el total de cada alumno."""
         filas, totales = [], []
-        for carpeta, ps in self.groups():
-            alumno = os.path.basename(carpeta)
-            s_alumno = 0
-            for p in ps:
-                tramos = self.host.times.get(p) or []
-                s = time_total(tramos)
-                s_alumno += s
-                filas.append([alumno, os.path.basename(p), s, len(tramos),
-                              self._when(min((t for t, _d in tramos), default=0)),
-                              self._when(max((t + max(0, d) for t, d in tramos), default=0)), p])
-            totales.append([alumno, "TOTAL", s_alumno, sum(len(self.host.times.get(p) or [])
-                                                            for p in ps), "", "", carpeta])
+        for al in self.dataset():
+            for a in al["files"]:
+                inicios = [s["start"] for s in a["sessions"]]
+                filas.append([al["name"], a["name"], a["seconds"], a["grade"], len(a["sessions"]),
+                              self._when(min(inicios, default=0)),
+                              self._when(max((s["start"] + max(0, s["seconds"])
+                                              for s in a["sessions"]), default=0)), a["path"]])
+            ns = [a["grade"] for a in al["files"] if a["grade"] is not None]
+            totales.append([al["name"], "TOTAL", al["seconds"],
+                            sum(ns) / len(ns) if ns else None, al["sessions"], "", "", al["folder"]])
         return filas + totales
 
     def write_csv(self, destino: str):
         coma = QLocale().decimalPoint() == ","
+        dec = lambda t: t.replace(".", ",") if coma else t
         with open(destino, "w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f, delimiter=";" if coma else ",")
-            w.writerow(["Student", "File", "Time", "Hours", "Sessions", "First", "Last", "Path"])
-            for alumno, archivo, s, n, primero, ultimo, ruta in self.rows():
-                horas = "%.2f" % (s / 3600)
-                w.writerow([alumno, archivo, format_clock(s),
-                            horas.replace(".", ",") if coma else horas, n, primero, ultimo, ruta])
+            w.writerow(["Student", "File", "Time", "Hours", "Grade", "Sessions", "First", "Last",
+                        "Path"])
+            for alumno, archivo, s, nota, n, primero, ultimo, ruta in self.rows():
+                w.writerow([alumno, archivo, format_clock(s), dec(_h(s)),
+                            "" if nota is None else dec(format_grade(round(nota, 2))),
+                            n, primero, ultimo, ruta])
 
-    def export_csv(self):
+    def write(self, clave: str, destino: str):
+        """Sin dialogos, para que las pruebas usen este mismo camino."""
+        if clave == "csv":
+            self.write_csv(destino)
+        elif clave == "sessions":
+            write_time_sessions_csv(self.dataset(), destino)
+        elif clave == "json":
+            write_time_json(self.dataset(), destino)
+        else:
+            Path(destino).write_text(time_markdown(self.dataset(), self.title()),
+                                     encoding="utf-8")
+
+    def export_as(self, clave: str):
+        ext = self.EXTS[clave]
+        nombre = safe_file_name("Marking time - %s - %s" % (
+            self.title(), datetime.date.today().strftime("%d-%m-%Y")))
+        if clave == "sessions":
+            nombre += " - sessions"
+        filtro = {".csv": "CSV (*.csv)", ".md": "Markdown (*.md)", ".json": "JSON (*.json)"}[ext]
         destino, _ = QFileDialog.getSaveFileName(
             self, "Export marking time", os.path.join(self.host.export_dir or str(Path.home()),
-                                                      "Marking time.csv"), "CSV (*.csv)")
+                                                      nombre + ext), filtro)
         if not destino:
             return
-        if not destino.lower().endswith(".csv"):
-            destino += ".csv"
+        if not destino.lower().endswith(ext):
+            destino += ext
         try:
-            self.write_csv(destino)
+            self.write(clave, destino)
         except OSError as e:
             QMessageBox.warning(self, APP_NAME, "Could not save:\n%s" % e)
             return
         self.host.export_dir = os.path.dirname(destino)
         self.host.touch()
+        caja = QMessageBox(self)
+        caja.setWindowTitle(APP_NAME)
+        caja.setText("Saved to:\n%s" % destino)
+        b_ver = caja.addButton("Show in folder", QMessageBox.ButtonRole.AcceptRole)
+        caja.addButton(QMessageBox.StandardButton.Close)
+        caja.exec()
+        if caja.clickedButton() is b_ver:
+            reveal_in_file_manager(destino)
+
+    def export_csv(self):
+        self.export_as("csv")
 
 
 class PreviewPane(QWidget):
@@ -7987,7 +8213,13 @@ shows the student (the folder), this file and the student's total; ⏸ pauses it
 your next click on a file, and clicking ⏱ (or <b>[[timer]]</b>) folds it into a small
 icon that keeps counting (red dot while it counts). <b>Library ▸ Marking time…</b>
 lists the time per student and per file, with the total, the average per student and
-today's time; add or take off minutes, clear it, or export it as CSV.</li>
+today's time; add or take off minutes or clear it. <b>Export…</b> saves it to analyse
+later: a summary per student and file (CSV), every session (CSV), a <b>report for Claude /
+Nexus</b> (Markdown with Obsidian properties: totals, average and median per student, per
+day, per file, with the grades) or all the data (JSON).</li>
+<li>Select two or more files and the <b>average grade</b> of the selection appears next to
+the buttons under the grid, with how many of them are graded (hover it for the lowest and
+the highest).</li>
 <li>The grade shows on the thumbnail, red below 5, amber up to 7, green from
 there; a speech bubble means there is a comment. Hover over the thumbnail to
 read it. The preview and the large window show both under the image.</li>
@@ -8735,6 +8967,10 @@ class MainWindow(QMainWindow):
         self.b_mark_b.clicked.connect(lambda: self.mark_image("B"))
         self.lbl_marks = QLabel("")
         themed(self.lbl_marks, css="color:%(dim)s; font-size:11px;")
+        # la nota media de lo seleccionado (con dos o mas)
+        self.lbl_avg = QLabel("")
+        self.lbl_avg.setTextFormat(Qt.TextFormat.RichText)
+        self.lbl_avg.hide()
         self.b_compare = QPushButton("  Compare A/B")
         themed(self.b_compare, icon="compare")
         self.b_compare.setToolTip("Overlay A and B with an opacity slider (C)")
@@ -8759,7 +8995,7 @@ class MainWindow(QMainWindow):
         self.b_assign.clicked.connect(self.assign_selected)
         self.button_row = WrapRow(
             [b_all, b_none, 12, self.b_mark_a, self.b_mark_b, self.b_compare,
-             self.lbl_marks],
+             self.lbl_marks, 8, self.lbl_avg],
             [self.b_edit, self.b_export, 12, self.b_assign])
         lay.addWidget(self.button_row)
         self.update_marks()
@@ -8865,6 +9101,7 @@ class MainWindow(QMainWindow):
                 w.setChecked(on)
                 w.blockSignals(False)
         self.note_panel.setVisible(on)
+        self.update_average()
         foco = QApplication.focusWidget()
         if not on and foco is not None and self.note_panel.isAncestorOf(foco):
             self.view.setFocus()                # que no se quede escribiendo a ciegas
@@ -8964,7 +9201,7 @@ class MainWindow(QMainWindow):
         actual = time_total(self.times.get(path))
         segundos = max(-actual, int(segundos))
         if segundos:
-            self.times.setdefault(path, []).append([int(time.time()), segundos])
+            self.times.setdefault(path, []).append([int(time.time()), segundos, "m"])
             self.touch()
             self.tracker.changed.emit()
 
@@ -9326,6 +9563,7 @@ class MainWindow(QMainWindow):
         self.note_editor.clear()
 
     def refresh_note_views(self):
+        self.update_average()
         self.view.viewport().update()
         self.preview.refresh_note()
         self.touch()
@@ -10428,6 +10666,31 @@ class MainWindow(QMainWindow):
     def on_selection_changed(self, *_):
         self.b_compare.setEnabled(bool(self.mark_a and self.mark_b)
                                   or len(self.view.selectedIndexes()) == 2)
+        self.update_average()
+
+    def update_average(self):
+        """Nota media de los archivos seleccionados, junto a los botones."""
+        if not hasattr(self, "lbl_avg"):
+            return
+        sel = self.selected_images() if self.show_notes else []
+        if len(sel) < 2:
+            self.lbl_avg.hide()
+            return
+        st = grade_stats(sel, self.notes)
+        if st["avg"] is None:
+            self.lbl_avg.setText("<span style='color:%s'>\u00d8 \u2014  \u00b7  no grades in "
+                                 "the %d selected</span>" % (theme_color("dim"), st["n"]))
+            self.lbl_avg.setToolTip("")
+        else:
+            self.lbl_avg.setText(
+                "<b style='color:%s'>\u00d8 %s</b> <span style='color:%s'>\u00b7 %d of %d graded"
+                "</span>" % (grade_color(st["avg"]), format_grade(round(st["avg"], 2)),
+                             theme_color("dim"), st["graded"], st["n"]))
+            self.lbl_avg.setToolTip(
+                "Average grade of the %d selected files (%d have a grade; the others do not "
+                "count)\nLowest %s  \u00b7  highest %s" % (
+                    st["n"], st["graded"], format_grade(st["min"]), format_grade(st["max"])))
+        self.lbl_avg.show()
 
     def compare_selected(self):
         a, b = self.mark_a, self.mark_b

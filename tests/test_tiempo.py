@@ -15,6 +15,7 @@ TMP.mkdir(parents=True, exist_ok=True)
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtGui import QImage, QColor
+from PySide6.QtCore import QItemSelectionModel
 
 app = QApplication(sys.argv)
 import driloboard as visor
@@ -213,5 +214,68 @@ win2.tracker.file_clicked(a1)
 assert win2.tracker.path is None, "apagado no vuelve a contar"
 win2.close()
 print("   se recuerda, se apunta al cerrar y apagarlo para ok")
+
+print("\n6. NOTA MEDIA Y EXPORTAR PARA ANALIZAR")
+st = visor.grade_stats([a1, a2, l1], {a1: {"grade": 8}, a2: {"grade": 5.5}, l1: {"comment": "x"}})
+assert st == {"n": 3, "graded": 2, "avg": 6.75, "min": 5.5, "max": 8}, st
+assert visor.grade_stats([a1], {})["avg"] is None
+win3 = visor.MainWindow()
+win3.resize(1200, 800)
+win3.show()
+app.processEvents()
+win3.chk_recursive.setChecked(True)
+win3.add_folders([str(clase)])
+app.processEvents()
+win3.notes = {a1: {"grade": 8}, a2: {"grade": 5.5}}
+win3.view.selectAll()
+app.processEvents()
+assert win3.lbl_avg.isVisible() and "6.75" in win3.lbl_avg.text() and "2 of 3" in win3.lbl_avg.text(), \
+    win3.lbl_avg.text()
+win3.view.clearSelection()
+win3.view.selectionModel().select(win3.model.index(0),
+                                  QItemSelectionModel.SelectionFlag.Select)
+app.processEvents()
+assert not win3.lbl_avg.isVisible(), "con uno solo no hace falta media"
+win3.set_show_notes(False)
+win3.view.selectAll()
+app.processEvents()
+assert not win3.lbl_avg.isVisible(), "con las notas ocultas, tampoco la media"
+win3.set_show_notes(True)
+
+d0 = 1_800_000_000
+win3.times = {a1: [[d0, 600], [d0 + 86400, 300]], a2: [[d0 + 100, 120]], l1: [[d0 + 200, 900]]}
+win3.adjust_time(l1, 300)
+assert win3.times[l1][-1][2] == "m", "lo puesto a mano queda marcado"
+assert visor.clean_times(win3.times) == win3.times, "y se conserva al guardar y leer"
+rep = visor.TimeReport(win3)
+salida = TMP / "export"
+salida.mkdir()
+for clave in ("csv", "sessions", "md", "json"):
+    rep.write(clave, str(salida / ("t" + rep.EXTS[clave] if clave != "sessions" else "s.csv")))
+md = (salida / "t.md").read_text(encoding="utf-8")
+assert md.startswith("---\ntype: marking-time\n") and "students: 2" in md and "files: 3" in md
+assert "exported: %s" % visor.datetime.date.today().strftime("%d-%m-%Y") in md
+assert "## Per student" in md and "| Ana | 17.0 |" in md and "| Luis | 20.0 |" in md, md
+assert "## Per day" in md and "## Per file" in md and "| Ana | a1.png | 15.0 | 2 | 8 |" in md
+assert "Grades: average 6.75 over 2 graded files" in md
+datos = json.loads((salida / "t.json").read_text(encoding="utf-8"))
+assert datos["version"] == visor.VERSION and len(datos["students"]) == 2
+luis = [x for x in datos["students"] if x["name"] == "Luis"][0]
+assert luis["seconds"] == 1200 and [s["manual"] for s in luis["files"][0]["sessions"]] == [False, True]
+assert "start_iso" in luis["files"][0]["sessions"][0]
+texto = (salida / "s.csv").read_text(encoding="utf-8-sig")
+sep = ";" if ";" in texto.splitlines()[0] else ","
+filas = list(csv.reader(texto.splitlines(), delimiter=sep))
+assert filas[0][:3] == ["Student", "File", "Date"] and len(filas) == 1 + 5
+assert [f[7] for f in filas[1:]].count("manual") == 1
+assert filas[1][2] == visor.fecha(d0) and filas[1][8] == "8"
+resumen = list(csv.reader((salida / "t.csv").read_text(encoding="utf-8-sig").splitlines(),
+                          delimiter=sep))
+assert resumen[0][4] == "Grade" and resumen[1][4] == "8"
+assert [f[1] for f in resumen if f[1] == "TOTAL"] == ["TOTAL", "TOTAL"]
+assert "Clase" in rep.title() or rep.title() == "clase"
+rep.close()
+win3.close()
+print("   media de la seleccion, minutos a mano marcados, CSV, sesiones, Markdown y JSON ok")
 
 print("\nTIEMPO OK")

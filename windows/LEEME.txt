@@ -7,7 +7,17 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
-Novedades de la 1.9.1:
+Novedades de la 1.10:
+
+  - Nota media de la seleccion: elige dos o mas archivos y sale abajo, junto
+    a los botones, con cuantos tienen nota.
+  - Exportar el registro de tiempos para analizarlo (Library > Marking time
+    > Export): resumen en CSV, cada sesion en CSV, un informe en Markdown
+    para Claude / Nexus (con propiedades de Obsidian) y todos los datos en
+    JSON. Llevan la nota de cada archivo. Los minutos puestos a mano quedan
+    marcados como "manual".
+
+De la 1.9.1:
 
   - Banco de frases: avisa en la propia ventana de lo que ha hecho (donde
     puso la frase, o por que no pudo) y el doble clic la pone una sola vez.

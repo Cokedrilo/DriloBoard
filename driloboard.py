@@ -39,7 +39,8 @@ from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices, QFon
                            QImage, QImageReader, QPageLayout, QPageSize, QPdfWriter,
                            QTextDocument,
                            QImageWriter, QKeySequence, QPainter, QPainterPath,
-                           QPainterPathStroker, QPalette, QPen, QPixmap, QShortcut,
+                           QPainterPathStroker, QPalette, QPen, QPixmap, QPolygonF, QShortcut,
+                           QFontMetricsF,
                            QTextCursor, QTransform)
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QBoxLayout, QCheckBox,
                                QComboBox,
@@ -47,7 +48,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication
                                QFileDialog, QFrame, QGraphicsItem, QGraphicsPixmapItem,
                                QGraphicsScene,
                                QGraphicsView, QHBoxLayout, QInputDialog, QLabel,
-                               QLineEdit, QListView, QMainWindow,
+                               QLineEdit, QListView, QListWidget, QListWidgetItem, QMainWindow,
                                QMenu, QMessageBox, QPlainTextEdit, QPushButton,
                                QSizePolicy, QSlider, QSplitter,
                                QButtonGroup, QColorDialog, QGraphicsPathItem,
@@ -69,7 +70,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 
 
 def app_dir() -> Path:
@@ -709,11 +710,24 @@ def shape_path(forma: dict) -> QPainterPath:
     return path
 
 
+def shape_opacity(forma: dict) -> int:
+    """La opacidad de la capa, de 0 a 100 (sin la clave, 100)."""
+    try:
+        return max(0, min(100, int(forma.get("opacidad", 100))))
+    except (TypeError, ValueError):
+        return 100
+
+
+def shape_alpha(forma: dict) -> int:
+    """La transparencia propia (la del rotulador) por la opacidad de la capa."""
+    return round(int(forma.get("alpha", 255)) * shape_opacity(forma) / 100)
+
+
 def paint_shape(p: QPainter, forma: dict):
-    if forma.get("tipo") == "difuminar":     # no se dibuja: se aplica a la imagen
-        return
+    if forma.get("tipo") == "difuminar" or forma.get("oculto"):
+        return                               # difuminar se aplica a la imagen
     color = QColor(forma.get("color", "#e6542f"))
-    color.setAlpha(int(forma.get("alpha", 255)))
+    color.setAlpha(shape_alpha(forma))
     if forma.get("tipo") == "texto":
         f = QFont()
         f.setPixelSize(max(4, int(forma.get("grosor", 4) * 5)))
@@ -728,7 +742,7 @@ def paint_shape(p: QPainter, forma: dict):
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     p.setPen(pen)
     relleno = QColor(color)
-    relleno.setAlpha(int(forma.get("alpha", 255)) // 3)
+    relleno.setAlpha(shape_alpha(forma) // 3)
     p.setBrush(relleno if forma.get("relleno") else Qt.BrushStyle.NoBrush)
     p.drawPath(shape_path(forma))
 
@@ -738,7 +752,8 @@ def blur_regions(img: QImage, formas: list, t: QTransform) -> QImage:
 
     Se aplican antes que el resto de dibujos, sobre la imagen ya editada, asi
     que una flecha o un texto encima de la zona se quedan nitidos."""
-    zonas = [f for f in formas if f.get("tipo") == "difuminar" and f.get("puntos")]
+    zonas = [f for f in formas if f.get("tipo") == "difuminar" and f.get("puntos")
+             and not f.get("oculto")]
     if not zonas:
         return img
     if img.format() not in (QImage.Format.Format_ARGB32, QImage.Format.Format_RGB32):
@@ -1435,6 +1450,45 @@ def write_selection_pdf(items: list[dict], destino: str, titulo: str, *,
                          int(Qt.AlignmentFlag.AlignCenter), "%d / %d" % (n + 1, len(items)))
     if painter is not None:
         painter.end()
+
+
+def safe_file_name(nombre: str, otro: str = "DriloBoard") -> str:
+    """Un nombre que vale como archivo en cualquier sistema."""
+    return re.sub(r'[\\/:*?"<>|]+', "-", nombre).strip(" .") or otro
+
+
+def folder_groups(paths: list[str], raices: list[str]) -> list[tuple[str, list[str]]]:
+    """Agrupa los archivos por alumno: la carpeta que cuelga de la elegida.
+
+    Si eliges la carpeta de la clase, cada subcarpeta es un alumno (aunque sus
+    entregas esten mas adentro); si eliges la de un alumno, es ella misma.
+    Devuelve [(carpeta, [archivos])] en el orden en que aparecen."""
+    norm = sorted({os.path.normpath(r) for r in raices}, key=len, reverse=True)
+    grupos: dict[str, list[str]] = {}
+    for p in paths:
+        d = os.path.normpath(os.path.dirname(p))
+        clave = d
+        for r in norm:
+            if d == r:
+                break
+            if d.startswith(r.rstrip(os.sep) + os.sep):
+                primera = os.path.relpath(d, r).split(os.sep)[0]
+                clave = os.path.join(r, primera)
+                break
+        grupos.setdefault(clave, []).append(p)
+    return list(grupos.items())
+
+
+def folder_pdf_names(carpetas: list[str]) -> list[str]:
+    """El nombre de cada PDF: el de la carpeta, sin repetir."""
+    usados: dict[str, int] = {}
+    out = []
+    for c in carpetas:
+        base = safe_file_name(os.path.basename(os.path.normpath(c)))
+        n = usados.get(base.lower(), 0) + 1
+        usados[base.lower()] = n
+        out.append(base if n == 1 else "%s (%d)" % (base, n))
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -2787,6 +2841,53 @@ class GifPlayer(QObject):
         self.go(self.index + delta)
 
 
+NOTE_HEIGHTS = {False: 180, True: 80}   # alto de la caja del comentario (columna / visor)
+NOTE_HEIGHT_RANGE = (40, 900)
+
+
+class GripBar(QWidget):
+    """Tirador bajo una caja de texto: arrastrarlo cambia su alto."""
+    moved = Signal(int)                     # el alto nuevo, mientras se arrastra
+    released = Signal(int)
+
+    def __init__(self, target: QWidget, parent=None):
+        super().__init__(parent)
+        self.target = target
+        self.setFixedHeight(9)
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setToolTip("Drag to make the comment box taller or shorter")
+        self._inicio = None
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        c = QColor(theme_color("dim"))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        cx, cy = self.width() / 2, self.height() / 2
+        for dx in (-8, -3, 2, 7):           # cuatro puntitos, como un asa
+            p.drawEllipse(QPointF(cx + dx, cy), 1.3, 1.3)
+        p.end()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._inicio = (e.globalPosition().y(), self.target.height())
+
+    def mouseMoveEvent(self, e):
+        if self._inicio is not None:
+            y0, h0 = self._inicio
+            lo, hi = NOTE_HEIGHT_RANGE
+            self.moved.emit(int(max(lo, min(hi, h0 + e.globalPosition().y() - y0))))
+
+    def mouseReleaseEvent(self, e):
+        if self._inicio is not None:
+            self._inicio = None
+            self.released.emit(self.target.height())
+
+    def mouseDoubleClickEvent(self, _e):
+        self.released.emit(-1)              # doble clic: vuelve al alto de siempre
+
+
 class NoteEditor(QWidget):
     """Nota (0-10) y comentario de un archivo.
 
@@ -2832,6 +2933,12 @@ class NoteEditor(QWidget):
 
         self.lbl_file = QLabel("")
         themed(self.lbl_file, css="color:%(dim)s; font-size:11px;")
+        # el alto de la caja lo elige el usuario con el tirador, y vale para
+        # todos los editores del mismo tipo
+        self.grip = GripBar(self.txt)
+        self.grip.moved.connect(lambda h: host.set_note_height(compact, h, guardar=False))
+        self.grip.released.connect(lambda h: host.set_note_height(compact, h))
+        self.txt.setFixedHeight(host.note_height(compact))
         if compact:
             # debajo de un visor: todo en una fila, el comentario en dos lineas
             lay = QHBoxLayout(self)
@@ -2840,8 +2947,11 @@ class NoteEditor(QWidget):
             lay.addWidget(self.spn)
             lay.addWidget(QLabel("/ %s" % format_grade(GRADE_MAX)))
             lay.addSpacing(6)
-            self.txt.setFixedHeight(48)
-            lay.addWidget(self.txt, 1)
+            caja = QVBoxLayout()
+            caja.setSpacing(0)
+            caja.addWidget(self.txt)
+            caja.addWidget(self.grip)
+            lay.addLayout(caja, 1)
             col = QVBoxLayout()
             col.setSpacing(2)
             col.addWidget(self.b_copy)
@@ -2859,8 +2969,8 @@ class NoteEditor(QWidget):
             row.addStretch(1)
             row.addWidget(self.b_clear)
             lay.addLayout(row)
-            self.txt.setFixedHeight(96)
             lay.addWidget(self.txt)
+            lay.addWidget(self.grip)
             fila = QHBoxLayout()
             fila.addStretch(1)
             fila.addWidget(self.b_copy)
@@ -4712,8 +4822,144 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
         p.drawLine(m, M, M, M)
         p.drawLine(m, M, M - 2, m + 1)
         p.drawArc(QRectF(m - 7, M - 7, 14, 14), 0, 60 * 16)
+    elif kind == "select":                      # el puntero del raton
+        p.setBrush(tinta)
+        p.drawPolygon([QPointF(m + 2, m), QPointF(m + 2, M - 2), QPointF(m + 6, M - 6),
+                       QPointF(m + 9, M), QPointF(m + 11, M - 1), QPointF(m + 8, M - 7),
+                       QPointF(M - 2, M - 7)])
+    elif kind in ("raise", "lower"):            # una capa sube o baja
+        c = size / 2
+        sube = kind == "raise"
+        y0 = m + 2 if sube else M - 2
+        p.drawPolyline([QPointF(c - 4.5, y0 + (4.5 if sube else -4.5)), QPointF(c, y0),
+                        QPointF(c + 4.5, y0 + (4.5 if sube else -4.5))])
+        p.drawLine(QPointF(c, y0), QPointF(c, y0 + (8 if sube else -8)))
+        for i in range(2):
+            y = (M - 3 - i * 3.5) if sube else (m + 3 + i * 3.5)
+            p.drawLine(QPointF(m + 1, y), QPointF(M - 1, y))
+    elif kind in ("eye", "eye_off"):
+        c = size / 2
+        ojo = QPainterPath()
+        ojo.moveTo(m - 0.5, c)
+        ojo.quadTo(c, m - 1, M + 0.5, c)
+        ojo.quadTo(c, M + 1, m - 0.5, c)
+        if kind == "eye_off":
+            apagado = QColor(tinta)
+            apagado.setAlpha(110)
+            p.setPen(QPen(apagado, 1.6))
+            p.drawPath(ojo)
+            p.setPen(lapiz)
+            p.drawLine(QPointF(m + 1, M - 1), QPointF(M - 1, m + 1))
+        else:
+            p.drawPath(ojo)
+            p.setBrush(tinta)
+            p.drawEllipse(QPointF(c, c), 2.4, 2.4)
     p.end()
     return QIcon(pm)
+
+
+# --------------------------------------------------------------------------- #
+#  Capas del editor: cada dibujo es una, la ultima de la lista queda encima
+# --------------------------------------------------------------------------- #
+LAYER_NAMES = {"trazo": "Pen", "rotulador": "Highlighter", "linea": "Line",
+               "flecha": "Arrow", "rect": "Rectangle", "elipse": "Ellipse",
+               "texto": "Text", "difuminar": "Blur area"}
+LAYER_ICONS = {"trazo": "pencil", "rotulador": "marker", "linea": "line", "flecha": "arrow",
+               "rect": "rect", "elipse": "ellipse", "texto": "text", "difuminar": "blurarea"}
+LAYER_ROLE = Qt.ItemDataRole.UserRole + 7
+EYE_WIDTH = 22                      # el ojo de cada capa: un clic ahi la oculta o muestra
+
+
+def shape_label(forma: dict) -> str:
+    nombre = LAYER_NAMES.get(forma.get("tipo"), "Drawing")
+    if forma.get("tipo") == "texto":
+        linea = (forma.get("texto") or "").split("\n")[0].strip()
+        if len(linea) > 22:
+            linea = linea[:21] + "\u2026"
+        nombre = "%s \u201c%s\u201d" % (nombre, linea)
+    op = shape_opacity(forma)
+    return nombre + ("  \u00b7  %d %%" % op if op < 100 else "")
+
+
+def text_font(forma: dict) -> QFont:
+    f = QFont()
+    f.setPixelSize(max(4, int(forma.get("grosor", 4) * 5)))
+    f.setBold(True)
+    return f
+
+
+def shape_box(forma: dict) -> QRectF:
+    """La caja que ocupa el dibujo en sus propias coordenadas, con el grosor."""
+    pts = forma.get("puntos") or [[0, 0]]
+    if forma.get("tipo") == "texto":
+        fm = QFontMetricsF(text_font(forma))
+        x, y = pts[0]
+        return QRectF(x, y - fm.ascent(), fm.horizontalAdvance(forma.get("texto", "")),
+                      fm.height())
+    g = float(forma.get("grosor", 4)) / 2
+    return shape_path(forma).boundingRect().adjusted(-g, -g, g, g)
+
+
+def moved_shape(forma: dict, dx: float, dy: float) -> dict:
+    """Una copia movida: la original no se toca (el deshacer la guarda)."""
+    return dict(forma, puntos=[[x + dx, y + dy] for x, y in forma.get("puntos", [])])
+
+
+def layer_icon(forma: dict) -> QIcon:
+    """El ojo (visible u oculta), la herramienta con que se hizo y su color."""
+    pm = QPixmap(EYE_WIDTH + 44, 20)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.drawPixmap(0, 0, tool_icon("eye_off" if forma.get("oculto") else "eye").pixmap(20, 20))
+    p.drawPixmap(EYE_WIDTH, 0, tool_icon(LAYER_ICONS.get(forma.get("tipo"), "pencil"))
+                 .pixmap(20, 20))
+    if forma.get("tipo") != "difuminar":
+        p.setPen(QPen(QColor(128, 128, 128), 1))
+        p.setBrush(QColor(forma.get("color", "#e6542f")))
+        p.drawRoundedRect(QRectF(EYE_WIDTH + 26, 4, 12, 12), 3, 3)
+    p.end()
+    return QIcon(pm)
+
+
+class LayerList(QListWidget):
+    """Las capas: la de arriba de la lista es la que queda encima.
+
+    Clic en el ojo la oculta o muestra; arrastrar reordena; Supr borra."""
+    reordered = Signal()
+    delete_pressed = Signal()
+    eye_clicked = Signal(int)                   # indice del dibujo
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setIconSize(QSize(EYE_WIDTH + 44, 20))
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDropIndicatorShown(True)
+        self.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+    def mousePressEvent(self, e):
+        item = self.itemAt(e.position().toPoint())
+        if item is not None and e.button() == Qt.MouseButton.LeftButton:
+            x = e.position().x() - self.visualItemRect(item).left()
+            if x < EYE_WIDTH + 4:               # el ojo no selecciona ni arrastra
+                self.eye_clicked.emit(item.data(LAYER_ROLE))
+                return
+        super().mousePressEvent(e)
+
+    def dropEvent(self, e):
+        if e.source() is not self:
+            e.ignore()
+            return
+        super().dropEvent(e)
+        self.reordered.emit()
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self.delete_pressed.emit()
+            return
+        super().keyPressEvent(e)
 
 
 PAD_CHOICES = (("Transparent", None), ("White", "#ffffff"), ("Black", "#000000"))
@@ -4725,6 +4971,11 @@ class CropView(QGraphicsView):
     cropped = Signal(object)                # QRectF en coordenadas de la escena
     drawn = Signal(object)                  # forma, en pixeles de lo que se ve
     erased = Signal(object)                 # QPointF donde se pincho la goma
+    picked = Signal(object)                 # seleccionar: QPointF donde se pincho
+    dragged = Signal(object)                # seleccionar: QPointF al arrastrar
+    drag_done = Signal()
+    double_clicked = Signal(object)
+    delete_pressed = Signal()
     zoomed = Signal(float)
 
     def __init__(self, scene, parent=None):
@@ -4736,6 +4987,7 @@ class CropView(QGraphicsView):
         self.frame_rect: QRectF | None = None   # contorno de la imagen al ampliar el encuadre
         self._puntos: list = []
         self._preview = None
+        self._arrastre = False
 
     def drawForeground(self, painter, rect):
         """Rejilla de cuadros sobre la imagen, para enderezar a ojo."""
@@ -4776,8 +5028,9 @@ class CropView(QGraphicsView):
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         else:
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
-        self.setCursor(Qt.CursorShape.CrossCursor if tool
+        self.setCursor(Qt.CursorShape.CrossCursor if tool and tool != "seleccionar"
                        else Qt.CursorShape.ArrowCursor)
+        self._arrastre = False
         self._clear_preview()
 
     def _clear_preview(self):
@@ -4809,7 +5062,24 @@ class CropView(QGraphicsView):
     def wheelEvent(self, e):
         self.zoomed.emit(1.2 if e.angleDelta().y() > 0 else 1 / 1.2)
 
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self.delete_pressed.emit()
+            return
+        super().keyPressEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        if self.tool == "seleccionar" and e.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit(self.mapToScene(e.position().toPoint()))
+            return
+        super().mouseDoubleClickEvent(e)
+
     def mousePressEvent(self, e):
+        if self.tool == "seleccionar" and e.button() == Qt.MouseButton.LeftButton:
+            self._arrastre = True
+            self.setFocus(Qt.FocusReason.MouseFocusReason)   # para que Supr le llegue
+            self.picked.emit(self.mapToScene(e.position().toPoint()))
+            return
         if self.tool == "goma" and e.button() == Qt.MouseButton.LeftButton:
             self.erased.emit(self.mapToScene(e.position().toPoint()))
             return
@@ -4824,6 +5094,9 @@ class CropView(QGraphicsView):
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
+        if self.tool == "seleccionar" and self._arrastre:
+            self.dragged.emit(self.mapToScene(e.position().toPoint()))
+            return
         if self.tool in DRAW_TOOLS and self._puntos:
             p = self.mapToScene(e.position().toPoint())
             if self.tool in ("trazo", "rotulador"):
@@ -4835,6 +5108,10 @@ class CropView(QGraphicsView):
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
+        if self.tool == "seleccionar" and self._arrastre:
+            self._arrastre = False
+            self.drag_done.emit()
+            return
         if self.tool in DRAW_TOOLS and self._puntos:
             forma = self._forma()
             self._clear_preview()
@@ -5020,7 +5297,7 @@ class EditorDialog(QDialog):
         self._full_timer.timeout.connect(self.render_full)
         self.src = QImage()
         self.setWindowTitle(self._title())
-        self.resize(1000, 760)
+        self.resize(1200, 780)
 
         self.scene = QGraphicsScene(self)
         self.item = QGraphicsPixmapItem()
@@ -5034,6 +5311,25 @@ class EditorDialog(QDialog):
         self.view.cropped.connect(self.on_crop)
         self.view.drawn.connect(self.on_drawn)
         self.view.erased.connect(self.on_erase)
+        self.view.picked.connect(self.on_pick)
+        self.view.dragged.connect(self.on_drag)
+        self.view.drag_done.connect(self.on_drag_done)
+        self.view.double_clicked.connect(self.on_double_click)
+        self.view.delete_pressed.connect(self.delete_shape)
+        self.sel: int | None = None            # capa elegida (indice en edit["draw"])
+        self._move = None                      # arrastre en curso con Seleccionar
+        self._op_drag = None                   # (receta antes, opacidad) al pinchar el slider
+        self._drag_timer = QTimer(self)        # al arrastrar, repinta a ratos
+        self._drag_timer.setSingleShot(True)
+        self._drag_timer.setInterval(30)
+        self._drag_timer.timeout.connect(lambda: self.render_preview(reajustar=False))
+        self.sel_item = QGraphicsPathItem()    # el recuadro de la capa elegida
+        self.sel_item.setZValue(20)
+        pen_sel = QPen(QColor(theme_color("accent")), 0, Qt.PenStyle.DashLine)
+        pen_sel.setCosmetic(True)
+        self.sel_item.setPen(pen_sel)
+        self.sel_item.hide()
+        self.scene.addItem(self.sel_item)
 
         geo = QHBoxLayout()
         for txt, icono, fn, tip in (
@@ -5096,6 +5392,9 @@ class EditorDialog(QDialog):
         self._color_buttons: dict = {}
         for tool, icono, titulo, tip in (
                 (None, "move", "Move and zoom", "Drag the image around and zoom"),
+                ("seleccionar", "select", "Select and move",
+                 "Click a drawing to select it and drag it to move it. "
+                 "Double-click a text to change it"),
                 ("trazo", "pencil", "Pen", "Freehand stroke"),
                 ("rotulador", "marker", "Highlighter",
                  "Thick, see-through stroke"),
@@ -5134,7 +5433,7 @@ class EditorDialog(QDialog):
             b.setIconSize(QSize(18, 18))
             b.setToolTip(nombre)
             b.setAutoRaise(True)
-            b.clicked.connect(lambda _c, h=hexa: self.set_color(QColor(h)))
+            b.clicked.connect(lambda _c, h=hexa: self.on_color(QColor(h)))
             self.grupo_color.addButton(b)
             self._color_buttons[hexa.lower()] = b
             dibujo.addWidget(b)
@@ -5279,8 +5578,14 @@ class EditorDialog(QDialog):
         final.addWidget(b_cancel)
         final.addWidget(b_ok)
 
+        self.lienzo = QSplitter(Qt.Orientation.Horizontal)
+        self.lienzo.addWidget(self.view)
+        self.lienzo.addWidget(self._build_layers_panel())
+        self.lienzo.setStretchFactor(0, 1)
+        self.lienzo.setCollapsible(0, False)
+        self.lienzo.setSizes([800, 210])
         lay = QVBoxLayout(self)
-        lay.addWidget(self.view, 1)
+        lay.addWidget(self.lienzo, 1)
         lay.addLayout(geo)
         lay.addLayout(dibujo)
         lay.addLayout(ajustes)
@@ -5290,6 +5595,8 @@ class EditorDialog(QDialog):
         lay.addLayout(final)
 
         SK.bind(self, "fit", self.fit)
+        QShortcut(QKeySequence("Ctrl+]"), self, lambda: self.restack(1))
+        QShortcut(QKeySequence("Ctrl+["), self, lambda: self.restack(-1))
         HoldKey("before", self, self.set_before)
         QShortcut(QKeySequence.StandardKey.Undo, self, self.undo)
         QShortcut(QKeySequence.StandardKey.Redo, self, self.redo)
@@ -5634,7 +5941,7 @@ class EditorDialog(QDialog):
     def pick_color(self):
         c = QColorDialog.getColor(self.view.color, self, "Drawing colour")
         if c.isValid():
-            self.set_color(c)
+            self.on_color(c)
 
     def set_width(self, v: int):
         self.view.width = v
@@ -5664,34 +5971,358 @@ class EditorDialog(QDialog):
 
     @Slot(object)
     def on_erase(self, punto):
-        """Borra el dibujo de mas arriba que este bajo el puntero."""
-        formas = list(self.edit.get("draw") or [])
-        if not formas:
+        """Borra el dibujo visible de mas arriba que este bajo el puntero."""
+        i = self.shape_at(punto)
+        if i is None:
             return
-        t = source_to_display_transform(self.edit, *self.full_size)
+        self.push("erase a drawing")
+        self._remove_shape(i)
+
+    # --- capas -------------------------------------------------------------
+    def _build_layers_panel(self) -> QWidget:
+        der = QWidget()
+        ld = QVBoxLayout(der)
+        ld.setContentsMargins(6, 0, 0, 0)
+        ld.setSpacing(4)
+        et = QLabel("LAYERS")
+        themed(et, css="color:%(dim)s; font-size:11px; font-weight:600;")
+        et.setToolTip("Top of the list = in front. Drag to reorder, click the eye to hide.")
+        ld.addWidget(et)
+        self.layers = LayerList()
+        self.layers.setToolTip("Top of the list = in front. Drag to reorder; click the eye "
+                               "to hide (hidden layers are left out of exports and PDFs). "
+                               "Double-click a text to change it.")
+        self.layers.itemSelectionChanged.connect(self._on_layer_selected)
+        self.layers.eye_clicked.connect(self.toggle_visibility)
+        self.layers.itemDoubleClicked.connect(
+            lambda it: self.edit_text(it.data(LAYER_ROLE)))
+        self.layers.reordered.connect(self._on_layers_reordered)
+        self.layers.delete_pressed.connect(self.delete_shape)
+        ld.addWidget(self.layers, 1)
+        self.lbl_no_layers = QLabel("Nothing drawn yet. Every drawing you add "
+                                    "becomes a layer here.")
+        self.lbl_no_layers.setWordWrap(True)
+        themed(self.lbl_no_layers, css="color:%(dim)s;")
+        ld.addWidget(self.lbl_no_layers)
+        ld.addStretch(0)
+        fila_op = QHBoxLayout()
+        fila_op.setSpacing(6)
+        self.lbl_op_title = QLabel("Opacity")
+        fila_op.addWidget(self.lbl_op_title)
+        self.sld_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.sld_opacity.setRange(0, 100)
+        self.sld_opacity.setSingleStep(5)
+        self.sld_opacity.setPageStep(10)
+        self.sld_opacity.setValue(100)
+        self.sld_opacity.setToolTip("Opacity of the selected layer (it shows in exports too)")
+        self.sld_opacity.sliderPressed.connect(self._on_opacity_pressed)
+        self.sld_opacity.valueChanged.connect(self._on_opacity)
+        self.sld_opacity.sliderReleased.connect(self._on_opacity_released)
+        fila_op.addWidget(self.sld_opacity, 1)
+        self.lbl_opacity = QLabel("100 %")
+        self.lbl_opacity.setMinimumWidth(42)
+        self.lbl_opacity.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        fila_op.addWidget(self.lbl_opacity)
+        ld.addLayout(fila_op)
+        botones = QHBoxLayout()
+        botones.setSpacing(2)
+        self.b_raise = QToolButton()
+        self.b_lower = QToolButton()
+        self.b_del_layer = QToolButton()
+        for b, icono, tip, fn in (
+                (self.b_raise, "raise", "Bring forward (%s)" % keys_text("Ctrl+]"),
+                 lambda: self.restack(1)),
+                (self.b_lower, "lower", "Send backward (%s)" % keys_text("Ctrl+["),
+                 lambda: self.restack(-1)),
+                (self.b_del_layer, "trash", "Delete the selected drawing (Delete)",
+                 self.delete_shape)):
+            themed(b, icon=icono)
+            b.setIconSize(QSize(20, 20))
+            b.setAutoRaise(True)
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
+        botones.addWidget(self.b_raise)
+        botones.addWidget(self.b_lower)
+        botones.addStretch(1)
+        botones.addWidget(self.b_del_layer)
+        ld.addLayout(botones)
+        der.setMinimumWidth(180)
+        return der
+
+    def formas(self) -> list:
+        return list(self.edit.get("draw") or [])
+
+    def screen_transform(self) -> QTransform:
+        """De las coordenadas del original a los pixeles de lo que se ve."""
         k = self.render_scale or 1.0
+        return (source_to_display_transform(self.edit, *self.full_size)
+                * QTransform.fromScale(k, k))
+
+    def shape_at(self, punto, interior: bool = False):
+        """El indice del dibujo visible de mas arriba bajo el punto, o None.
+
+        interior=True vale tambien el hueco de rectangulos y elipses: es lo
+        comodo para elegirlos, pero la goma solo borra si tocas el trazo."""
+        formas = self.formas()
+        if not formas:
+            return None
+        T = self.screen_transform()
+        estira = math.sqrt(abs(T.determinant())) or 1.0
+        tol = max(5.0, 6.0 / max(self.view.transform().m11(), 1e-6))
         for i in range(len(formas) - 1, -1, -1):
             f = formas[i]
-            visible = dict(f, puntos=[[p.x() * k, p.y() * k]
-                                      for p in (t.map(QPointF(x, y))
-                                                for x, y in f["puntos"])])
-            if f["tipo"] == "difuminar":
-                toca = shape_path(visible).contains(punto)
-            elif f["tipo"] == "texto":
-                x, y = visible["puntos"][0]
-                alto = max(8.0, f.get("grosor", 4) * 5 * k)
-                zona = QRectF(x - alto, y - alto, alto * 12, alto * 1.6)
-                toca = zona.contains(punto)
+            if f.get("oculto") or not f.get("puntos"):
+                continue
+            tipo = f.get("tipo")
+            if tipo in ("texto", "difuminar"):
+                zona = QPainterPath()
+                zona.addRect(shape_box(f) if tipo == "texto"
+                             else shape_path(f).boundingRect())
+                toca = T.map(zona).contains(punto)
+            elif interior and tipo in ("rect", "elipse") and \
+                    T.map(shape_path(f)).contains(punto):
+                toca = True
             else:
                 stroker = QPainterPathStroker()
-                stroker.setWidth(max(10.0, f.get("grosor", 4) * k + 10))
-                toca = stroker.createStroke(shape_path(visible)).contains(punto)
+                stroker.setWidth(max(10.0, f.get("grosor", 4) * estira + 2 * tol))
+                toca = stroker.createStroke(T.map(shape_path(f))).contains(punto)
             if toca:
-                self.push("erase a drawing")
-                del formas[i]
-                self.edit["draw"] = formas
-                self.render_preview(reajustar=False)
-                return
+                return i
+        return None
+
+    def select_shape(self, i):
+        formas = self.formas()
+        self.sel = i if i is not None and 0 <= i < len(formas) else None
+        self.layers.blockSignals(True)
+        self.layers.clearSelection()
+        for fila in range(self.layers.count()):
+            it = self.layers.item(fila)
+            if it.data(LAYER_ROLE) == self.sel:
+                it.setSelected(True)
+                self.layers.setCurrentItem(it)
+                self.layers.scrollToItem(it)
+                break
+        self.layers.blockSignals(False)
+        self._sync_layer_controls()
+
+    def selected_shape(self):
+        formas = self.formas()
+        return formas[self.sel] if self.sel is not None and self.sel < len(formas) else None
+
+    def _sync_layer_controls(self):
+        f = self.selected_shape()
+        op = shape_opacity(f) if f else 100
+        self.sld_opacity.blockSignals(True)
+        self.sld_opacity.setValue(op)
+        self.sld_opacity.blockSignals(False)
+        self.lbl_opacity.setText("%d %%" % op)
+        hay = f is not None
+        n = len(self.formas())
+        for w in (self.sld_opacity, self.lbl_op_title, self.lbl_opacity, self.b_del_layer):
+            w.setEnabled(hay)
+        self.b_raise.setEnabled(hay and self.sel < n - 1)
+        self.b_lower.setEnabled(hay and self.sel > 0)
+        self._update_sel_overlay()
+
+    def _update_sel_overlay(self):
+        """Un recuadro discontinuo alrededor de la capa elegida."""
+        f = self.selected_shape()
+        if f is None or self._before or f.get("oculto") or not f.get("puntos"):
+            self.sel_item.hide()
+            return
+        caja = QPainterPath()
+        caja.addRect(shape_box(f).adjusted(-3, -3, 3, 3))
+        self.sel_item.setPath(self.screen_transform().map(caja))
+        self.sel_item.show()
+
+    def _rebuild_layers(self):
+        formas = self.formas()
+        if self.sel is not None and self.sel >= len(formas):
+            self.sel = None
+        self.layers.blockSignals(True)
+        self.layers.clear()
+        for i in range(len(formas) - 1, -1, -1):           # arriba de la lista = encima
+            f = formas[i]
+            it = QListWidgetItem(layer_icon(f), shape_label(f))
+            it.setData(LAYER_ROLE, i)
+            it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsDropEnabled)
+            if f.get("oculto"):
+                it.setForeground(QColor(theme_color("dim")))
+                it.setToolTip("Hidden: left out of exports and PDFs. Click the eye to show it.")
+            else:
+                it.setToolTip("Click the eye to hide it")
+            self.layers.addItem(it)
+            if i == self.sel:
+                it.setSelected(True)
+                self.layers.setCurrentItem(it)
+        self.layers.blockSignals(False)
+        self.layers.setVisible(bool(formas))
+        self.lbl_no_layers.setVisible(not formas)
+        self._sync_layer_controls()
+
+    def _on_layer_selected(self):
+        items = self.layers.selectedItems()
+        self.select_shape(items[0].data(LAYER_ROLE) if items else None)
+
+    def _set_formas(self, formas: list, descripcion: str | None = None):
+        """Cambia los dibujos (lista nueva: el deshacer guarda la vieja)."""
+        if descripcion:
+            self.push(descripcion)
+        self.edit["draw"] = formas
+        self.render_preview(reajustar=False)
+
+    def _replace_shape(self, i: int, nueva: dict, descripcion: str):
+        formas = self.formas()
+        formas[i] = nueva
+        self._set_formas(formas, descripcion)
+
+    def _remove_shape(self, i: int):
+        formas = self.formas()
+        del formas[i]
+        if self.sel is not None:
+            self.sel = None if self.sel == i else (self.sel - 1 if self.sel > i else self.sel)
+        self._set_formas(formas)
+
+    def delete_shape(self):
+        if self.selected_shape() is None:
+            return
+        self.push("delete a drawing")
+        self._remove_shape(self.sel)
+
+    def toggle_visibility(self, i=None):
+        i = self.sel if i is None else i
+        formas = self.formas()
+        if i is None or not 0 <= i < len(formas):
+            return
+        f = formas[i]
+        nueva = ({k: v for k, v in f.items() if k != "oculto"} if f.get("oculto")
+                 else dict(f, oculto=True))
+        # fuera del clic: rehacer la lista borra el elemento que lo recibio
+        QTimer.singleShot(0, lambda: self._replace_shape(
+            i, nueva, "show a drawing" if f.get("oculto") else "hide a drawing"))
+
+    def restack(self, delta: int):
+        """Sube (delta > 0) o baja la capa elegida un puesto."""
+        formas = self.formas()
+        if self.selected_shape() is None:
+            return
+        j = max(0, min(len(formas) - 1, self.sel + delta))
+        if j == self.sel:
+            return
+        formas.insert(j, formas.pop(self.sel))
+        self.sel = j
+        self._set_formas(formas, "move a layer")
+
+    def _on_layers_reordered(self):
+        formas = self.formas()
+        orden = [self.layers.item(r).data(LAYER_ROLE) for r in range(self.layers.count())]
+        nuevo = list(reversed(orden))                   # de abajo arriba
+        if sorted(nuevo) != list(range(len(formas))) or nuevo == list(range(len(formas))):
+            QTimer.singleShot(0, self._rebuild_layers)
+            return
+        if self.sel is not None:
+            self.sel = nuevo.index(self.sel)
+        QTimer.singleShot(0, lambda: self._set_formas([formas[k] for k in nuevo],
+                                                      "reorder the layers"))
+
+    def _with_opacity(self, f: dict, v: int) -> dict:
+        return ({k: x for k, x in f.items() if k != "opacidad"} if v >= 100
+                else dict(f, opacidad=int(v)))
+
+    def _on_opacity_pressed(self):
+        f = self.selected_shape()
+        self._op_drag = (dict(self.edit), shape_opacity(f)) if f else None
+
+    def _on_opacity(self, v: int):
+        self.lbl_opacity.setText("%d %%" % v)
+        f = self.selected_shape()
+        if f is None or shape_opacity(f) == v:
+            return
+        if self.sld_opacity.isSliderDown():             # arrastrando: se ve al momento
+            formas = self.formas()
+            formas[self.sel] = self._with_opacity(f, v)
+            self._set_formas(formas)
+            return
+        self._replace_shape(self.sel, self._with_opacity(f, v), "layer opacity")
+
+    def _on_opacity_released(self):
+        if self._op_drag is None:
+            return
+        antes, op = self._op_drag
+        self._op_drag = None
+        f = self.selected_shape()
+        if f is not None and shape_opacity(f) != op:
+            self._undo.append(("layer opacity", antes))  # el arrastre, un solo paso
+            del self._undo[:-UNDO_LIMIT]
+            self._redo.clear()
+            self.update_undo_buttons()
+
+    def on_color(self, c: QColor):
+        """Elige el color de lo siguiente que dibujes; con una capa elegida,
+        tambien se lo pone a ella."""
+        self.set_color(c)
+        f = self.selected_shape()
+        if f is not None and f.get("tipo") != "difuminar" \
+                and f.get("color", "").lower() != c.name().lower():
+            self._replace_shape(self.sel, dict(f, color=c.name()), "recolour a drawing")
+
+    def edit_text(self, i=None):
+        i = self.sel if i is None else i
+        formas = self.formas()
+        if i is None or not 0 <= i < len(formas) or formas[i].get("tipo") != "texto":
+            return
+        f = formas[i]
+        txt, ok = QInputDialog.getText(self, "Text", "Change the text:",
+                                       QLineEdit.EchoMode.Normal, f.get("texto", ""))
+        if ok and txt.strip() and txt.strip() != f.get("texto"):
+            self._replace_shape(i, dict(f, texto=txt.strip()), "change a text")
+
+    @Slot(object)
+    def on_pick(self, punto):
+        """Seleccionar: elige el dibujo de encima y lo prepara para moverlo."""
+        i = self.shape_at(punto, interior=True)
+        self.select_shape(i)
+        f = self.selected_shape()
+        self._move = None if f is None else {
+            "i": i, "desde": QPointF(punto), "original": f, "antes": dict(self.edit),
+            "movido": False}
+
+    @Slot(object)
+    def on_drag(self, punto):
+        m = self._move
+        if m is None:
+            return
+        inv, ok = self.screen_transform().inverted()
+        if not ok:
+            return
+        a, b = inv.map(m["desde"]), inv.map(QPointF(punto))
+        formas = self.formas()
+        # siempre desde el original: el arrastre entero es un paso de deshacer
+        formas[m["i"]] = moved_shape(m["original"], b.x() - a.x(), b.y() - a.y())
+        self.edit["draw"] = formas
+        m["movido"] = True
+        self._update_sel_overlay()
+        if not self._drag_timer.isActive():
+            self._drag_timer.start()
+
+    @Slot()
+    def on_drag_done(self):
+        m, self._move = self._move, None
+        if m is None or not m["movido"]:
+            return
+        self._drag_timer.stop()
+        self._undo.append(("move a drawing", m["antes"]))
+        del self._undo[:-UNDO_LIMIT]
+        self._redo.clear()
+        self.update_undo_buttons()
+        self.render_preview(reajustar=False)
+
+    @Slot(object)
+    def on_double_click(self, punto):
+        i = self.shape_at(punto, interior=True)
+        if i is not None:
+            self.select_shape(i)
+            self.edit_text(i)
 
     def clear_drawings(self):
         if self.edit.get("draw"):
@@ -5789,6 +6420,7 @@ class EditorDialog(QDialog):
         self._sin_recursion = False
         self.b_uncrop.setEnabled(self.edit["crop"] is not None)
         self.b_undraw.setEnabled(bool(self.edit.get("draw")))
+        self._rebuild_layers()
 
     def fit(self):
         if not self.item.pixmap().isNull():
@@ -5889,7 +6521,8 @@ you have chosen: a grade from 0 to 10 (decimals allowed) and a free comment,
 for images, GIFs and videos alike.</li>
 <li>Press <b>[[note]]</b> (or right-click ▸ <i>Grade / comment…</i>) to jump to the
 grade box; <b>Tab</b> goes on to the comment. They are saved as you type.
-<i>Copy comment</i> puts its text on the clipboard.</li>
+<i>Copy comment</i> puts its text on the clipboard. Drag the little handle under
+the comment box to make it taller or shorter (double-click it for the usual size).</li>
 <li>The grade shows on the thumbnail, red below 5, amber up to 7, green from
 there; a speech bubble means there is a comment. Hover over the thumbnail to
 read it. The preview and the large window show both under the image.</li>
@@ -5959,6 +6592,12 @@ to JPG. Crop afterwards to trim them.</li>
 <li><b>Drawing tools</b> like a snipping tool: pen, highlighter, line, arrow,
 rectangle, ellipse and text, in ten colours. The <b>eraser removes the whole
 stroke you click on</b> — each one is an object, not pixels.</li>
+<li><b>Layers</b> (the panel at the right of the editor): every drawing is a layer,
+the top of the list in front. Click the <b>eye</b> to hide one (hidden layers stay out
+of exports and PDFs), drag them to reorder, use the arrows to bring one forward or
+send it back, <b>Opacity</b> to make it see-through, and the bin (or Delete) to remove it.
+With <b>Select and move</b> click a drawing to select it and drag it somewhere else;
+click a colour to recolour the selected one, double-click a text to change it.</li>
 <li><b>Blur area</b> (in the drawing tools) blurs whatever is inside the
 rectangle you drag: names, faces, anything you must hide before sharing.
 Arrows and text drawn on top stay sharp, and the eraser removes the blur.</li>
@@ -5981,6 +6620,11 @@ resolution into the folder you choose. Existing files are never overwritten.</li
 <li><i>Export…</i> ▸ <i>PDF, one image per page</i> (also in the right-click menu)
 puts the selected images, edits applied, in a PDF. Tick what goes under each
 image: the <b>file name</b>, the <b>grade</b> and the <b>comments</b>.</li>
+<li><i>Export…</i> ▸ <i>One PDF per folder</i> (also in the right-click menu and in
+<b>Library</b>) makes <b>one PDF for each student</b>: choose the class folder, with a
+subfolder per student, and every subfolder becomes <i>Name of the folder.pdf</i>, with
+everything inside it (submissions in deeper folders included). With several images
+selected, only those go in.</li>
 <li><b>Library ▸ Export library…</b> saves the whole classification —
 folders, categories, assignments, edits and drawings — into one file.
 Paths are stored relative to a common root, so the file also works on
@@ -6339,6 +6983,7 @@ class MainWindow(QMainWindow):
         self.video_marks: dict[str, list[int]] = {}  # ruta de video -> ms clave
         self.notes: dict[str, dict] = {}             # ruta -> {grade, comment}
         self.note_editors: list = []                 # los editores de notas abiertos
+        self.note_heights = dict(NOTE_HEIGHTS)       # alto de la caja del comentario
         self.show_notes = True                       # verlas u ocultarlas (Ctrl+G)
         self.preview_notes = True                    # barra de nota bajo la vista previa
         self.viewer_notes = True                     # y en la ventana grande
@@ -6583,6 +7228,7 @@ class MainWindow(QMainWindow):
         menu_export = QMenu(self.b_export)
         menu_export.addAction("Images with the edits applied\u2026", self.export_selected)
         menu_export.addAction("PDF, one image per page\u2026", self.export_selected_pdf)
+        menu_export.addAction("One PDF per folder (per student)\u2026", self.export_folders_pdf)
         self.b_export.setMenu(menu_export)
         self.b_assign = QPushButton("  Assign to selected category")
         themed(self.b_assign, icon="assign")
@@ -6761,6 +7407,22 @@ class MainWindow(QMainWindow):
         """El panel sigue al archivo elegido en la rejilla."""
         self.note_editor.set_path(self.note_target())
 
+    def note_height(self, compact: bool) -> int:
+        return getattr(self, "note_heights", NOTE_HEIGHTS)[bool(compact)]
+
+    def set_note_height(self, compact: bool, h: int, guardar: bool = True):
+        """El tirador de cualquier caja cambia todas las del mismo tipo.
+        h < 0: el alto de siempre."""
+        compact = bool(compact)
+        lo, hi = NOTE_HEIGHT_RANGE
+        h = NOTE_HEIGHTS[compact] if h < 0 else max(lo, min(hi, int(h)))
+        self.note_heights[compact] = h
+        for e in self.live_note_editors():
+            if e.compact == compact:
+                e.txt.setFixedHeight(h)
+        if guardar:
+            self.touch()
+
     def live_note_editors(self) -> list:
         vivos = []
         for e in self.note_editors:
@@ -6898,18 +7560,12 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
-    def export_selected_pdf(self):
-        """Las imagenes elegidas, con su edicion, a un PDF de una por pagina."""
-        self.commit_note()
-        sel = self.selected_images()
-        if not sel:
-            self.statusBar().showMessage("Select the images to export first.", 5000)
-            return
+    def pdf_options(self, titulo: str, texto: str, paths: list[str]):
+        """Que va debajo de cada imagen. None si se cancela."""
         dlg = QDialog(self)
-        dlg.setWindowTitle("Export to PDF")
+        dlg.setWindowTitle(titulo)
         lay = QVBoxLayout(dlg)
-        lay.addWidget(QLabel("%d image%s, one per page, with their edits applied."
-                             % (len(sel), "" if len(sel) == 1 else "s")))
+        lay.addWidget(QLabel(texto))
         chk_name = QCheckBox("File name")
         chk_grade = QCheckBox("Grade")
         chk_comment = QCheckBox("Comments")
@@ -6919,19 +7575,33 @@ class MainWindow(QMainWindow):
             chk_name.setToolTip("Blind mode hides the file names")
         chk_grade.setChecked(self.show_notes)
         chk_comment.setChecked(self.show_notes)
-        con_nota = sum(1 for p in sel if self.notes.get(p))
         for c in (chk_name, chk_grade, chk_comment):
             lay.addWidget(c)
-        if not con_nota:
-            lay.addWidget(QLabel("<i>None of the selected files has a grade or a comment.</i>"))
+        if not any(self.notes.get(p) for p in paths):
+            lay.addWidget(QLabel("<i>None of these files has a grade or a comment.</i>"))
         botones = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                    | QDialogButtonBox.StandardButton.Cancel)
         botones.accepted.connect(dlg.accept)
         botones.rejected.connect(dlg.reject)
         lay.addWidget(botones)
         if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return {"show_name": chk_name.isChecked(), "show_grade": chk_grade.isChecked(),
+                "show_comment": chk_comment.isChecked()}
+
+    def export_selected_pdf(self):
+        """Las imagenes elegidas, con su edicion, a un PDF de una por pagina."""
+        self.commit_note()
+        sel = self.selected_images()
+        if not sel:
+            self.statusBar().showMessage("Select the images to export first.", 5000)
             return
-        nombre = re.sub(r'[\\/:*?"<>|]+', "-", self.view_title()).strip() or "DriloBoard"
+        opciones = self.pdf_options(
+            "Export to PDF", "%d image%s, one per page, with their edits applied."
+            % (len(sel), "" if len(sel) == 1 else "s"), sel)
+        if opciones is None:
+            return
+        nombre = safe_file_name(self.view_title())
         destino, _ = QFileDialog.getSaveFileName(
             self, "Export to PDF", os.path.join(self.export_dir or str(Path.home()),
                                                 nombre + ".pdf"), "PDF (*.pdf)")
@@ -6940,9 +7610,7 @@ class MainWindow(QMainWindow):
         if not destino.lower().endswith(".pdf"):
             destino += ".pdf"
         try:
-            self.write_selection_pdf(sel, destino, show_name=chk_name.isChecked(),
-                                     show_grade=chk_grade.isChecked(),
-                                     show_comment=chk_comment.isChecked())
+            self.write_selection_pdf(sel, destino, **opciones)
         except OSError as e:
             QMessageBox.warning(self, APP_NAME, "Could not write the PDF:\n%s" % e)
             return
@@ -6956,6 +7624,84 @@ class MainWindow(QMainWindow):
         caja.exec()
         if caja.clickedButton() is b_abrir:
             QDesktopServices.openUrl(QUrl.fromLocalFile(destino))
+
+    def folder_pdf_plan(self, paths: list[str] | None = None) -> list[tuple[str, str, list[str]]]:
+        """[(nombre del PDF, carpeta, imagenes)]: un PDF por alumno.
+
+        Sin 'paths', todo lo que se ve en la rejilla (los videos no van)."""
+        if paths is None:
+            paths = list(self.model.paths())
+        paths = [p for p in paths if not is_video(p)]
+        grupos = folder_groups(paths, self.selected_folders())
+        nombres = folder_pdf_names([c for c, _ in grupos])
+        return [(n, c, ps) for n, (c, ps) in zip(nombres, grupos)]
+
+    def write_folder_pdfs(self, plan, carpeta: str, *, show_name=True, show_grade=True,
+                          show_comment=True) -> list[str]:
+        """Sin dialogos, para que las pruebas usen este mismo camino."""
+        hechos = []
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            for i, (nombre, _c, ps) in enumerate(plan):
+                self.statusBar().showMessage("PDF %d of %d: %s" % (i + 1, len(plan), nombre))
+                QApplication.processEvents()
+                destino = os.path.join(carpeta, nombre + ".pdf")
+                write_selection_pdf(self.selection_pdf_items(ps), destino, nombre,
+                                    show_name=show_name, show_grade=show_grade,
+                                    show_comment=show_comment)
+                hechos.append(destino)
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.statusBar().clearMessage()
+        return hechos
+
+    def export_folders_pdf(self):
+        """Un PDF por carpeta (por alumno), con el nombre de la carpeta."""
+        self.commit_note()
+        sel = self.selected_images()
+        plan = self.folder_pdf_plan(sel if len(sel) > 1 else None)
+        if not plan:
+            QMessageBox.information(
+                self, APP_NAME, "There are no images in view.\n\nChoose the class "
+                "folder (with one subfolder per student) or the students' folders first.")
+            return
+        n_img = sum(len(ps) for _n, _c, ps in plan)
+        muestra = ", ".join(n for n, _c, _p in plan[:4]) + (u", \u2026" if len(plan) > 4 else "")
+        opciones = self.pdf_options(
+            "One PDF per folder",
+            "%d PDF%s (%s), %d image%s in all.\nEach PDF takes the name of its folder."
+            % (len(plan), "" if len(plan) == 1 else "s", muestra, n_img,
+               "" if n_img == 1 else "s")
+            + ("\nOnly the selected images." if len(sel) > 1 else ""),
+            [p for _n, _c, ps in plan for p in ps])
+        if opciones is None:
+            return
+        carpeta = QFileDialog.getExistingDirectory(
+            self, "Where to save the PDFs", self.export_dir or str(Path.home()))
+        if not carpeta:
+            return
+        ya = [n for n, _c, _p in plan if os.path.exists(os.path.join(carpeta, n + ".pdf"))]
+        if ya and QMessageBox.question(
+                self, APP_NAME, "%d of these PDFs already exist in that folder (%s).\n"
+                "Replace them?" % (len(ya), ", ".join(ya[:3]) + (u"\u2026" if len(ya) > 3 else ""))
+                ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            hechos = self.write_folder_pdfs(plan, carpeta, **opciones)
+        except OSError as e:
+            QMessageBox.warning(self, APP_NAME, "Could not write the PDFs:\n%s" % e)
+            return
+        self.export_dir = carpeta
+        self.touch()
+        caja = QMessageBox(self)
+        caja.setWindowTitle(APP_NAME)
+        caja.setText("%d PDF%s saved to:\n%s" % (len(hechos), "" if len(hechos) == 1 else "s",
+                                                carpeta))
+        b_abrir = caja.addButton("Show folder", QMessageBox.ButtonRole.AcceptRole)
+        caja.addButton(QMessageBox.StandardButton.Close)
+        caja.exec()
+        if caja.clickedButton() is b_abrir:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(carpeta))
 
     def clear_note(self):
         self.note_editor.clear()
@@ -7468,6 +8214,9 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         a = m.addAction("Export grades and comments…", self.export_notes)
         a.setToolTip("PDF, spreadsheet or Word with the grades and comments of the files in view")
+        a = m.addAction("One PDF per folder (per student)…", self.export_folders_pdf)
+        a.setToolTip("A PDF for each student folder in view, named after the folder, "
+                     "with the edits applied")
         m.addSeparator()
         a = m.addAction("Refresh folders", self.rescan)
         themed(a, std="SP_BrowserReload")
@@ -8116,6 +8865,7 @@ class MainWindow(QMainWindow):
                 ed.addAction("Remove the edits", lambda: self.quick_edit("reset"))
         m.addAction("Export images with the edits applied\u2026", self.export_selected)
         m.addAction("Export to PDF\u2026", self.export_selected_pdf)
+        m.addAction("One PDF per folder (per student)\u2026", self.export_folders_pdf)
         if self.show_notes:
             m.addAction("Grade / comment\u2026", lambda: self.note_from_menu(idx))
         m.addSeparator()
@@ -8164,6 +8914,8 @@ class MainWindow(QMainWindow):
             "show_notes": self.show_notes,
             "preview_notes": self.preview_notes,
             "viewer_notes": self.viewer_notes,
+            "note_height": self.note_heights[False],
+            "note_height_compact": self.note_heights[True],
         }
         try:
             tmp = STATE_FILE.with_suffix(".tmp")
@@ -8200,6 +8952,10 @@ class MainWindow(QMainWindow):
         self.chk_names.setChecked(bool(data.get("show_names", True)))
         self.set_blind(bool(data.get("blind", False)))
         self.viewer_notes = bool(data.get("viewer_notes", True))
+        for compacta, clave in ((False, "note_height"), (True, "note_height_compact")):
+            h = data.get(clave)
+            if isinstance(h, (int, float)):
+                self.set_note_height(compacta, int(h), guardar=False)
         self.preview_notes = bool(data.get("preview_notes", True))
         self.preview.b_notes.setChecked(self.preview_notes)
         self.set_show_notes(bool(data.get("show_notes", True)))

@@ -7,7 +7,17 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
-Novedades de la 1.6:
+Novedades de la 1.7:
+
+  - Un PDF por alumno: Export > "One PDF per folder (per student)". Con la
+    carpeta de la clase elegida, cada subcarpeta sale como un PDF con su
+    nombre. Tambien en el boton derecho y en Library.
+  - Capas en el editor, como en DriloReview: ocultar con el ojo, reordenar,
+    subir y bajar, opacidad, borrar. Nueva herramienta "Select and move" para
+    elegir un dibujo y moverlo; con uno elegido, un color se lo cambia.
+  - La caja del comentario es mas grande y se estira con el tirador de debajo.
+
+De la 1.6:
 
   - Export > "PDF, one image per page": exporta las imagenes seleccionadas a
     un PDF, una por pagina y con la edicion aplicada, con marcas para anadir

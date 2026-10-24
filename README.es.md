@@ -21,7 +21,7 @@ botón *Export*.
 ## Arrancar
 
 **Versión portable (lo normal).** Descomprime
-`DriloBoard-1.6.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
+`DriloBoard-1.7.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
 red— y ejecuta `DriloBoard.exe`. No instala nada ni escribe en el registro.
 La biblioteca y la caché de miniaturas se crean **dentro de esa misma
 carpeta**, así que copiándola te llevas también toda la clasificación.
@@ -30,7 +30,7 @@ La primera vez Windows puede avisar de que el origen es desconocido (el
 ejecutable no está firmado): *Más información* → *Ejecutar de todas formas*.
 
 **Versión portable para Mac.** Descomprime
-`DriloBoard-1.6.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
+`DriloBoard-1.7.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
 `DriloBoard.app` dentro. Una sola app para Mac Intel y Apple Silicon, macOS 13
 Ventura o posterior. Igual que en Windows, la biblioteca y la caché se crean
 **en esa carpeta, junto a la app** (nunca dentro del `.app`), así que se puede
@@ -268,6 +268,9 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   `Tab` pasa al comentario. Se guarda solo al dejar de escribir un momento o al
   cambiar de archivo. *Copy comment* copia el texto del comentario al
   portapapeles, para pegarlo donde haga falta.
+- La caja del comentario se agranda o achica arrastrando el **tirador** de
+  cuatro puntitos que tiene debajo; doble clic la deja como siempre. El alto
+  se recuerda y vale para todas las cajas del mismo sitio.
 - Sin nota se ve una raya: baja con la flecha por debajo de 0, o *Clear*, que
   borra nota y comentario.
 - La nota sale en la miniatura, abajo a la derecha: **roja** por debajo de 5,
@@ -380,6 +383,15 @@ después.
       pongas la imagen en blanco y negro.
     - `Ctrl+Z` deshace trazo a trazo. *Clear drawings* los quita todos (y
       también se deshace).
+    - **Capas** (panel *LAYERS* a la derecha del editor), como en
+      DriloReview: cada dibujo es una capa y la de arriba de la lista queda
+      encima. El **ojo** la oculta (las ocultas no salen al exportar ni en
+      los PDF); arrastrar reordena; las flechas (`Ctrl+]` / `Ctrl+[`) la
+      suben o bajan; *Opacity* la vuelve transparente; la papelera o `Supr`
+      la borran.
+    - *Select and move* (el puntero): pincha un dibujo para elegirlo y
+      arrástralo. Con uno elegido, un clic en un color se lo cambia; doble
+      clic en un texto para corregirlo.
   - *Move and zoom* es el modo normal: arrastrar y hacer zoom sin pintar nada.
   - **Tamaño de salida** en píxeles, con proporción bloqueada si quieres.
     Recortar recalcula el tamaño, porque el que hubiera era para el encuadre
@@ -412,6 +424,13 @@ después.
   derecho. El PDF lleva las imágenes seleccionadas con la edición aplicada,
   una por página, y marcas para añadir debajo el **nombre**, la **nota** y los
   **comentarios**.
+- **Un PDF por alumno**: *Export…* ▸ *One PDF per folder (per student)*
+  (también en el botón derecho y en *Library*). Elige la carpeta de la clase,
+  con una subcarpeta por alumno: cada subcarpeta sale como
+  `Nombre de la carpeta.pdf`, con todo lo que tenga dentro (también lo que esté
+  en carpetas más hondas, como `intento_1`). Si hay varias imágenes
+  seleccionadas, solo van esas. Si ya existe alguno, pregunta antes de
+  sustituirlo.
 
 ## Tema oscuro o claro
 

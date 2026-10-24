@@ -21,7 +21,7 @@ botón *Export*.
 ## Arrancar
 
 **Versión portable (lo normal).** Descomprime
-`DriloBoard-1.10.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
+`DriloBoard-1.11.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
 red— y ejecuta `DriloBoard.exe`. No instala nada ni escribe en el registro.
 La biblioteca y la caché de miniaturas se crean **dentro de esa misma
 carpeta**, así que copiándola te llevas también toda la clasificación.
@@ -30,7 +30,7 @@ La primera vez Windows puede avisar de que el origen es desconocido (el
 ejecutable no está firmado): *Más información* → *Ejecutar de todas formas*.
 
 **Versión portable para Mac.** Descomprime
-`DriloBoard-1.10.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
+`DriloBoard-1.11.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
 `DriloBoard.app` dentro. Una sola app para Mac Intel y Apple Silicon, macOS 13
 Ventura o posterior. Igual que en Windows, la biblioteca y la caché se crean
 **en esa carpeta, junto a la app** (nunca dentro del `.app`), así que se puede
@@ -228,8 +228,10 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   - *Export…* copia tal cual un GIF sin editar (sigue animado). Uno editado
     sale como PNG de su primer fotograma.
   - Un GIF de un solo fotograma se ve como cualquier imagen, sin barra.
-- Doble clic abre el visor grande: `←`/`→` pasan imágenes, rueda hace zoom,
-  arrastrar mueve, `0` reencuadra, `F` o `F11` pantalla completa, `Esc` cierra.
+- **Doble clic en una imagen abre el editor** (un vídeo o un GIF, el visor
+  grande). El visor grande se abre con *Open large*, bajo la vista previa:
+  `←`/`→` pasan imágenes, rueda hace zoom, arrastrar mueve, `0` reencuadra,
+  `F` o `F11` pantalla completa, `Esc` cierra.
 - Clic derecho: abrir, abrir la carpeta contenedora, copiar ruta, asignar o
   quitar de categorías, poner nota o comentario.
 - Las miniaturas seleccionadas llevan un **marco azul** bien visible.
@@ -434,6 +436,13 @@ después.
       los PDF); arrastrar reordena; las flechas (`Ctrl+]` / `Ctrl+[`) la
       suben o bajan; *Opacity* la vuelve transparente; la papelera o `Supr`
       la borran.
+    - **Opacity** y **Hardness**, junto a *Size*: la opacidad y la dureza
+      del siguiente trazo. Con menos dureza el borde se difumina como un
+      aerógrafo (el centro sigue sólido). En el panel de capas se cambian las
+      dos para el dibujo elegido.
+    - **Colour layer**: tapa la imagen con el color elegido, a medias
+      transparente, como una capa más. Dibuja encima para que tus marcas
+      resalten; su opacidad (o esconderla) va en el panel de capas.
     - *Select and move* (el puntero): pincha un dibujo para elegirlo y
       arrástralo. Con uno elegido, un clic en un color se lo cambia; doble
       clic en un texto para corregirlo.
@@ -468,7 +477,10 @@ después.
   arriba) o *PDF, one image per page*, que también está en el menú del botón
   derecho. El PDF lleva las imágenes seleccionadas con la edición aplicada,
   una por página, y marcas para añadir debajo el **nombre**, la **nota** y los
-  **comentarios**.
+  **comentarios**. Con **The original next to the edited one**, cada archivo
+  editado sale con la original al lado (o encima, si son apaisadas), cada una
+  con su rótulo, que escribes tú (por ejemplo *Original* / *Corregida*): así
+  el alumno ve el cambio. Vale también para el PDF por alumno y se recuerda.
 - **Un PDF por alumno**: *Export…* ▸ *One PDF per folder (per student)*
   (también en el botón derecho y en *Library*). Elige la carpeta de la clase,
   con una subcarpeta por alumno: cada subcarpeta sale como

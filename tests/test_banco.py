@@ -157,8 +157,31 @@ z = lst.delegate.zones(rect)
 QTest.mouseClick(lst.viewport(), Qt.MouseButton.LeftButton, pos=z["check"].center())
 assert bank.checked == {1} and bank.bulk.isVisibleTo(bank)
 assert win.note_editor.txt.toPlainText() == antes + " Muy buen ejercicio :) ", "la casilla no inserta"
+# la barra de "varias a la vez" encoge la lista: en Windows sale una barra de
+# desplazamiento con anchura y las tarjetas se estrechan. Se mide de nuevo
+app.processEvents()
+z = lst.delegate.zones(lst.visualItemRect(lst.item(0)))
+eventos = []
+
+
+class Espia(visor.QObject):
+    def eventFilter(self, obj, e):
+        if e.type() in (visor.QEvent.Type.MouseButtonPress, visor.QEvent.Type.MouseButtonRelease,
+                        visor.QEvent.Type.MouseButtonDblClick):
+            eventos.append((e.type().name, e.position().toPoint().toTuple()))
+        return False
+
+
+espia = Espia()
+lst.viewport().installEventFilter(espia)
 QTest.mouseClick(lst.viewport(), Qt.MouseButton.LeftButton, pos=z["edit"].center())
-assert bank.edit_idx == 1 and bank.in_title.text() == "Muy bueno" and bank.b_update.isVisibleTo(bank)
+lst.viewport().removeEventFilter(espia)
+assert bank.edit_idx == 1 and bank.in_title.text() == "Muy bueno" and bank.b_update.isVisibleTo(bank), \
+    "lapiz: edit_idx=%r titulo=%r eventos=%r zonas=%r rect=%r viewport=%r zona_en=%r texto=%r msg=%r" % (
+        bank.edit_idx, bank.in_title.text(), eventos, {k: v.getRect() for k, v in z.items()},
+        lst.visualItemRect(lst.item(0)).getRect(), lst.viewport().size().toTuple(),
+        lst.delegate.zone_at(lst.visualItemRect(lst.item(0)), z["edit"].center()),
+        win.note_editor.txt.toPlainText()[-40:], win.statusBar().currentMessage())
 bank.cancel_edit()
 # un doble clic de verdad (como lo ve Windows) tambien llega a la zona
 QTest.mouseDClick(lst.viewport(), Qt.MouseButton.LeftButton, pos=z["edit"].center())

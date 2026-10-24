@@ -43,7 +43,7 @@ from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices, QFon
                            QTextCursor, QTransform)
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QBoxLayout, QCheckBox,
                                QComboBox,
-                               QDialog, QDoubleSpinBox, QStyleOptionViewItem,
+                               QDialog, QDialogButtonBox, QDoubleSpinBox, QStyleOptionViewItem,
                                QFileDialog, QFrame, QGraphicsItem, QGraphicsPixmapItem,
                                QGraphicsScene,
                                QGraphicsView, QHBoxLayout, QInputDialog, QLabel,
@@ -69,7 +69,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.5.2"
+VERSION = "1.6.0"
 
 
 def app_dir() -> Path:
@@ -590,7 +590,7 @@ ADJUST_SLIDERS = [("bright", "Brightness", -100, 100),
 def empty_edit() -> dict:
     return {"crop": None, "rot": 0, "angle": 0, "flip_h": False, "flip_v": False,
             "gray": False, "bright": 0, "contrast": 0, "blur": 0, "hue": 0, "sat": 0, "light": 0,
-            "resize": None,
+            "resize": None, "pad": None,
             "draw": []}
 
 
@@ -794,7 +794,7 @@ def edit_signature(edit: dict | None) -> str:
         # sin giro libre la firma queda como antes de existir el angulo, y las
         # miniaturas ya cacheadas de ediciones viejas siguen valiendo
         del d["angle"]
-    for k in ("blur", "hue", "sat", "light"):
+    for k in ("blur", "hue", "sat", "light", "pad"):
         if not d.get(k):
             d.pop(k, None)           # idem: las ediciones viejas conservan su firma
     return json.dumps(d, sort_keys=True)
@@ -857,6 +857,30 @@ def _blur(img: QImage, radio: int) -> QImage:
                       Qt.TransformationMode.SmoothTransformation)
 
 
+def crop_canvas(img: QImage, crop, pad: str | None) -> QImage:
+    """Recorta, o amplia el lienzo si el encuadre se sale de la imagen.
+
+    Lo que cae fuera queda del color 'pad' (None = transparente).
+    """
+    r = QRect(*crop)
+    todo = QRect(0, 0, img.width(), img.height())
+    if r.isEmpty():
+        return img
+    if todo.contains(r):
+        return img.copy(r)
+    fondo = QColor(pad) if pad else QColor(0, 0, 0, 0)
+    opaco = fondo.alpha() == 255 and not img.hasAlphaChannel()
+    out = QImage(r.size(), QImage.Format.Format_RGB32 if opaco
+                 else QImage.Format.Format_ARGB32_Premultiplied)
+    out.fill(fondo)
+    dentro = r.intersected(todo)
+    if not dentro.isEmpty():
+        p = QPainter(out)
+        p.drawImage(dentro.topLeft() - r.topLeft(), img.copy(dentro))
+        p.end()
+    return out
+
+
 def apply_edit(img: QImage, edit: dict | None) -> QImage:
     if img.isNull() or is_empty_edit(edit):
         return img
@@ -866,9 +890,7 @@ def apply_edit(img: QImage, edit: dict | None) -> QImage:
         img = rotate_free(img, angulo)
     crop = edit.get("crop")
     if crop:
-        r = QRect(*crop).intersected(QRect(0, 0, img.width(), img.height()))
-        if not r.isEmpty():
-            img = img.copy(r)
+        img = crop_canvas(img, crop, edit.get("pad"))
     rot = edit.get("rot", 0) % 360
     if rot:
         img = img.transformed(QTransform().rotate(rot),
@@ -1286,6 +1308,133 @@ def write_notes_docx(filas: list[dict], destino: str, titulo: str, subtitulo: st
         z.writestr("docProps/core.xml", core)
         for n, img in enumerate(thumbs, 1):
             z.writestr("word/media/image%d.png" % n, _png_bytes(img))
+
+
+# --------------------------------------------------------------------------- #
+#  Una seleccion de imagenes a PDF: una por pagina, con la edicion aplicada y,
+#  si se pide, el nombre, la nota y el comentario debajo.
+# --------------------------------------------------------------------------- #
+PDF_IMG_MAX = 2400                   # lado mayor de la imagen en el PDF, en px
+
+
+def pdf_page_image(path: str, edit: dict | None, lado: int = PDF_IMG_MAX) -> QImage:
+    """La imagen de una pagina: con sus ediciones, reducida si es enorme y
+    siempre sobre blanco (un giro libre deja esquinas transparentes)."""
+    img = QImage()
+    if not is_video(path):
+        reader = QImageReader(path)
+        reader.setAutoTransform(True)
+        tam = reader.size()
+        k = 1.0
+        if tam.isValid() and max(tam.width(), tam.height()) > lado:
+            menor = tam.scaled(QSize(lado, lado), Qt.AspectRatioMode.KeepAspectRatio)
+            reader.setScaledSize(menor)
+            k = menor.width() / tam.width()
+        img = apply_edit(reader.read(), scaled_edit(edit, k))
+        if not img.isNull() and max(img.width(), img.height()) > lado:
+            img = img.scaled(lado, lado, Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+    if img.isNull():
+        return report_thumb(path, edit, lado // 2)      # un video, o un archivo que no esta
+    fondo = QImage(img.size(), QImage.Format.Format_RGB32)
+    fondo.fill(QColor("white"))
+    pt = QPainter(fondo)
+    pt.drawImage(0, 0, img)
+    pt.end()
+    return fondo
+
+
+def write_selection_pdf(items: list[dict], destino: str, titulo: str, *,
+                        show_name: bool = True, show_grade: bool = True,
+                        show_comment: bool = True, images=None):
+    """items: {path, name, grade, comment}. 'images' da la imagen de cada uno
+    (por defecto, la editada); asi las pruebas no dependen de disco."""
+    writer = QPdfWriter(destino)
+    writer.setTitle(titulo)
+    writer.setCreator(APP_NAME)
+    writer.setResolution(300)
+    margen_mm = 12
+    painter = None
+    for n, it in enumerate(items):
+        img = images[n] if images else pdf_page_image(it["path"], it.get("edit"))
+        horizontal = img.width() > img.height() * 1.15
+        writer.setPageLayout(QPageLayout(
+            QPageSize(QPageSize.PageSizeId.A4),
+            QPageLayout.Orientation.Landscape if horizontal else QPageLayout.Orientation.Portrait,
+            QMarginsF(margen_mm, margen_mm, margen_mm, margen_mm), QPageLayout.Unit.Millimeter))
+        if painter is None:
+            painter = QPainter(writer)
+        else:
+            writer.newPage()
+        area = QRect(0, 0, painter.device().width(), painter.device().height())
+        pie = painter.fontMetrics().height()                 # hueco del numero de pagina
+        nota = it.get("grade") if show_grade else None
+        comentario = (it.get("comment") or "").strip() if show_comment else ""
+        nombre = (it.get("name") or "") if show_name else ""
+        # --- el pie de la imagen: nombre y nota en una linea, comentario debajo
+        f_nombre, f_texto = QFont(), QFont()
+        f_nombre.setPointSizeF(12)
+        f_nombre.setBold(True)
+        f_texto.setPointSizeF(11)
+        painter.setFont(f_nombre)
+        alto_nombre = painter.fontMetrics().height() * 1.6
+        painter.setFont(f_texto)
+        flags = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+                    | Qt.TextFlag.TextWordWrap)
+        alto_coment = 0
+        if comentario:
+            alto_coment = painter.boundingRect(
+                QRect(0, 0, area.width(), 10 ** 5), flags, comentario).height()
+        alto_linea = int(alto_nombre) if (nombre or nota is not None) else 0
+        tope = int(area.height() * 0.35)
+        alto_pie = min(tope, alto_linea + (alto_coment + 20 if comentario else 0))
+        hueco = int(painter.fontMetrics().height() * 0.8) if alto_pie else 0
+        caja = QRect(area.left(), area.top(), area.width(),
+                     area.height() - alto_pie - hueco - pie - 20)
+        # --- la imagen, centrada en el resto de la pagina
+        escala = min(caja.width() / img.width(), caja.height() / img.height())
+        w, h = int(img.width() * escala), int(img.height() * escala)
+        x0 = caja.left() + (caja.width() - w) // 2
+        y0 = caja.top() + (caja.height() - h) // 2 if not alto_pie else caja.top()
+        painter.drawImage(QRect(x0, y0, w, h), img)
+        # --- el pie
+        y = y0 + h + hueco
+        if alto_pie:
+            x = area.left()
+            if nota is not None:
+                etiqueta = format_grade(nota)
+                painter.setFont(f_nombre)
+                ancho = painter.fontMetrics().horizontalAdvance(etiqueta) + 40
+                badge = QRect(x, y, ancho, int(alto_nombre))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(grade_color(nota)))
+                painter.drawRoundedRect(badge, 12, 12)
+                painter.setPen(QColor("white"))
+                painter.drawText(badge, int(Qt.AlignmentFlag.AlignCenter), etiqueta)
+                x += ancho + 30
+            if nombre:
+                painter.setFont(f_nombre)
+                painter.setPen(QColor("#222222"))
+                painter.drawText(QRect(x, y, area.right() - x, int(alto_nombre)),
+                                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                                 painter.fontMetrics().elidedText(
+                                     nombre, Qt.TextElideMode.ElideMiddle, area.right() - x))
+            if comentario:
+                painter.setFont(f_texto)
+                painter.setPen(QColor("#333333"))
+                linea = painter.fontMetrics().lineSpacing()
+                libre = max(linea, (alto_pie - alto_linea - 20) // linea * linea)
+                painter.drawText(QRect(area.left(), y + alto_linea + 20, area.width(), libre),
+                                 flags, comentario)           # sin media linea cortada
+        # --- numero de pagina
+        f_pie = QFont()
+        f_pie.setPointSizeF(8)
+        painter.setFont(f_pie)
+        painter.setPen(QColor("#888888"))
+        painter.drawText(QRect(area.left(), area.bottom() - pie, area.width(), pie),
+                         int(Qt.AlignmentFlag.AlignCenter), "%d / %d" % (n + 1, len(items)))
+    if painter is not None:
+        painter.end()
 
 
 # --------------------------------------------------------------------------- #
@@ -4567,6 +4716,10 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
     return QIcon(pm)
 
 
+PAD_CHOICES = (("Transparent", None), ("White", "#ffffff"), ("Black", "#000000"))
+CROP_MARGIN = 0.5                   # cuanto se puede ampliar el encuadre, por cada lado
+
+
 class CropView(QGraphicsView):
     """Lienzo del editor: mover, recortar o dibujar, segun la herramienta."""
     cropped = Signal(object)                # QRectF en coordenadas de la escena
@@ -4580,11 +4733,20 @@ class CropView(QGraphicsView):
         self.color = QColor(DRAW_COLORS[0][1])
         self.width = 6
         self.show_grid = False              # rejilla de guia al girar
+        self.frame_rect: QRectF | None = None   # contorno de la imagen al ampliar el encuadre
         self._puntos: list = []
         self._preview = None
 
     def drawForeground(self, painter, rect):
         """Rejilla de cuadros sobre la imagen, para enderezar a ojo."""
+        if self.frame_rect is not None and self.tool == "recortar":
+            painter.save()
+            for color, dx in ((QColor(0, 0, 0, 160), 1), (QColor(255, 255, 255, 220), 0)):
+                pen = QPen(color, 0, Qt.PenStyle.DashLine)
+                painter.setPen(pen)
+                painter.drawRect(self.frame_rect.translated(
+                    dx / max(self.transform().m11(), 1e-6), 0))
+            painter.restore()
         area = self.sceneRect()
         if not self.show_grid or area.isEmpty():
             return
@@ -4917,6 +5079,14 @@ class EditorDialog(QDialog):
         themed(self.b_uncrop, icon="crop")
         self.b_uncrop.clicked.connect(self.uncrop)
         geo.addWidget(self.b_uncrop)
+        geo.addWidget(QLabel("Margin"))
+        self.cmb_pad = QComboBox()
+        for txt, val in PAD_CHOICES:
+            self.cmb_pad.addItem(txt, val)
+        self.cmb_pad.setToolTip("Colour of the area a crop adds outside the image")
+        self.cmb_pad.setCurrentIndex(max(0, self.cmb_pad.findData(self.edit.get("pad"))))
+        self.cmb_pad.activated.connect(self.on_pad)
+        geo.addWidget(self.cmb_pad)
         geo.addStretch(1)
 
         dibujo = QHBoxLayout()
@@ -4937,7 +5107,9 @@ class EditorDialog(QDialog):
                 ("difuminar", "blurarea", "Blur area",
                  "Drag a rectangle to blur what is inside (names, faces\u2026)"),
                 ("goma", "eraser", "Eraser", "Remove the drawing you click on"),
-                ("recortar", "crop", "Crop", "Drag a rectangle over the image")):
+                ("recortar", "crop", "Crop",
+                 "Drag a rectangle over the image. Drag it past the edges "
+                 "to enlarge the frame with a margin")):
             b = QToolButton()
             themed(b, icon=icono)
             b.setIconSize(QSize(20, 20))
@@ -5214,7 +5386,7 @@ class EditorDialog(QDialog):
             centro = (p.x() / vieja.width(), p.y() / vieja.height())
 
         self.item.setPixmap(QPixmap.fromImage(img))
-        self.scene.setSceneRect(self.item.boundingRect())
+        self.sync_scene_rect()
         ancho_final = edited_size(self.view_edit(), *self.full_size)[0] or 1
         self.render_scale = (img.width() or 1) / ancho_final
 
@@ -5276,6 +5448,7 @@ class EditorDialog(QDialog):
         self.chk_gray.setChecked(self.edit["gray"])
         self.chk_gray.blockSignals(False)
         self._sync_angle_widgets(edit_angle(self.edit))
+        self.cmb_pad.setCurrentIndex(max(0, self.cmb_pad.findData(self.edit.get("pad"))))
         self._angle_gesture = False         # tras deshacer, girar es un paso nuevo
 
     # --- zoom --------------------------------------------------------------
@@ -5359,8 +5532,14 @@ class EditorDialog(QDialog):
         centro = angle_transform(w0, h0, nuevo).map(
             ida.map(QPointF(x + cw / 2, y + ch / 2)))
         W, H = rotated_size(w0, h0, nuevo) if nuevo else (w0, h0)
-        nx = max(0, min(int(round(centro.x() - cw / 2)), W - cw))
-        ny = max(0, min(int(round(centro.y() - ch / 2)), H - ch))
+        nx = int(round(centro.x() - cw / 2))
+        ny = int(round(centro.y() - ch / 2))
+        Wv, Hv = rotated_size(w0, h0, viejo) if viejo else (w0, h0)
+        if x >= 0 and y >= 0 and x + cw <= Wv and y + ch <= Hv:
+            # un encuadre dentro de la imagen no debe salirse al girar; uno
+            # ampliado a proposito, si
+            nx = max(0, min(nx, W - cw))
+            ny = max(0, min(ny, H - ch))
         return [nx, ny, cw, ch]
 
     def _sync_angle_widgets(self, grados: float):
@@ -5384,12 +5563,17 @@ class EditorDialog(QDialog):
     def on_crop(self, rect):
         vista = self.item.mapFromScene(rect).boundingRect()
         w, h = self.item.pixmap().width(), self.item.pixmap().height()
-        x0 = max(0.0, min(vista.x(), w))
-        y0 = max(0.0, min(vista.y(), h))
-        x1 = max(0.0, min(vista.x() + vista.width(), w))
-        y1 = max(0.0, min(vista.y() + vista.height(), h))
+        # el rectangulo puede salirse de la imagen hasta el borde de la escena:
+        # lo que sobre es lienzo nuevo
+        mx, my = w * CROP_MARGIN, h * CROP_MARGIN
+        x0 = max(-mx, min(vista.x(), w + mx))
+        y0 = max(-my, min(vista.y(), h + my))
+        x1 = max(-mx, min(vista.x() + vista.width(), w + mx))
+        y1 = max(-my, min(vista.y() + vista.height(), h + my))
         if x1 - x0 < 2 or y1 - y0 < 2:
             return
+        if x1 <= 0 or y1 <= 0 or x0 >= w or y0 >= h:
+            return                          # un encuadre sin nada de la imagen
         self.push("crop")
         # el rectangulo se dibuja sobre lo que hay en pantalla, que puede ser
         # la copia reducida o la completa: se lleva a la escala de la salida
@@ -5402,12 +5586,38 @@ class EditorDialog(QDialog):
         self.set_tool(None)
         self.render_preview()
 
+    def on_pad(self, _i=None):
+        self.push("margin colour")
+        self.edit["pad"] = self.cmb_pad.currentData()
+        self.render_preview(reajustar=False)
+
     # --- dibujar -----------------------------------------------------------
     def set_tool(self, tool: str | None):
+        antes = self.view.tool
         self.view.set_tool(tool)
         b = self._tool_buttons.get(tool)     # tambien al volver solo a "Mover"
         if b is not None and not b.isChecked():
             b.setChecked(True)
+        if (tool == "recortar") != (antes == "recortar"):
+            self.sync_scene_rect()
+            if tool == "recortar":
+                self.view.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+                self.show_zoom()
+                self._auto_fit = False
+            else:
+                self.fit()
+
+    def sync_scene_rect(self):
+        """Con el recorte activo la escena es mas ancha que la imagen: asi el
+        rectangulo se puede sacar de ella y el lienzo crece."""
+        area = self.item.boundingRect()
+        if self.view.tool == "recortar" and not area.isEmpty():
+            mx, my = area.width() * CROP_MARGIN, area.height() * CROP_MARGIN
+            self.view.frame_rect = QRectF(area)
+            self.scene.setSceneRect(area.adjusted(-mx, -my, mx, my))
+        else:
+            self.view.frame_rect = None
+            self.scene.setSceneRect(area)
 
     def set_color(self, c: QColor):
         self.view.color = c
@@ -5739,6 +5949,9 @@ everything nested inside it, whatever folder the images come from.</li>
 <li><i>Edit…</i> (key <b>[[edit]]</b>) opens the editor: rotate, flip, crop,
 brightness, contrast, hue, saturation, lightness, blur, black and white, and
 output size.</li>
+<li><b>Crop</b> can also <b>enlarge the frame</b>: drag the rectangle past the
+edges of the image and the canvas grows, with a margin you colour with
+<i>Margin</i> (transparent, white or black).</li>
 <li><b>Angle</b> turns the image by any number of degrees (slider, or type
 the exact value). A grid appears while you turn, to straighten a photo by
 eye. The uncovered corners stay transparent, and turn white when you export
@@ -5763,8 +5976,11 @@ folders too. The status bar says what was undone.</li>
 
 <h3>6 · Export and backup</h3>
 <ul>
-<li><i>Export…</i> writes copies with the edits applied, at full resolution,
-into the folder you choose. Existing files are never overwritten.</li>
+<li><i>Export…</i> ▸ <i>Images with the edits applied</i> writes copies at full
+resolution into the folder you choose. Existing files are never overwritten.</li>
+<li><i>Export…</i> ▸ <i>PDF, one image per page</i> (also in the right-click menu)
+puts the selected images, edits applied, in a PDF. Tick what goes under each
+image: the <b>file name</b>, the <b>grade</b> and the <b>comments</b>.</li>
 <li><b>Library ▸ Export library…</b> saves the whole classification —
 folders, categories, assignments, edits and drawings — into one file.
 Paths are stored relative to a common root, so the file also works on
@@ -6362,8 +6578,12 @@ class MainWindow(QMainWindow):
         self.b_edit.clicked.connect(self.edit_current)
         self.b_export = QPushButton("  Export…")
         themed(self.b_export, std="SP_DialogSaveButton")
-        self.b_export.setToolTip("Save edited copies of the selected images")
-        self.b_export.clicked.connect(self.export_selected)
+        self.b_export.setToolTip("Save the selected images with their edits applied, "
+                                 "as image files or as a PDF")
+        menu_export = QMenu(self.b_export)
+        menu_export.addAction("Images with the edits applied\u2026", self.export_selected)
+        menu_export.addAction("PDF, one image per page\u2026", self.export_selected_pdf)
+        self.b_export.setMenu(menu_export)
         self.b_assign = QPushButton("  Assign to selected category")
         themed(self.b_assign, icon="assign")
         self.b_assign.setProperty("primary", True)
@@ -6656,6 +6876,86 @@ class MainWindow(QMainWindow):
                 write_notes_pdf(filas, destino, titulo, subtitulo, thumbs)
         finally:
             QApplication.restoreOverrideCursor()
+
+    def selection_pdf_items(self, paths: list[str], edicion: bool = True) -> list[dict]:
+        out = []
+        for p in paths:
+            n = self.notes.get(p) or {}
+            out.append({"path": p, "name": shown_name(p), "grade": n.get("grade"),
+                        "comment": n.get("comment", ""),
+                        "edit": self.edits.get(p) if edicion else None})
+        return out
+
+    def write_selection_pdf(self, paths: list[str], destino: str, *, show_name=True,
+                            show_grade=True, show_comment=True):
+        """Sin dialogos, para que las pruebas usen este mismo camino."""
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            write_selection_pdf(self.selection_pdf_items(paths), destino,
+                                "DriloBoard \u2014 %s" % self.view_title(),
+                                show_name=show_name, show_grade=show_grade,
+                                show_comment=show_comment)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def export_selected_pdf(self):
+        """Las imagenes elegidas, con su edicion, a un PDF de una por pagina."""
+        self.commit_note()
+        sel = self.selected_images()
+        if not sel:
+            self.statusBar().showMessage("Select the images to export first.", 5000)
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Export to PDF")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("%d image%s, one per page, with their edits applied."
+                             % (len(sel), "" if len(sel) == 1 else "s")))
+        chk_name = QCheckBox("File name")
+        chk_grade = QCheckBox("Grade")
+        chk_comment = QCheckBox("Comments")
+        chk_name.setChecked(not _blind)
+        chk_name.setEnabled(not _blind)
+        if _blind:
+            chk_name.setToolTip("Blind mode hides the file names")
+        chk_grade.setChecked(self.show_notes)
+        chk_comment.setChecked(self.show_notes)
+        con_nota = sum(1 for p in sel if self.notes.get(p))
+        for c in (chk_name, chk_grade, chk_comment):
+            lay.addWidget(c)
+        if not con_nota:
+            lay.addWidget(QLabel("<i>None of the selected files has a grade or a comment.</i>"))
+        botones = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        botones.accepted.connect(dlg.accept)
+        botones.rejected.connect(dlg.reject)
+        lay.addWidget(botones)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        nombre = re.sub(r'[\\/:*?"<>|]+', "-", self.view_title()).strip() or "DriloBoard"
+        destino, _ = QFileDialog.getSaveFileName(
+            self, "Export to PDF", os.path.join(self.export_dir or str(Path.home()),
+                                                nombre + ".pdf"), "PDF (*.pdf)")
+        if not destino:
+            return
+        if not destino.lower().endswith(".pdf"):
+            destino += ".pdf"
+        try:
+            self.write_selection_pdf(sel, destino, show_name=chk_name.isChecked(),
+                                     show_grade=chk_grade.isChecked(),
+                                     show_comment=chk_comment.isChecked())
+        except OSError as e:
+            QMessageBox.warning(self, APP_NAME, "Could not write the PDF:\n%s" % e)
+            return
+        self.export_dir = os.path.dirname(destino)
+        self.touch()
+        caja = QMessageBox(self)
+        caja.setWindowTitle(APP_NAME)
+        caja.setText("%d image%s saved to:\n%s" % (len(sel), "" if len(sel) == 1 else "s", destino))
+        b_abrir = caja.addButton("Open", QMessageBox.ButtonRole.AcceptRole)
+        caja.addButton(QMessageBox.StandardButton.Close)
+        caja.exec()
+        if caja.clickedButton() is b_abrir:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(destino))
 
     def clear_note(self):
         self.note_editor.clear()
@@ -7814,7 +8114,8 @@ class MainWindow(QMainWindow):
             if any(self.is_edited(p) for p in sel):
                 ed.addSeparator()
                 ed.addAction("Remove the edits", lambda: self.quick_edit("reset"))
-        m.addAction("Export copy/copies\u2026", self.export_selected)
+        m.addAction("Export images with the edits applied\u2026", self.export_selected)
+        m.addAction("Export to PDF\u2026", self.export_selected_pdf)
         if self.show_notes:
             m.addAction("Grade / comment\u2026", lambda: self.note_from_menu(idx))
         m.addSeparator()

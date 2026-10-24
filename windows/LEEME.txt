@@ -7,6 +7,18 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
+Novedades de la 1.6:
+
+  - Export > "PDF, one image per page": exporta las imagenes seleccionadas a
+    un PDF, una por pagina y con la edicion aplicada, con marcas para anadir
+    debajo el nombre, la nota y los comentarios. Tambien esta en el menu del
+    boton derecho.
+  - Export > "Images with the edits applied": las copias editadas de siempre,
+    ahora con nombre claro en el menu.
+  - Recortar puede ampliar el encuadre: arrastra el rectangulo mas alla de los
+    bordes de la imagen y el lienzo crece, con margen transparente, blanco o
+    negro (selector "Margin" en el editor).
+
 Novedades de la 1.5.2:
 
   - Modo ciego, para corregir sin que el nombre del alumno te condicione:

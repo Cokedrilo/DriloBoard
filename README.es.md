@@ -21,7 +21,7 @@ botón *Export*.
 ## Arrancar
 
 **Versión portable (lo normal).** Descomprime
-`DriloBoard-1.5.2-portable-win64.zip` donde quieras —disco, USB, carpeta de
+`DriloBoard-1.6.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
 red— y ejecuta `DriloBoard.exe`. No instala nada ni escribe en el registro.
 La biblioteca y la caché de miniaturas se crean **dentro de esa misma
 carpeta**, así que copiándola te llevas también toda la clasificación.
@@ -30,7 +30,7 @@ La primera vez Windows puede avisar de que el origen es desconocido (el
 ejecutable no está firmado): *Más información* → *Ejecutar de todas formas*.
 
 **Versión portable para Mac.** Descomprime
-`DriloBoard-1.5.2-portable-macos.zip`: sale una carpeta `DriloBoard` con
+`DriloBoard-1.6.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
 `DriloBoard.app` dentro. Una sola app para Mac Intel y Apple Silicon, macOS 13
 Ventura o posterior. Igual que en Windows, la biblioteca y la caché se crean
 **en esa carpeta, junto a la app** (nunca dentro del `.app`), así que se puede
@@ -360,7 +360,9 @@ después.
   - **Recortar**: elige *Crop* y arrastra un rectángulo sobre la imagen.
     Puedes volver a recortar sobre el resultado, y *Remove crop* devuelve
     el encuadre completo. El recorte se guarda en coordenadas del original,
-    así que girar después no lo estropea.
+    así que girar después no lo estropea. **Ampliar el encuadre**: arrastra
+    el rectángulo más allá de los bordes de la imagen y el lienzo crece, con
+    un margen transparente, blanco o negro (selector *Margin*).
   - Brillo, contraste y blanco y negro.
   - **Dibujar encima**, estilo Recortes de Windows: *Pen*, *Highlighter*
     (grueso y transparente, deja ver lo de debajo), *Line*, *Arrow*,
@@ -405,6 +407,11 @@ después.
   copias ya editadas, a resolución completa, con el nombre original. Nunca se
   pisa un archivo que ya exista — se numera. Esto es lo que te llevas a la
   presentación. El editor tiene además *Export a copy…* para una sola.
+  El botón *Export…* abre un menú: *Images with the edits applied* (lo de
+  arriba) o *PDF, one image per page*, que también está en el menú del botón
+  derecho. El PDF lleva las imágenes seleccionadas con la edición aplicada,
+  una por página, y marcas para añadir debajo el **nombre**, la **nota** y los
+  **comentarios**.
 
 ## Tema oscuro o claro
 

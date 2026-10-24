@@ -86,9 +86,10 @@ c = apply_edit(src, dict(empty_edit(), crop=[0, 0, 40, 40]))
 assert (c.width(), c.height()) == (40, 40) and c.pixel(20, 20) == ROJO
 c2 = apply_edit(src, dict(empty_edit(), crop=[360, 0, 40, 40]))
 assert c2.pixel(20, 20) == VERDE
-# un recorte que se sale se acota al tamano real
+# un recorte que se sale amplia el lienzo (1.6): lo de fuera, transparente
 c3 = apply_edit(src, dict(empty_edit(), crop=[380, 180, 100, 100]))
-assert (c3.width(), c3.height()) == (20, 20)
+assert (c3.width(), c3.height()) == (100, 100)
+assert c3.pixel(10, 10) == FONDO and c3.pixel(50, 50) == 0
 print("recorte ok")
 
 # recorte + rotacion: primero se recorta y luego se gira

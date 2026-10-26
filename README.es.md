@@ -308,7 +308,7 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   en `:fx`) y avisa de que el texto sale de tu ordenador: el plan Free no
   promete que DeepL no lo conserve. Es lo único de DriloBoard que usa internet, y
   solo al pulsar el botón. La clave se guarda en `traduccion.json`, junto a
-  `biblioteca.json`, nunca dentro de la biblioteca ni en git. Si cambias de
+  `biblioteca.json`, nunca dentro de la biblioteca ni en git. Con clic derecho en el botón puedes cambiar u olvidar la clave. Si cambias de
   archivo o editas mientras espera, la traducción se descarta para no pisarte.
 - **Tiempo de corrección**: casilla **Time** arriba, junto a *Grades* (o
   *View ▸ Track marking time*). Viene apagado. Empieza a contar al hacer **clic o doble clic en un

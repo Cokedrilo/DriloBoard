@@ -68,7 +68,7 @@ the English version; `Ctrl+Z` brings the Spanish back. The first time it asks fo
 **DeepL API Free** key (free, 500,000 characters a month; Free keys end in `:fx`) and warns
 you that the text leaves your computer — the Free plan does not promise DeepL won't keep it.
 This is the only thing in DriloBoard that goes online, and only when you press the button.
-The key lives in `traduccion.json` next to the program, never in `biblioteca.json`.
+The key lives in `traduccion.json` next to the program, never in `biblioteca.json`. Right-click the button to change or forget the key.
 
 **Marking time** (optional): the time you spend on each file and each student,
 counted from your click on a file and paused after 2 minutes without touching

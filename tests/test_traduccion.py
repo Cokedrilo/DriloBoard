@@ -220,4 +220,32 @@ for e in compactos:
     assert e.b_translate.text() == "" and not e.b_translate.icon().isNull()
 print("   %d editor(es) compacto(s), con icono y sin texto" % len(compactos))
 
+print("\n10. CAMBIAR O OLVIDAR LA CLAVE CON EL CLIC DERECHO")
+from PySide6.QtCore import Qt
+assert ed.b_translate.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu
+ed._ask_key = lambda: "CLAVE-MALA"
+ed.change_key()
+assert ajustes()["deepl_key"] == "CLAVE-MALA" and ajustes()["notice_accepted"] is True
+menu = ed._build_key_menu()
+acciones = {a.text(): a for a in menu.actions()}
+assert set(acciones) == {"Change DeepL key…", "Forget DeepL key"}, list(acciones)
+assert acciones["Forget DeepL key"].isEnabled()
+ed._ask_key = lambda: "CLAVE-BUENA:fx"                    # sustituye la mala
+acciones["Change DeepL key…"].trigger()
+assert ajustes()["deepl_key"] == "CLAVE-BUENA:fx", ajustes()
+ed._ask_key = lambda: ""                                  # cancelar no la toca
+ed.change_key()
+assert ajustes()["deepl_key"] == "CLAVE-BUENA:fx"
+ed.txt.setPlainText("Hola")
+MODO["status"] = 200
+assert traduce() == 1 and PETICIONES[-1]["auth"] == "DeepL-Auth-Key CLAVE-BUENA:fx"
+acciones["Forget DeepL key"].trigger()
+assert "deepl_key" not in ajustes() and ajustes()["notice_accepted"] is True, ajustes()
+assert not {a.text(): a for a in ed._build_key_menu().actions()}["Forget DeepL key"].isEnabled()
+ed.forget_key()                                           # sin clave no falla
+ed._ask_key = lambda: "OTRA:fx"                           # y luego pide una nueva
+ed.txt.setPlainText("Adios")
+assert traduce() == 1 and PETICIONES[-1]["auth"] == "DeepL-Auth-Key OTRA:fx"
+print("   cambiar sustituye, cancelar no toca nada, olvidar borra solo la clave")
+
 print("\nTRADUCCION: TODO BIEN")

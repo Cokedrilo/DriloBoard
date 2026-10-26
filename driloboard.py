@@ -3452,8 +3452,11 @@ class NoteEditor(QWidget):
         self.b_translate = QPushButton("" if compact else "  Translate to EN")
         themed(self.b_translate, icon="translate")
         self.b_translate.setToolTip("Translate the comment (or the selected text) from Spanish "
-                                    "to English with DeepL. The text is sent to DeepL.")
+                                    "to English with DeepL. The text is sent to DeepL.\n"
+                                    "Right-click to change or forget the DeepL key.")
         self.b_translate.clicked.connect(self.translate_comment)
+        self.b_translate.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.b_translate.customContextMenuRequested.connect(self._key_menu)
         self.deepl = DeepL(self)
         self.deepl.translated.connect(self._translated)
         self.deepl.failed.connect(self._translate_failed)
@@ -3619,6 +3622,37 @@ class NoteEditor(QWidget):
 
     def _warn(self, texto: str):
         QMessageBox.warning(self, APP_NAME, texto)
+
+    def _build_key_menu(self) -> QMenu:
+        menu = QMenu(self.b_translate)
+        menu.addAction("Change DeepL key…", self.change_key)
+        olvidar = menu.addAction("Forget DeepL key", self.forget_key)
+        olvidar.setEnabled(bool(load_translate_settings().get("deepl_key")))
+        return menu
+
+    def _key_menu(self, pos):
+        self._build_key_menu().exec(self.b_translate.mapToGlobal(pos))
+
+    def change_key(self):
+        """Pide una clave nueva y sustituye la guardada (si cancelas, no cambia nada)."""
+        clave = self._ask_key()
+        if not clave:
+            return
+        ajustes = load_translate_settings()
+        ajustes["deepl_key"] = clave
+        if save_translate_settings(ajustes):
+            self.say("DeepL key saved.")
+        else:
+            self._warn("Could not save the DeepL key.")
+
+    def forget_key(self):
+        ajustes = load_translate_settings()
+        if ajustes.pop("deepl_key", None) is None:
+            return
+        if save_translate_settings(ajustes):
+            self.say("DeepL key forgotten. Translate will ask for a new one.")
+        else:
+            self._warn("Could not forget the DeepL key.")
 
     def translate_comment(self):
         """Traduce la seleccion, o todo el comentario, del espanol al ingles."""

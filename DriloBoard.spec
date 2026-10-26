@@ -65,12 +65,15 @@ a = Analysis(
 # Qt Quick y QML, y el lector de PDF de Qt6Pdf. Unos 20 MB fuera. El video solo
 # necesita Qt6Multimedia, sus plugins y las DLL de FFmpeg (comprobado en la
 # tabla de importaciones de cada una).
-# QtNetwork, que el video necesita, trae ademas las conexiones seguras con su
-# OpenSSL: DriloBoard no se conecta a nada, los videos se leen del disco.
+# QtNetwork trae ademas las conexiones seguras con su OpenSSL. Solo el boton de
+# traducir sale a internet, y lo hace por HTTPS con el plugin de TLS del sistema
+# (SecureTransport en macOS, Schannel en Windows), asi que plugins/tls/ se queda;
+# lo que sobra es el OpenSSL propio de Qt. Sin ese plugin el boton falla con
+# "TLS initialization failed" y la clave nunca llega a probarse.
 # (libcrypto-3.dll sin "-x64" es la del propio Python y se queda.)
 SOBRAN = ("qtvirtualkeyboardplugin", "qpdf.dll", "Qt6Quick", "Qt6Qml", "Qt6OpenGL",
           "Qt6Pdf", "Qt6VirtualKeyboard", "Qt6MultimediaQuick",
-          "plugins/tls/", "plugins/networkinformation/", "libssl-3-x64", "libcrypto-3-x64")
+          "plugins/networkinformation/", "libssl-3-x64", "libcrypto-3-x64")
 # En macOS las mismas piezas van en frameworks (QtQuick.framework...) y en
 # plugins .dylib; el video tira de QtMultimedia, QtNetwork y el FFmpeg de Qt
 if MAC:

@@ -58,7 +58,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication
                                QToolButton,
                                QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
+from PySide6.QtNetwork import (QNetworkAccessManager, QNetworkReply, QNetworkRequest,
+                               QSslSocket)
 
 # El video es opcional: QtMultimedia viene en PySide6-Addons, no en Essentials.
 # Sin el, DriloBoard sigue siendo un visor de imagenes y la casilla se apaga.
@@ -12252,6 +12253,9 @@ def selftest() -> int:
                     QMediaFormat.ConversionMode.Decode)
                 if QMediaFormat.FileFormat.MPEG4 not in formatos:
                     fallos.append("el video no decodifica mp4 (falta el plugin FFmpeg)")
+        # el boton de traducir habla HTTPS: sin el plugin de TLS de Qt no puede
+        if getattr(sys, "frozen", False) and not QSslSocket.supportsSsl():
+            fallos.append("falta el plugin de TLS de Qt (el boton de traducir no funcionaria)")
         # el cambio de tema, que depende del estilo de Qt que lleve el paquete
         antes = _theme
         for nombre in ("light", "dark"):

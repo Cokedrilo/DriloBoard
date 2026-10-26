@@ -300,6 +300,16 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
     la ventana grande sale a la derecha de la imagen. Escribe en el comentario
     que tocaste el último. Las frases se guardan en `frases.json`, junto a
     `biblioteca.json`.
+- **Traducir al inglés** (opcional): botón *Translate to EN* bajo el comentario.
+  Envía el comentario (o solo el texto seleccionado) a
+  [DeepL](https://www.deepl.com/pro-api) y lo sustituye por la versión en
+  inglés; `Ctrl+Z` devuelve el español. La primera vez pide tu clave de
+  **DeepL API Free** (gratis, 500.000 caracteres al mes; las claves Free acaban
+  en `:fx`) y avisa de que el texto sale de tu ordenador: el plan Free no
+  promete que DeepL no lo conserve. Es lo único de DriloBoard que usa internet, y
+  solo al pulsar el botón. La clave se guarda en `traduccion.json`, junto a
+  `biblioteca.json`, nunca dentro de la biblioteca ni en git. Si cambias de
+  archivo o editas mientras espera, la traducción se descarta para no pisarte.
 - **Tiempo de corrección**: casilla **Time** arriba, junto a *Grades* (o
   *View ▸ Track marking time*). Viene apagado. Empieza a contar al hacer **clic o doble clic en un
   archivo**; si pasas a otro (con las flechas o en la ventana grande), el

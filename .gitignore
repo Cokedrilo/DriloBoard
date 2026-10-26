@@ -16,3 +16,5 @@ biblioteca.json.*
 cache/
 tests/_tmp/
 atajos.json
+traduccion.json
+traduccion.json.tmp

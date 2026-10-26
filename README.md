@@ -62,6 +62,14 @@ next to the edited image**, so the student sees the change.
 click one and it goes into the comment; a `{}` asks you for a piece of data.
 Several banks, import / export as .json (the files of Feedback 3000 open as they are).
 
+**Translate to English** (optional): the *Translate to EN* button under a comment sends it
+(or just the selected text) to [DeepL](https://www.deepl.com/pro-api) and replaces it with
+the English version; `Ctrl+Z` brings the Spanish back. The first time it asks for your
+**DeepL API Free** key (free, 500,000 characters a month; Free keys end in `:fx`) and warns
+you that the text leaves your computer — the Free plan does not promise DeepL won't keep it.
+This is the only thing in DriloBoard that goes online, and only when you press the button.
+The key lives in `traduccion.json` next to the program, never in `biblioteca.json`.
+
 **Marking time** (optional): the time you spend on each file and each student,
 counted from your click on a file and paused after 2 minutes without touching
 anything, with a foldable timer and a report you can export as CSV, JSON or a Markdown
@@ -276,6 +284,7 @@ Everything sits next to the program:
 | | |
 |---|---|
 | `biblioteca.json` | folders, categories, assignments, edits and drawings |
+| `traduccion.json` | your DeepL key, if you use the translate button — private, never exported or committed |
 | `cache/` | thumbnails already generated — safe to delete, it rebuilds |
 
 <details>

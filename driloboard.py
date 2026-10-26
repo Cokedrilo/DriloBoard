@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication
                                QDialog, QDialogButtonBox, QDoubleSpinBox, QStyleOptionViewItem,
                                QFileDialog, QFrame, QGraphicsItem, QGraphicsPixmapItem,
                                QGraphicsScene,
-                               QGraphicsView, QHBoxLayout, QInputDialog, QLabel,
+                               QGraphicsView, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QListView, QListWidget, QListWidgetItem, QMainWindow,
                                QMenu, QMessageBox, QPlainTextEdit, QPushButton,
                                QSizePolicy, QSlider, QSplitter,
@@ -58,6 +58,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication
                                QToolButton,
                                QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 # El video es opcional: QtMultimedia viene en PySide6-Addons, no en Essentials.
 # Sin el, DriloBoard sigue siendo un visor de imagenes y la casilla se apaga.
@@ -71,7 +72,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.15.0"
+VERSION = "1.16.0"
 
 
 def app_dir() -> Path:
@@ -3329,6 +3330,82 @@ class GripBar(QWidget):
         self.released.emit(-1)              # doble clic: vuelve al alto de siempre
 
 
+# --------------------------------------------------------------------------- #
+#  Traducir el comentario (espanol -> ingles) con DeepL API Free
+#
+#  Es lo unico de DriloBoard que sale a internet, y solo cuando pulsas el boton:
+#  el texto del comentario viaja a DeepL. La clave es un secreto de este
+#  ordenador: va en traduccion.json, junto a biblioteca.json pero aparte y fuera
+#  de git, y nunca en la biblioteca (que se exporta y se comparte).
+# --------------------------------------------------------------------------- #
+TRANSLATE_FILE = DATA_DIR / "traduccion.json"
+DEEPL_URL = "https://api-free.deepl.com/v2/translate"
+DEEPL_KEYS_URL = "https://www.deepl.com/pro-api"
+DEEPL_TIMEOUT_MS = 30000
+DEEPL_ERRORS = {
+    403: "DeepL rejected the key. Free keys end in \":fx\". Click Translate again to enter it again.",
+    429: "DeepL says there are too many requests. Wait a moment and try again.",
+    456: "The DeepL Free quota of this month (500,000 characters) is used up.",
+}
+
+
+def load_translate_settings() -> dict:
+    try:
+        crudo = json.loads(TRANSLATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return crudo if isinstance(crudo, dict) else {}
+
+
+def save_translate_settings(ajustes: dict) -> bool:
+    try:
+        tmp = TRANSLATE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(ajustes, indent=1, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(TRANSLATE_FILE)
+        return True
+    except OSError:
+        return False
+
+
+class DeepL(QObject):
+    """Una traduccion es->en a la vez; la respuesta llega por senal, sin bloquear."""
+    translated = Signal(str)
+    failed = Signal(str, int)                   # el aviso y el codigo HTTP (0: sin respuesta)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.net = QNetworkAccessManager(self)
+
+    def translate(self, texto: str, clave: str):
+        req = QNetworkRequest(QUrl(DEEPL_URL))
+        req.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
+        req.setRawHeader(b"Authorization", b"DeepL-Auth-Key " + clave.encode("utf-8"))
+        req.setTransferTimeout(DEEPL_TIMEOUT_MS)
+        cuerpo = json.dumps({"text": [texto], "source_lang": "ES", "target_lang": "EN-US",
+                             "preserve_formatting": True}).encode("utf-8")
+        reply = self.net.post(req, cuerpo)
+        reply.finished.connect(lambda r=reply: self._reply(r))
+
+    def _reply(self, reply: QNetworkReply):
+        codigo = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute) or 0
+        datos = bytes(reply.readAll())
+        error = reply.errorString()
+        reply.deleteLater()
+        if codigo == 200:
+            try:
+                self.translated.emit(json.loads(datos)["translations"][0]["text"])
+                return
+            except (ValueError, KeyError, IndexError, TypeError):
+                self.failed.emit("DeepL answered with something unexpected.", codigo)
+                return
+        if codigo in DEEPL_ERRORS:
+            self.failed.emit(DEEPL_ERRORS[codigo], codigo)
+        elif codigo:
+            self.failed.emit("DeepL error %d." % codigo, codigo)
+        else:
+            self.failed.emit("Could not reach DeepL: %s" % error, 0)
+
+
 class NoteEditor(QWidget):
     """Nota (0-10) y comentario de un archivo.
 
@@ -3363,6 +3440,7 @@ class NoteEditor(QWidget):
         self.txt.setTabChangesFocus(True)
         self.txt.textChanged.connect(self._typed)
         self.txt.textChanged.connect(self._sync_copy)
+        self.txt.textChanged.connect(self._sync_translate)
 
         self.b_clear = QPushButton("Clear")
         self.b_clear.setToolTip("Remove the grade and the comment of this file")
@@ -3371,6 +3449,15 @@ class NoteEditor(QWidget):
         themed(self.b_copy, icon="copy")
         self.b_copy.setToolTip("Copy the text of the comment to the clipboard")
         self.b_copy.clicked.connect(self.copy)
+        self.b_translate = QPushButton("" if compact else "  Translate to EN")
+        themed(self.b_translate, icon="translate")
+        self.b_translate.setToolTip("Translate the comment (or the selected text) from Spanish "
+                                    "to English with DeepL. The text is sent to DeepL.")
+        self.b_translate.clicked.connect(self.translate_comment)
+        self.deepl = DeepL(self)
+        self.deepl.translated.connect(self._translated)
+        self.deepl.failed.connect(self._translate_failed)
+        self._translating = None            # (archivo, texto, seleccion o None) mientras espera
         self.b_bank = QPushButton("" if compact else "  Phrases")
         themed(self.b_bank, icon="bank")
         self.b_bank.setToolTip("Comment bank: ready-made phrases to add to the comment (%s)"
@@ -3400,11 +3487,12 @@ class NoteEditor(QWidget):
             caja.addWidget(self.txt)
             caja.addWidget(self.grip)
             lay.addLayout(caja, 1)
-            col = QVBoxLayout()
+            col = QGridLayout()             # 2 x 2: cuatro en columna harian la fila mas alta
             col.setSpacing(2)
-            col.addWidget(self.b_bank)
-            col.addWidget(self.b_copy)
-            col.addWidget(self.b_clear)
+            col.addWidget(self.b_bank, 0, 0)
+            col.addWidget(self.b_translate, 0, 1)
+            col.addWidget(self.b_copy, 1, 0)
+            col.addWidget(self.b_clear, 1, 1)
             lay.addLayout(col)
             self.lbl_file.hide()
         else:
@@ -3423,6 +3511,7 @@ class NoteEditor(QWidget):
             fila = QHBoxLayout()
             fila.addWidget(self.b_bank)
             fila.addStretch(1)
+            fila.addWidget(self.b_translate)
             fila.addWidget(self.b_copy)
             lay.addLayout(fila)
 
@@ -3448,6 +3537,7 @@ class NoteEditor(QWidget):
         for wd in (self.spn, self.txt, self.b_clear):
             wd.setEnabled(path is not None)
         self._sync_copy()
+        self._sync_translate()
         self.show_file_label()
 
     def show_file_label(self):
@@ -3506,6 +3596,96 @@ class NoteEditor(QWidget):
         if texto:
             QApplication.clipboard().setText(texto)
             self.say("Comment copied to the clipboard.")
+
+    def _sync_translate(self):
+        self.b_translate.setEnabled(self.path is not None and self._translating is None
+                                    and bool(self.txt.toPlainText().strip()))
+
+    # Los tres dialogos van aparte para poder sustituirlos en las pruebas
+    def _ask_notice(self) -> bool:
+        return QMessageBox.question(
+            self, APP_NAME,
+            "Translating sends the text of the comment to DeepL (deepl.com). The Free "
+            "plan does not promise that DeepL will not keep it, so do not use it with "
+            "anything you should not share.\n\nSend it?") == QMessageBox.StandardButton.Yes
+
+    def _ask_key(self) -> str:
+        clave, ok = QInputDialog.getText(
+            self, APP_NAME,
+            "Your DeepL API Free key (it ends in \":fx\").\nGet one at %s\n"
+            "It is kept only on this computer." % DEEPL_KEYS_URL,
+            QLineEdit.EchoMode.Password)
+        return clave.strip() if ok else ""
+
+    def _warn(self, texto: str):
+        QMessageBox.warning(self, APP_NAME, texto)
+
+    def translate_comment(self):
+        """Traduce la seleccion, o todo el comentario, del espanol al ingles."""
+        if not self.path or self._translating is not None:
+            return
+        cur = self.txt.textCursor()
+        parcial = cur.hasSelection()
+        texto = cur.selectedText().replace(" ", "\n") if parcial \
+            else self.txt.toPlainText()
+        if not texto.strip():
+            return
+        ajustes = load_translate_settings()
+        if not ajustes.get("notice_accepted"):
+            if not self._ask_notice():
+                return
+            ajustes["notice_accepted"] = True
+            save_translate_settings(ajustes)
+        clave = str(ajustes.get("deepl_key") or "")
+        if not clave:
+            clave = self._ask_key()
+            if not clave:
+                return
+            ajustes["deepl_key"] = clave
+            save_translate_settings(ajustes)
+        # lo escrito entre tanto no se pisa: se compara al volver
+        self._translating = (self.path, self.txt.toPlainText(),
+                             (cur.selectionStart(), cur.selectionEnd()) if parcial else None)
+        self.b_translate.setText("" if self.compact else "  Translating…")
+        self._sync_translate()
+        self.say("Translating…")
+        self.deepl.translate(texto, clave)
+
+    def _translate_done(self):
+        """Vuelve el boton a su estado; devuelve lo que esperaba (o None)."""
+        espera, self._translating = self._translating, None
+        self.b_translate.setText("" if self.compact else "  Translate to EN")
+        self._sync_translate()
+        return espera
+
+    def _translated(self, ingles: str):
+        espera = self._translate_done()
+        if espera is None:
+            return
+        path, antes, parcial = espera
+        if path != self.path or self.txt.toPlainText() != antes:
+            self.say("The comment changed while translating: translation discarded.")
+            return
+        # el texto no ha cambiado, asi que la seleccion de entonces sigue valiendo
+        c = self.txt.textCursor()
+        if parcial:
+            c.setPosition(parcial[0])
+            c.setPosition(parcial[1], QTextCursor.MoveMode.KeepAnchor)
+        else:
+            c.select(QTextCursor.SelectionType.Document)
+        c.insertText(ingles)
+        self.txt.setTextCursor(c)
+        self.say("Translated to English (Ctrl+Z to undo).")
+
+    def _translate_failed(self, aviso: str, codigo: int):
+        if self._translate_done() is None:
+            return
+        if codigo == 403:                       # una clave mala no se queda guardada
+            ajustes = load_translate_settings()
+            ajustes.pop("deepl_key", None)
+            save_translate_settings(ajustes)
+        self.say("Translation failed.")
+        self._warn(aviso)
 
     def focus_grade(self):
         self.spn.setFocus(Qt.FocusReason.ShortcutFocusReason)
@@ -6938,6 +7118,11 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
         p.drawPolyline([QPointF(m, m + 3), QPointF(m, M), QPointF(M - 3, M)])
         p.drawLine(QPointF(m + 6, m + 4), QPointF(M - 3, m + 4))
         p.drawLine(QPointF(m + 6, m + 7.5), QPointF(M - 5, m + 7.5))
+    elif kind == "translate":                   # una A y una flecha hacia el otro idioma
+        p.drawPolyline([QPointF(m, m + 8), QPointF(m + 4, m), QPointF(m + 8, m + 8)])
+        p.drawLine(QPointF(m + 1.7, m + 5.2), QPointF(m + 6.3, m + 5.2))
+        p.drawLine(QPointF(m, M), QPointF(M, M))
+        p.drawPolyline([QPointF(M - 3, M - 3), QPointF(M, M), QPointF(M - 3, M + 3)])
     elif kind == "select":                      # el puntero del raton
         p.setBrush(tinta)
         p.drawPolygon([QPointF(m + 2, m), QPointF(m + 2, M - 2), QPointF(m + 6, M - 6),

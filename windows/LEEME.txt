@@ -7,7 +7,15 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
-Novedades de la 1.15:
+Novedades de la 1.17:
+
+  - Buscador de archivos arriba de la columna derecha (Ctrl+F): por nombre de
+    archivo o de carpeta, varias palabras en cualquier orden, sin mayusculas ni
+    acentos. En todas las carpetas o solo en lo que se ve. Apagado en modo ciego.
+  - View > Interface size: escala la ventana, los menus y los dialogos del 75 %
+    al 200 %. Se reinicia solo para aplicarlo y se recuerda.
+
+De la 1.15:
 
   - Un PDF por alumno: prefijo y sufijo para el nombre de cada PDF (por
     ejemplo "Composicion - Ana Perez - Ej 1.pdf"), con vista previa. Se

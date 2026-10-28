@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import time
 import zipfile
 from collections import OrderedDict, deque
@@ -73,7 +74,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.16.0"
+VERSION = "1.17.0"
 
 
 def app_dir() -> Path:
@@ -133,6 +134,39 @@ def data_dir() -> Path:
 
 APP_DIR = app_dir()
 DATA_DIR = data_dir()
+
+# --------------------------------------------------------------------------- #
+#  Tamano de la interfaz
+#
+#  Qt solo admite el factor de escala al arrancar, asi que se guarda aqui
+#  (preferencia de este ordenador, como atajos.json) y se aplica en main()
+#  antes de crear la aplicacion. Escala por igual ventana, menus, dialogos e
+#  iconos. Para que se note al momento, la app se reinicia sola.
+# --------------------------------------------------------------------------- #
+UI_SCALE_FILE = DATA_DIR / "interfaz.json"
+UI_SCALES = (0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0)
+_restart_requested = False
+
+
+def load_ui_scale() -> float:
+    try:
+        v = float(json.loads(UI_SCALE_FILE.read_text(encoding="utf-8")).get("scale", 1.0))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 1.0
+    return v if UI_SCALES[0] <= v <= UI_SCALES[-1] else 1.0
+
+
+def save_ui_scale(v: float):
+    UI_SCALE_FILE.write_text(json.dumps({"scale": v}), encoding="utf-8")
+
+
+def scale_label(v: float) -> str:
+    return "%d %%" % round(v * 100)
+
+
+def fit_to_screen(w: int, h: int, disponible: tuple[int, int]) -> tuple[int, int]:
+    """El tamano que se quiere, sin pasarse del 95 % de la pantalla."""
+    return min(w, int(disponible[0] * 0.95)), min(h, int(disponible[1] * 0.95))
 STATE_FILE = DATA_DIR / "biblioteca.json"
 MIME_IMAGES = "application/x-driloboard-images"
 THUMB_BOX = 512                      # tamano al que se cachea la miniatura en disco
@@ -207,6 +241,7 @@ SHORTCUT_DEFS = [
     ("mark_b", "Mark the image as B", "B"),
     ("edit", "Open the editor", "E"),
     ("note", "Grade / comment the image", "N"),
+    ("search", "Search files", "Ctrl+F"),
     ("show_notes", "Show / hide grades and comments", "Ctrl+G"),
     ("blind", "Blind marking: hide / show file names", "Ctrl+B"),
     ("bank", "Show / hide the comment bank (phrases)", "Ctrl+Shift+F"),
@@ -431,6 +466,26 @@ def format_duration(ms: int | None) -> str:
     s = max(0, int(ms or 0) // 1000)
     h, m = s // 3600, (s // 60) % 60
     return "%d:%02d:%02d" % (h, m, s % 60) if h else "%d:%02d" % (m, s % 60)
+
+
+def fold_text(texto: str) -> str:
+    """Minusculas y sin acentos: 'Álvaro' se encuentra escribiendo 'alvaro'."""
+    d = unicodedata.normalize("NFD", texto.casefold())
+    return "".join(c for c in d if not unicodedata.combining(c))
+
+
+def search_terms(consulta: str) -> list[str]:
+    return fold_text(consulta).split()
+
+
+def matches_search(path: str, terms: list[str]) -> bool:
+    """Todas las palabras, en cualquier orden, en el nombre del archivo o en el
+    de su carpeta (el alumno, cuando las entregas van una carpeta por alumno)."""
+    if not terms:
+        return True
+    carpeta, nombre = os.path.split(path)
+    texto = fold_text(os.path.basename(carpeta) + " " + nombre)
+    return all(t in texto for t in terms)
 
 
 def natural_key(s: str):
@@ -9312,6 +9367,11 @@ over the finished work.</li>
 
 <h3>4 · Categories (right column)</h3>
 <ul>
+<li><b>Search files</b> (top of the column, <b>[[search]]</b>): type part of a file
+or folder name and the grid shows the matches. Several words work in any order;
+capitals and accents do not matter. <i>In all the folders</i> looks in everything you
+added; untick it to filter only what the grid shows now. <i>Enter</i> jumps to the
+first result. Off in blind marking, since the name is what it hides.</li>
 <li><i>New</i> creates one at the top level, <i>Subcategory</i> inside the
 selected one. Deleting never removes an image from disk.</li>
 <li><b>They nest</b>: drag a category <i>onto</i> another to put it inside, or
@@ -9433,6 +9493,12 @@ stick and your classification travels with it.</p>
 <p>The <b>Light / Dark</b> button at the top right, <b>View ▸ theme</b> or
 <b>[[theme]]</b> switch the whole window, editor included. DriloBoard remembers
 your choice; the first time it follows the system.</p>
+
+<h3>Interface size</h3>
+<p><b>View ▸ Interface size</b> scales the window, the menus and the dialogs
+(75 % to 200 %), for small laptops or big monitors. DriloBoard restarts to apply
+it, after saving your library, and remembers the size. The window never opens
+larger than your screen.</p>
 
 <h3>Videos</h3>
 <ul>
@@ -10019,6 +10085,7 @@ class MainWindow(QMainWindow):
         SK.bind(self, "mark_b", lambda: self.mark_image("B"))
         SK.bind(self, "edit", self.edit_current)
         SK.bind(self, "note", self.focus_note)
+        SK.bind(self, "search", self.focus_search)
         QShortcut(QKeySequence.StandardKey.Undo, self, self.undo)
         QShortcut(QKeySequence.StandardKey.Redo, self, self.redo)
         extra_redo_shortcut(self, self.redo)
@@ -10077,6 +10144,26 @@ class MainWindow(QMainWindow):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(3, 6, 6, 6)
+        lay.addWidget(self.section("SEARCH FILES"))
+        self.search_box = QLineEdit()
+        self.search_box.setClearButtonEnabled(True)
+        self.search_box.setPlaceholderText("File or folder name…")
+        self.search_box.textChanged.connect(lambda _t: self._search_timer.start())
+        self.search_box.returnPressed.connect(self.search_enter)
+        lay.addWidget(self.search_box)
+        self.chk_search_all = QCheckBox("In all the folders")
+        self.chk_search_all.setChecked(True)
+        self.chk_search_all.setToolTip(
+            "On: looks in every folder you added, whatever is selected.\n"
+            "Off: only filters what the grid shows now.")
+        self.chk_search_all.toggled.connect(lambda _on: self.refresh_images())
+        lay.addWidget(self.chk_search_all)
+        self._search_timer = QTimer(self)               # espera a que pares de escribir
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(200)
+        self._search_timer.timeout.connect(self.refresh_images)
+        self.sync_search_ui()
+        lay.addSpacing(6)
         lay.addWidget(self.section("CATEGORIES"))
 
         row = QHBoxLayout()
@@ -10204,6 +10291,10 @@ class MainWindow(QMainWindow):
                 w.setChecked(on)
                 w.blockSignals(False)
         self.chk_names.setEnabled(not on)       # sus nombres no salen, esten como esten
+        if hasattr(self, "search_box"):
+            self.sync_search_ui()
+            if self.search_box.text().strip():
+                self.refresh_images()           # una busqueda en marcha se aparta
         self.model.names_changed()
         self.apply_icon_size(self.slider.value())   # la rejilla no deja hueco al nombre
         self.update_marks()
@@ -11253,13 +11344,90 @@ class MainWindow(QMainWindow):
             paths = [p for p in paths if p not in self.removed]
         if self.chk_unassigned.isChecked():
             paths = [p for p in paths if p not in self._index]
+        terms = self.search_terms_now()
+        if terms:
+            if self.chk_search_all.isChecked():
+                todo, vistos = [], set()
+                for f in self.folders:
+                    for p in self.files_of(f):
+                        if p not in vistos:
+                            vistos.add(p)
+                            todo.append(p)
+                paths = [p for p in todo if (self.show_videos or not is_video(p))
+                         and p not in self.removed]
+            paths = [p for p in paths if matches_search(p, terms)]
         self.model.set_paths(paths)
         self.sync_note_panel()
         videos = sum(1 for p in paths if is_video(p))
         texto = "%d images" % (len(paths) - videos)
         if videos:
             texto += "  ·  %d video%s" % (videos, "" if videos == 1 else "s")
+        if terms:
+            texto += "  ·  search"
         self.lbl_count.setText(texto)
+
+    def set_ui_scale(self, esc: float):
+        """Guarda el tamano y reinicia para aplicarlo."""
+        global _restart_requested
+        if abs(esc - load_ui_scale()) < 1e-6:
+            return
+        caja = QMessageBox(self)
+        caja.setWindowTitle(APP_NAME)
+        caja.setText("Set the interface size to %s?\n\nDriloBoard will restart to apply it. "
+                     "Your library is saved first." % scale_label(esc))
+        ok = caja.addButton("Restart now", QMessageBox.ButtonRole.AcceptRole)
+        caja.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        caja.exec()
+        if caja.clickedButton() is not ok:
+            actual = load_ui_scale()
+            for e, a in self.act_scales.items():        # el tic vuelve a donde estaba
+                a.setChecked(abs(e - actual) < 1e-6)
+            return
+        try:
+            save_ui_scale(esc)
+        except OSError as e:
+            QMessageBox.warning(self, APP_NAME, "Could not save the setting:\n%s" % e)
+            return
+        _restart_requested = True
+        self.close()
+
+    def search_terms_now(self) -> list[str]:
+        """Las palabras buscadas; en modo ciego no se busca, porque el nombre
+        es justo lo que no debe condicionar."""
+        box = getattr(self, "search_box", None)
+        if box is None or _blind:
+            return []
+        return search_terms(box.text())
+
+    def sync_search_ui(self):
+        if not hasattr(self, "search_box"):
+            return
+        box = self.search_box
+        box.setEnabled(not _blind)
+        self.chk_search_all.setEnabled(not _blind)
+        box.setToolTip("Blind marking hides the file names, so the search is off"
+                       if _blind else
+                       "Type part of a file or folder name (%s). Words can come in "
+                       "any order; accents and capitals do not matter."
+                       % SK.text("search"))
+
+    def focus_search(self):
+        if _blind:
+            self.statusBar().showMessage("Blind marking is on: the search is off.", 4000)
+            return
+        self.search_box.setFocus()
+        self.search_box.selectAll()
+
+    def search_enter(self):
+        """Intro: salta al primer resultado."""
+        self._search_timer.stop()
+        self.refresh_images()
+        if self.model.rowCount():
+            self.view.setCurrentIndex(self.model.index(0, 0))
+            self.view.selectionModel().select(
+                self.model.index(0, 0),
+                self.view.selectionModel().SelectionFlag.ClearAndSelect)
+            self.view.setFocus()
 
     def on_videos(self, on: bool):
         self.set_show_videos(on)
@@ -11351,6 +11519,20 @@ class MainWindow(QMainWindow):
         v.addSeparator()
         a = v.addAction("Switch theme", self.toggle_theme)
         SK.bind_action(a, "theme")
+        tam = v.addMenu("Interface size")
+        tam.setToolTip("Scales the window, the menus and the dialogs. "
+                       "DriloBoard restarts to apply it.")
+        grupo_tam = QActionGroup(self)
+        grupo_tam.setExclusive(True)
+        actual = load_ui_scale()
+        self.act_scales = {}
+        for esc in UI_SCALES:
+            a = tam.addAction(scale_label(esc) + ("  (default)" if esc == 1.0 else ""),
+                              lambda esc=esc: self.set_ui_scale(esc))
+            a.setCheckable(True)
+            a.setChecked(abs(esc - actual) < 1e-6)
+            grupo_tam.addAction(a)
+            self.act_scales[esc] = a
         v.addSeparator()
         self.act_notes = v.addAction("Show grades and comments")
         self.act_notes.setCheckable(True)
@@ -12296,8 +12478,22 @@ def log_errors(tipo, valor, tb):
                                       "are in %s, next to the library." % ERROR_LOG, 10000)
 
 
+def relaunch():
+    """Vuelve a abrir la aplicacion (tras cambiar el tamano de la interfaz)."""
+    if getattr(sys, "frozen", False):
+        args = [sys.executable] + sys.argv[1:]
+    else:
+        args = [sys.executable, os.path.abspath(sys.argv[0])] + sys.argv[1:]
+    subprocess.Popen(args, start_new_session=True, close_fds=True)
+
+
 def main():
     sys.excepthook = log_errors
+    # el factor de escala solo vale antes de crear la aplicacion; lo que ya
+    # venga puesto en el entorno manda
+    esc = load_ui_scale()
+    if esc != 1.0 and "QT_SCALE_FACTOR" not in os.environ:
+        os.environ["QT_SCALE_FACTOR"] = str(esc)
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(VERSION)
@@ -12305,8 +12501,13 @@ def main():
     if "--selftest" in sys.argv:
         sys.exit(selftest())
     win = MainWindow()
+    area = app.primaryScreen().availableGeometry()
+    win.resize(*fit_to_screen(win.width(), win.height(), (area.width(), area.height())))
     win.show()
-    sys.exit(app.exec())
+    codigo = app.exec()
+    if _restart_requested:
+        relaunch()
+    sys.exit(codigo)
 
 
 if __name__ == "__main__":

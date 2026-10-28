@@ -21,7 +21,7 @@ botón *Export*.
 ## Arrancar
 
 **Versión portable (lo normal).** Descomprime
-`DriloBoard-1.16.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
+`DriloBoard-1.17.0-portable-win64.zip` donde quieras —disco, USB, carpeta de
 red— y ejecuta `DriloBoard.exe`. No instala nada ni escribe en el registro.
 La biblioteca y la caché de miniaturas se crean **dentro de esa misma
 carpeta**, así que copiándola te llevas también toda la clasificación.
@@ -30,7 +30,7 @@ La primera vez Windows puede avisar de que el origen es desconocido (el
 ejecutable no está firmado): *Más información* → *Ejecutar de todas formas*.
 
 **Versión portable para Mac.** Descomprime
-`DriloBoard-1.16.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
+`DriloBoard-1.17.0-portable-macos.zip`: sale una carpeta `DriloBoard` con
 `DriloBoard.app` dentro. Una sola app para Mac Intel y Apple Silicon, macOS 13
 Ventura o posterior. Igual que en Windows, la biblioteca y la caché se crean
 **en esa carpeta, junto a la app** (nunca dentro del `.app`), así que se puede
@@ -244,7 +244,14 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
 - Los puntos de color en la esquina indican a qué categorías pertenece.
 - *Uncategorised only* deja a la vista lo que aún no has clasificado.
 
-**Columna derecha — Categorías**
+**Columna derecha — Buscador y categorías**
+
+Arriba hay un **buscador de archivos** (`Ctrl+F` lo enfoca): escribe parte del nombre
+del archivo o de su carpeta (el alumno) y la rejilla muestra solo lo que coincide.
+Varias palabras valen en cualquier orden, sin mayúsculas ni acentos. La casilla
+*In all the folders* busca en todas las carpetas añadidas; sin marcar, solo filtra
+lo que ya ves. `Intro` salta al primer resultado. En modo ciego se apaga.
+
 - *New* crea al primer nivel; *Subcategory* crea dentro de la que tengas
   seleccionada. *Rename* / *Delete* (borrar no toca ninguna imagen del
   disco; si la categoría tiene subcategorías, se van con ella y el aviso te
@@ -522,6 +529,13 @@ después.
   en carpetas más hondas, como `intento_1`). Si hay varias imágenes
   seleccionadas, solo van esas. Si ya existe alguno, pregunta antes de
   sustituirlo.
+
+## Tamaño de la interfaz
+
+*View* ▸ *Interface size* escala la ventana, los menús y los diálogos del 75 %
+al 200 %, para portátiles pequeños o monitores grandes. DriloBoard se reinicia
+solo para aplicarlo (guarda antes la biblioteca) y recuerda el tamaño. La ventana
+nunca se abre más grande que la pantalla.
 
 ## Tema oscuro o claro
 

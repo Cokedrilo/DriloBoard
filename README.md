@@ -1,7 +1,7 @@
 # DriloBoard - Image viewer and reviewer
 
-[![Download](https://img.shields.io/badge/Download-Windows%20portable%20·%2058%20MB-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.16.0-portable-win64.zip)
-[![Download](https://img.shields.io/badge/Download-macOS%20portable%20·%2035%20MB-2ea44f?style=for-the-badge&logo=apple)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.16.0-portable-macos.zip)
+[![Download](https://img.shields.io/badge/Download-Windows%20portable%20·%2058%20MB-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.17.0-portable-win64.zip)
+[![Download](https://img.shields.io/badge/Download-macOS%20portable%20·%2035%20MB-2ea44f?style=for-the-badge&logo=apple)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.17.0-portable-macos.zip)
 [![Release](https://img.shields.io/github/v/release/Cokedrilo/DriloBoard)](https://github.com/Cokedrilo/DriloBoard/releases/latest)
 [![Licence](https://img.shields.io/github/license/Cokedrilo/DriloBoard)](LICENSE)
 
@@ -15,14 +15,14 @@ sheets, before/after comparisons.
 
 ### ⬇ Try it in one minute
 
-**[Download DriloBoard for Windows](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.16.0-portable-win64.zip)** → unzip anywhere → run
+**[Download DriloBoard for Windows](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.17.0-portable-win64.zip)** → unzip anywhere → run
 `DriloBoard.exe`.
 
 Nothing is installed, nothing is written to the registry, and it runs happily
 from a USB stick. Windows will warn about an unknown publisher the first time
 (the executable is not signed): *More info* → *Run anyway*.
 
-**[Download DriloBoard for Mac](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.16.0-portable-macos.zip)**
+**[Download DriloBoard for Mac](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.17.0-portable-macos.zip)**
 → unzip → open `DriloBoard.app` inside the `DriloBoard` folder. One app for
 Intel and Apple Silicon, macOS 13 or later. [First launch on a Mac](#macos).
 
@@ -127,7 +127,9 @@ fitted and centred, never stretched.
 ![Comparing two images with the opacity slider](docs/compare.png)
 
 **Categories (right column)**
-Create them, **nest them by dragging one onto another**, reorder them. A
+A **search box** at the top finds files by name (or by the name of their folder:
+the student): words in any order, no need for capitals or accents, in every folder
+you added or only in what you see. `Ctrl+F` focuses it. Create them, **nest them by dragging one onto another**, reorder them. A
 parent's count includes its children without counting an image twice. Assign
 by dragging thumbnails onto a category or with `Ctrl+1` … `Ctrl+9`. *Show this
 category only* turns the centre into that category and everything below it,
@@ -173,6 +175,10 @@ The **Light / Dark** button in the top-right corner, *View ▸ theme* or
 `Ctrl+T` switch the whole application, editor included. The choice is
 remembered; the first run follows the system.
 
+**Interface size**
+*View ▸ Interface size* scales the whole window, menus and dialogs
+from 75 % to 200 %. DriloBoard restarts to apply it and remembers the choice.
+
 **Undo everywhere**
 `Ctrl+Z` covers the lot — edits, assignments, categories, folders — for the
 last 40 steps, and the status bar says what was undone.
@@ -188,7 +194,7 @@ overwrites your own edits.
 
 ### Prebuilt Windows package
 
-[**Download the ZIP**](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.16.0-portable-win64.zip)
+[**Download the ZIP**](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.17.0-portable-win64.zip)
 (58 MB) — or browse every version under
 [Releases](https://github.com/Cokedrilo/DriloBoard/releases). Unpack it
 anywhere: hard disk, USB stick, network share.
@@ -205,7 +211,7 @@ with status 0 if everything is in place.
 
 ### Prebuilt Mac package
 
-[**Download the ZIP**](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.16.0-portable-macos.zip)
+[**Download the ZIP**](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-1.17.0-portable-macos.zip)
 (35 MB). It unzips to a `DriloBoard` folder holding `DriloBoard.app` and a
 short read-me. Keep the app in that folder: the library and the thumbnail
 cache are created **next to the app** (never inside it), so the folder is

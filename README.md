@@ -175,6 +175,13 @@ The **Light / Dark** button in the top-right corner, *View ▸ theme* or
 `Ctrl+T` switch the whole application, editor included. The choice is
 remembered; the first run follows the system.
 
+**Folding the side columns and resizing**
+The thin strip at the edge of the Folders column and of the Search & categories
+column folds it away (click again to bring it back); *View* and `Ctrl+Shift+L` /
+`Ctrl+Shift+R` do the same, and the choice is remembered. The window can be made
+much smaller: checkboxes and buttons wrap onto another line, and the side
+columns scroll when they do not fit.
+
 **Interface size**
 *View ▸ Interface size* scales the whole window, menus and dialogs
 from 75 % to 200 %. DriloBoard restarts to apply it and remembers the choice.

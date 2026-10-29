@@ -74,7 +74,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.17.0"
+VERSION = "1.18.0"
 
 
 def app_dir() -> Path:
@@ -9710,6 +9710,14 @@ stick and your classification travels with it.</p>
 <p>The <b>Light / Dark</b> button at the top right, <b>View ▸ theme</b> or
 <b>[[theme]]</b> switch the whole window, editor included. DriloBoard remembers
 your choice; the first time it follows the system.</p>
+
+<h3>Side panels and window size</h3>
+<p>The thin strip at the edge of the <b>Folders</b> column and of the
+<b>Search &amp; categories</b> column folds it away, and clicking it again brings
+it back with the width it had. <b>View</b> and <b>[[panel_left]]</b> /
+<b>[[panel_right]]</b> do the same. Folding deletes nothing, and DriloBoard
+remembers which ones were folded. The window can be made much smaller: the
+buttons wrap onto another line, and the side columns scroll if they do not fit.</p>
 
 <h3>Interface size</h3>
 <p><b>View ▸ Interface size</b> scales the window, the menus and the dialogs

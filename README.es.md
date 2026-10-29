@@ -530,6 +530,14 @@ después.
   seleccionadas, solo van esas. Si ya existe alguno, pregunta antes de
   sustituirlo.
 
+## Plegar las columnas laterales y redimensionar
+
+La tira fina en el borde de la columna de carpetas y de la de búsqueda y
+categorías la pliega (otro clic la devuelve con el ancho que tenía); *View* y
+`Ctrl+Shift+L` / `Ctrl+Shift+R` hacen lo mismo, y se recuerda. La ventana se puede
+hacer mucho más pequeña: las casillas y los botones bajan de línea y las columnas
+laterales llevan scroll si no caben.
+
 ## Tamaño de la interfaz
 
 *View* ▸ *Interface size* escala la ventana, los menús y los diálogos del 75 %

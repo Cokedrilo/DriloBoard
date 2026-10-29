@@ -44,7 +44,7 @@ from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices, QFon
                            QPainterPathStroker, QPalette, QPen, QPixmap, QPolygonF, QShortcut,
                            QFontMetricsF,
                            QTextCursor, QTransform)
-from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QBoxLayout, QCheckBox,
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QBoxLayout, QCheckBox, QLayout,
                                QComboBox,
                                QDialog, QDialogButtonBox, QDoubleSpinBox, QStyleOptionViewItem,
                                QFileDialog, QFrame, QGraphicsItem, QGraphicsPixmapItem,
@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication
                                QGraphicsView, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QListView, QListWidget, QListWidgetItem, QMainWindow,
                                QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-                               QSizePolicy, QSlider, QSplitter,
+                               QScrollArea, QSizePolicy, QSlider, QSplitter,
                                QButtonGroup, QColorDialog, QGraphicsPathItem,
                                QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionSlider,
                                QTextBrowser, QTableWidget, QTableWidgetItem, QHeaderView, QKeySequenceEdit,
@@ -246,6 +246,8 @@ SHORTCUT_DEFS = [
     ("blind", "Blind marking: hide / show file names", "Ctrl+B"),
     ("bank", "Show / hide the comment bank (phrases)", "Ctrl+Shift+F"),
     ("timer", "Show / hide the marking timer", "Ctrl+Shift+T"),
+    ("panel_left", "Fold / unfold the folders panel", "Ctrl+Shift+L"),
+    ("panel_right", "Fold / unfold the search and categories panel", "Ctrl+Shift+R"),
     ("before", "Before / after (hold to see the original)", "Z"),
     ("refresh", "Refresh folders", "F5"),
     ("theme", "Switch dark / light theme", "Ctrl+T"),
@@ -3387,6 +3389,219 @@ class GripBar(QWidget):
 
 
 # --------------------------------------------------------------------------- #
+#  Layout que fluye y paneles laterales plegables
+# --------------------------------------------------------------------------- #
+class FlowLayout(QLayout):
+    """Widgets en fila que bajan a otra linea cuando no caben.
+
+    Su ancho minimo es el del widget mas ancho, no la suma: asi una barra de
+    casillas o de botones no obliga a una ventana grande. llenar reparte lo que
+    sobra de cada linea entre sus widgets (filas de botones de una columna);
+    derecha las pega al borde derecho. Con add(w, hueco) el widget lleva un
+    hueco extra delante, que se pierde si cae al principio de una linea.
+    """
+
+    def __init__(self, parent=None, hspace: int = 6, vspace: int = 4,
+                 llenar: bool = False, derecha: bool = False):
+        super().__init__(parent)
+        self._items: list[list] = []                # [item, hueco]
+        self.hspace, self.vspace = hspace, vspace
+        self.llenar, self.derecha = llenar, derecha
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self._items.append([item, 0])
+
+    def add(self, widget: QWidget, hueco: int = 0):
+        self.addWidget(widget)
+        self._items[-1][1] = hueco
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i][0] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i)[0] if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, ancho):
+        return self._colocar(QRect(0, 0, ancho, 0), False)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._colocar(rect, True)
+
+    def _visibles(self):
+        return [(it, hueco) for it, hueco in self._items if not it.isEmpty()]
+
+    def sizeHint(self):
+        m = self.contentsMargins()
+        visibles = self._visibles()
+        ancho = sum(it.sizeHint().width() + (hueco if n else 0) + (self.hspace if n else 0)
+                    for n, (it, hueco) in enumerate(visibles))
+        alto = max((it.sizeHint().height() for it, _ in visibles), default=0)
+        return QSize(ancho + m.left() + m.right(), alto + m.top() + m.bottom())
+
+    def minimumSize(self):
+        m = self.contentsMargins()
+        visibles = self._visibles()
+        ancho = max((it.minimumSize().width() for it, _ in visibles), default=0)
+        alto = max((it.minimumSize().height() for it, _ in visibles), default=0)
+        return QSize(ancho + m.left() + m.right(), alto + m.top() + m.bottom())
+
+    def _colocar(self, rect: QRect, mover: bool) -> int:
+        m = self.contentsMargins()
+        zona = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        lineas, actual, x = [], [], 0
+        for it, hueco in self._visibles():
+            w = it.sizeHint().width()
+            ant = (hueco + self.hspace) if actual else 0
+            if actual and x + ant + w > zona.width():
+                lineas.append(actual)
+                actual, x, ant = [], 0, 0
+            actual.append([it, x + ant, w])
+            x += ant + w
+        if actual:
+            lineas.append(actual)
+        y = zona.y()
+        for n, linea in enumerate(lineas):
+            alto = max(it.sizeHint().height() for it, _, _ in linea)
+            usado = linea[-1][1] + linea[-1][2]
+            sobra = max(0, zona.width() - usado)
+            if mover:
+                extra = sobra // len(linea) if self.llenar else 0
+                for k, (it, x0, w) in enumerate(linea):
+                    dx = extra * k + (0 if self.llenar else (sobra if self.derecha else 0))
+                    h = it.sizeHint().height()
+                    it.setGeometry(QRect(zona.x() + x0 + dx, y + (alto - h) // 2,
+                                         w + extra, h))
+            y += alto + (self.vspace if n < len(lineas) - 1 else 0)
+        return y - rect.y() + m.bottom()
+
+
+class RailButton(QWidget):
+    """El riel de un panel lateral: una flecha para plegarlo y, ya plegado, el
+    nombre del panel escrito en vertical. Todo el riel se puede pulsar."""
+    clicked = Signal()
+    RAIL = 22
+
+    def __init__(self, titulo: str, hacia_fuera: str, parent=None):
+        super().__init__(parent)
+        self.titulo = titulo
+        self.lado = hacia_fuera                 # "left" o "right": donde esta el borde de la ventana
+        self.abierto = True
+        self._encima = False
+        self.setFixedWidth(self.RAIL)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+
+    def set_open(self, abierto: bool):
+        self.abierto = abierto
+        self.update()
+
+    def enterEvent(self, _e):
+        self._encima = True
+        self.update()
+
+    def leaveEvent(self, _e):
+        self._encima = False
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.clicked.emit()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if self._encima or not self.abierto:
+            fondo = QColor(theme_color("border"))
+            fondo.setAlpha(110 if self._encima else 50)
+            p.fillRect(self.rect(), fondo)
+        color = QColor(theme_color("text") if self._encima else theme_color("dim"))
+        # la flecha apunta hacia donde se va a plegar el panel (hacia su borde),
+        # o hacia el centro si esta plegado
+        punta = (-1 if self.lado == "left" else 1) * (1 if self.abierto else -1)
+        cx, cy, s = self.width() / 2, 16.0, 4.0
+        d = -punta
+        flecha = QPolygonF([QPointF(cx + d * s * 0.6, cy - s), QPointF(cx - d * s * 0.6, cy),
+                            QPointF(cx + d * s * 0.6, cy + s)])
+        p.setPen(QPen(color, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                      Qt.PenJoinStyle.RoundJoin))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPolyline(flecha)
+        if not self.abierto:
+            f = QFont(self.font())
+            f.setPixelSize(11)
+            f.setBold(True)
+            f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.0)
+            p.setFont(f)
+            p.setPen(color)
+            p.translate(self.width() / 2, 34)
+            p.rotate(90)                        # se lee de arriba abajo
+            p.drawText(QRectF(0, -self.width() / 2, max(0, self.height() - 40), self.width()),
+                       int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                       self.titulo)
+        p.end()
+
+
+class SidePanel(QWidget):
+    """Un panel lateral que se pliega a un riel estrecho. El contenido se queda
+    vivo, solo oculto, asi que lo que tuviera seleccionado o escrito no se pierde."""
+    toggled = Signal(bool)                      # True: abierto
+    requested = Signal(bool)                    # se pulso el riel: True, abrir
+
+    def __init__(self, contenido: QWidget, titulo: str, lado: str, parent=None):
+        super().__init__(parent)
+        # el contenido va en un area con scroll: si la ventana es mas baja de lo
+        # que pide (los botones bajan de linea al estrecharse), se desplaza en
+        # vez de cortarse
+        body = QScrollArea()
+        body.setWidgetResizable(True)
+        body.setFrameShape(QFrame.Shape.NoFrame)
+        body.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body.setWidget(contenido)
+        body.setMinimumWidth(contenido.minimumSizeHint().width() + 4)
+        self.body, self.lado, self.titulo = body, lado, titulo
+        self.rail = RailButton(titulo, lado)
+        self.rail.clicked.connect(lambda: self.requested.emit(not self.abierto))
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        if lado == "left":
+            lay.addWidget(self.rail)
+            lay.addWidget(body, 1)
+        else:
+            lay.addWidget(body, 1)
+            lay.addWidget(self.rail)
+        self.abierto = True
+        self.ancho = 0                          # el ancho que tenia abierto
+        self._sync_tip()
+
+    def _sync_tip(self):
+        self.rail.setToolTip(("Hide %s" if self.abierto else "Show %s") % self.titulo.lower())
+
+    def set_open(self, abierto: bool):
+        if abierto == self.abierto:
+            return
+        if not abierto:
+            self.ancho = self.width()
+        self.abierto = abierto
+        self.body.setVisible(abierto)
+        self.rail.set_open(abierto)
+        self.setMaximumWidth(16777215 if abierto else RailButton.RAIL)
+        self._sync_tip()
+        self.toggled.emit(abierto)
+
+
+# --------------------------------------------------------------------------- #
 #  Traducir el comentario (espanol -> ingles) con DeepL API Free
 #
 #  Es lo unico de DriloBoard que sale a internet, y solo cuando pulsas el boton:
@@ -3526,6 +3741,9 @@ class NoteEditor(QWidget):
             w.installEventFilter(self)
 
         self.lbl_file = QLabel("")
+        # un nombre largo no debe ensanchar la columna: se recorta (el
+        # nombre entero va en el tooltip)
+        self.lbl_file.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         themed(self.lbl_file, css="color:%(dim)s; font-size:11px;")
         # el alto de la caja lo elige el usuario con el tirador, y vale para
         # todos los editores del mismo tipo
@@ -3567,9 +3785,8 @@ class NoteEditor(QWidget):
             lay.addLayout(row)
             lay.addWidget(self.txt)
             lay.addWidget(self.grip)
-            fila = QHBoxLayout()
+            fila = FlowLayout(llenar=True)
             fila.addWidget(self.b_bank)
-            fila.addStretch(1)
             fila.addWidget(self.b_translate)
             fila.addWidget(self.b_copy)
             lay.addLayout(fila)
@@ -9771,27 +9988,26 @@ class WrapRow(QWidget):
 
     Asi los botones no obligan a una ventana mas ancha que la pantalla: en
     macOS los botones son bastante mas anchos que en Windows, y en una fila no
-    caben en un portatil. Con partible=False (Windows, Linux) es siempre una
-    fila, como ha sido siempre. En la lista, un numero es un hueco en pixeles.
+    caben en un portatil. Y si ni asi caben, cada grupo baja a otra linea
+    (FlowLayout). Con partible=False es siempre una fila de dos grupos. En la
+    lista, un numero es un hueco en pixeles.
     """
 
-    def __init__(self, izquierda: list, derecha: list, partible: bool = MAC):
+    def __init__(self, izquierda: list, derecha: list, partible: bool = True):
         super().__init__()
         self.partible = partible
         self.grupos = []
         for piezas, a_la_derecha in ((izquierda, False), (derecha, True)):
             g = QWidget()
-            fila = QHBoxLayout(g)
-            fila.setContentsMargins(0, 0, 0, 0)
-            if a_la_derecha:
-                fila.addStretch(1)
+            # cada grupo fluye: si ni solo no cabe, baja a otra linea
+            fila = FlowLayout(g, derecha=a_la_derecha)
+            hueco = 0
             for pieza in piezas:
                 if isinstance(pieza, int):
-                    fila.addSpacing(pieza)
+                    hueco = pieza
                 else:
-                    fila.addWidget(pieza)
-            if not a_la_derecha:
-                fila.addStretch(1)
+                    fila.add(pieza, hueco)
+                    hueco = 0
             self.grupos.append(g)
         self.caja = QBoxLayout(QBoxLayout.Direction.LeftToRight, self)
         self.caja.setContentsMargins(0, 0, 0, 0)
@@ -9805,12 +10021,13 @@ class WrapRow(QWidget):
     def _ajustar(self):
         if not self.partible:
             return
-        anchos = [g.minimumSizeHint().width() for g in self.grupos]
-        # el minimo es el del grupo mas ancho, no la suma: por debajo de la
-        # suma se parte en dos
-        if self.minimumWidth() != max(anchos):
-            self.setMinimumWidth(max(anchos))
-        cabe = self.width() >= sum(anchos) + self.caja.spacing()
+        minimos = [g.minimumSizeHint().width() for g in self.grupos]
+        naturales = [g.sizeHint().width() for g in self.grupos]
+        # el minimo es el del widget mas ancho: por debajo de la suma de los
+        # grupos se parten en dos filas y, si aun no caben, cada grupo fluye
+        if self.minimumWidth() != max(minimos):
+            self.setMinimumWidth(max(minimos))
+        cabe = self.width() >= sum(naturales) + self.caja.spacing()
         destino = (QBoxLayout.Direction.LeftToRight if cabe
                    else QBoxLayout.Direction.TopToBottom)
         if self.caja.direction() != destino:
@@ -9900,12 +10117,24 @@ class MainWindow(QMainWindow):
     # ---------------- interfaz -------------------------------------------- #
     def _build_ui(self):
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._build_left())
+        self.side_left = SidePanel(self._build_left(), "FOLDERS", "left")
+        self.side_right = SidePanel(self._build_right(), "SEARCH & CATEGORIES", "right")
+        splitter.addWidget(self.side_left)
         splitter.addWidget(self._build_center())
-        splitter.addWidget(self._build_right())
+        splitter.addWidget(self.side_right)
         splitter.setSizes([260, 940, 300])
+        splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
+        # el centro nunca se cierra del todo, y los laterales se pliegan con su
+        # riel, no arrastrando hasta que desaparecen
+        for i in range(3):
+            splitter.setCollapsible(i, False)
         self.splitter = splitter
+        for panel in (self.side_left, self.side_right):
+            panel.toggled.connect(self._on_side_toggled)
+            # el riel pasa por la ventana, que es quien reparte el ancho
+            panel.requested.connect(lambda on, p=panel: self.set_side_open(p, on))
         self.setCentralWidget(splitter)
         self.statusBar().showMessage("Drop folders on the left-hand column to begin")
 
@@ -9924,7 +10153,7 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(6, 6, 3, 6)
         lay.addWidget(self.section("FOLDERS"))
 
-        row = QHBoxLayout()
+        row = FlowLayout(llenar=True)
         b_add = QPushButton("  Add…")
         themed(b_add, std="SP_DirOpenIcon")
         b_add.clicked.connect(self.pick_folders)
@@ -9969,11 +10198,12 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(w)
         lay.setContentsMargins(3, 6, 3, 6)
 
-        bar = QHBoxLayout()
-        bar.setSpacing(14)
+        # las casillas bajan a otra linea si la ventana se estrecha
+        top = QHBoxLayout()
         self.lbl_count = QLabel("0 images")
-        bar.addWidget(self.lbl_count)
-        bar.addStretch(1)
+        top.addWidget(self.lbl_count, 0, Qt.AlignmentFlag.AlignTop)
+        bar = FlowLayout(hspace=14, derecha=True)
+        top.addLayout(bar, 1)
 
         self.chk_preview = QCheckBox("Preview below")
         self.chk_preview.setToolTip("Show the selected image under the thumbnails (V)")
@@ -10017,14 +10247,18 @@ class MainWindow(QMainWindow):
         self.chk_time.toggled.connect(self.set_track_time)
         bar.addWidget(self.chk_time)
 
-        bar.addWidget(QLabel("Size"))
+        tam = QWidget()                 # "Size" y su barra van juntas
+        tam_lay = QHBoxLayout(tam)
+        tam_lay.setContentsMargins(0, 0, 0, 0)
+        tam_lay.addWidget(QLabel("Size"))
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(64, 420)
         self.slider.setValue(160)
         self.slider.setFixedWidth(180)
         self.slider.valueChanged.connect(self.on_icon_size)
-        bar.addWidget(self.slider)
-        lay.addLayout(bar)
+        tam_lay.addWidget(self.slider)
+        bar.addWidget(tam)
+        lay.addLayout(top)
 
         self.model = ThumbModel(self)
         self.model.edit_for = self.edit_of
@@ -10166,7 +10400,7 @@ class MainWindow(QMainWindow):
         lay.addSpacing(6)
         lay.addWidget(self.section("CATEGORIES"))
 
-        row = QHBoxLayout()
+        row = FlowLayout(llenar=True)
         b_new = QPushButton("  New")
         themed(b_new, icon="category")
         b_new.clicked.connect(self.new_category)
@@ -10178,7 +10412,7 @@ class MainWindow(QMainWindow):
         row.addWidget(b_sub)
         lay.addLayout(row)
 
-        row = QHBoxLayout()
+        row = FlowLayout(llenar=True)
         b_ren = QPushButton("  Rename")
         themed(b_ren, icon="rename")
         b_ren.clicked.connect(self.rename_category)
@@ -11534,6 +11768,15 @@ class MainWindow(QMainWindow):
             grupo_tam.addAction(a)
             self.act_scales[esc] = a
         v.addSeparator()
+        self.act_panel_left = v.addAction("Folders panel")
+        self.act_panel_right = v.addAction("Search and categories panel")
+        for a, panel, clave in ((self.act_panel_left, self.side_left, "panel_left"),
+                                (self.act_panel_right, self.side_right, "panel_right")):
+            a.setCheckable(True)
+            a.setChecked(panel.abierto)
+            a.toggled.connect(lambda on, p=panel: self.set_side_open(p, on))
+            SK.bind_action(a, clave)
+        v.addSeparator()
         self.act_notes = v.addAction("Show grades and comments")
         self.act_notes.setCheckable(True)
         self.act_notes.setChecked(self.show_notes)
@@ -12262,7 +12505,8 @@ class MainWindow(QMainWindow):
             "category_order": self.cmb_cat_order.currentData(),
             "edits": {p: e for p, e in self.edits.items() if not is_empty_edit(e)},
             "export_dir": self.export_dir,
-            "splitter": self.splitter.sizes(),
+            "splitter": self.side_widths(),
+            "side_open": [self.side_left.abierto, self.side_right.abierto],
             "center_splitter": self.center_split.sizes(),
             "geometry": [self.x(), self.y(), self.width(), self.height()],
             "theme": _theme,
@@ -12344,8 +12588,17 @@ class MainWindow(QMainWindow):
         self.preview.b_notes.setChecked(self.preview_notes)
         self.set_show_notes(bool(data.get("show_notes", True)))
         self.slider.setValue(int(data.get("icon", 160)))
-        if isinstance(data.get("splitter"), list):
+        if isinstance(data.get("splitter"), list) and len(data["splitter"]) == 3:
             self.splitter.setSizes(data["splitter"])
+        abiertos = data.get("side_open")
+        if isinstance(abiertos, list) and len(abiertos) == 2:
+            anchos = data.get("splitter") if isinstance(data.get("splitter"), list) else [0, 0, 0]
+            for panel, on, ancho in zip((self.side_left, self.side_right), abiertos,
+                                        (anchos[0], anchos[2])):
+                if not on:
+                    self.set_side_open(panel, False)
+                    if isinstance(ancho, int) and ancho > RailButton.RAIL:
+                        panel.ancho = ancho         # sin pintar aun, el splitter no sabe
         self.chk_preview.setChecked(bool(data.get("preview", False)))
         sizes = data.get("center_splitter")
         if isinstance(sizes, list) and len(sizes) == 2 and all(sizes):
@@ -12353,6 +12606,41 @@ class MainWindow(QMainWindow):
         g = data.get("geometry")
         if isinstance(g, list) and len(g) == 4:
             self.setGeometry(*g)
+
+    def set_side_open(self, panel: "SidePanel", abierto: bool):
+        """Pliega o despliega un lateral. Al desplegar recupera el ancho que
+        tenia, quitandoselo al centro."""
+        if abierto == panel.abierto:
+            return
+        i = self.splitter.indexOf(panel)
+        tam = self.splitter.sizes()
+        panel.set_open(abierto)
+        if abierto:
+            tam[i] = max(panel.ancho, panel.minimumSizeHint().width(), 180)
+        else:
+            if tam[i] > RailButton.RAIL:
+                panel.ancho = tam[i]            # el ancho de verdad, aunque aun no se haya pintado
+            tam[i] = RailButton.RAIL
+        tam[1] = max(1, self.splitter.width() - sum(t for k, t in enumerate(tam) if k != 1))
+        self.splitter.setSizes(tam)
+
+    def _on_side_toggled(self, _abierto):
+        for a, panel in ((self.act_panel_left, self.side_left),
+                         (self.act_panel_right, self.side_right)):
+            if a.isChecked() != panel.abierto:
+                a.blockSignals(True)
+                a.setChecked(panel.abierto)
+                a.blockSignals(False)
+        self.touch()
+
+    def side_widths(self) -> list[int]:
+        """Los anchos del splitter; un lateral plegado cuenta con el que tenia
+        abierto, para que al arrancar se pueda volver a desplegar."""
+        tam = self.splitter.sizes()
+        for i, panel in ((0, self.side_left), (2, self.side_right)):
+            if not panel.abierto:
+                tam[i] = panel.ancho or tam[i]
+        return tam
 
     def fit_to_screen(self):
         """Que la ventana quepa en la pantalla. La biblioteca viaja en un USB de

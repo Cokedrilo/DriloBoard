@@ -33,11 +33,12 @@ try:                      # sin numpy el color (tono/saturacion/luz) no se aplic
 except ImportError:       # pragma: no cover
     np = None
 
-from PySide6.QtCore import (QAbstractListModel, QBuffer, QByteArray, QEvent, QItemSelectionModel, QLocale,
+from PySide6.QtCore import (QAbstractListModel, QBuffer, QByteArray, QEvent, QEventLoop,
+                            QItemSelectionModel, QLocale,
                             QMarginsF, QMimeData, QModelIndex,
                             QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, QSizeF,
                             Qt, QThreadPool, QTimer, QUrl, Signal, Slot)
-from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices, QFont, QIcon,
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices, QFont, QGuiApplication, QIcon,
                            QImage, QImageReader, QPageLayout, QPageSize, QPdfWriter,
                            QTextDocument,
                            QImageWriter, QKeySequence, QPainter, QPainterPath,
@@ -51,7 +52,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication
                                QGraphicsScene,
                                QGraphicsView, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QListView, QListWidget, QListWidgetItem, QMainWindow,
-                               QMenu, QMessageBox, QPlainTextEdit, QPushButton,
+                               QMenu, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton,
                                QScrollArea, QSizePolicy, QSlider, QSplitter,
                                QButtonGroup, QColorDialog, QGraphicsPathItem,
                                QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionSlider,
@@ -74,7 +75,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "1.18.0"
+VERSION = "2.0.0"
 
 
 def app_dir() -> Path:
@@ -178,6 +179,8 @@ EDIT_PREVIEW_MAX = 2400              # resolucion a la que trabaja el editor
 UNDO_LIMIT = 40                      # pasos de deshacer que se recuerdan
 ZOOM_MIN, ZOOM_MAX = 5, 800          # porcentaje de zoom en el editor
 PATH_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+NODE_ROLE = int(Qt.ItemDataRole.UserRole) + 2     # el nodo del arbol de carpetas
+AVG_ROLE = int(Qt.ItemDataRole.UserRole) + 3      # media de notas de la carpeta (o None)
 DURATION_ROLE = int(Qt.ItemDataRole.UserRole) + 2     # ms de un video, o None
 
 # Solo se buscan si esta marcada la casilla "Videos"
@@ -206,6 +209,7 @@ VIDEO_KEYS = {
     "loop_clear": ("Shift+L", "Clear the loop range"),
 }
 LOOP_COLOR = "#2d8fd5"               # el tramo en bucle, sobre la barra de tiempo
+REVIEW_MARK_COLOR = "#e0457b"        # comentarios y dibujos de un video, en la barra
 
 MAC = sys.platform == "darwin"
 
@@ -491,7 +495,36 @@ def matches_search(path: str, terms: list[str]) -> bool:
 
 
 def natural_key(s: str):
-    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
+    # los trozos impares son siempre los numeros: isdigit() no vale, porque da
+    # True con un '²' que int() no sabe leer
+    return [int(t) if i % 2 else t.lower() for i, t in enumerate(re.split(r"(\d+)", s))]
+
+
+def canon_path(p: str) -> str:
+    """La misma ruta escrita siempre igual.
+
+    En macOS una tilde puede llegar compuesta (i con tilde) o descompuesta
+    (i + tilde) segun quien escribio el nombre: Finder, OneDrive, un dialogo.
+    El disco las trata como el mismo archivo, pero como clave de las notas o
+    de las ediciones son textos distintos y la nota se 'pierde'. Se usa
+    siempre la compuesta (NFC). En Windows y Linux no se toca: alli el disco
+    si las distingue.
+    """
+    return unicodedata.normalize("NFC", p) if MAC and not p.isascii() else p
+
+
+def canon_keys(d: dict, merge=None) -> dict:
+    """El diccionario con sus rutas en forma canonica. Si la misma ruta estaba
+    escrita de las dos formas, gana la que ya era canonica; con 'merge' se
+    juntan las dos."""
+    out: dict = {}
+    for p, v in sorted(d.items(), key=lambda kv: canon_path(kv[0]) != kv[0]):
+        c = canon_path(p)
+        if c not in out:
+            out[c] = v
+        elif merge is not None:
+            out[c] = merge(out[c], v)
+    return out
 
 
 def scan_folder(folder: str, recursive: bool, exts: set[str]) -> list[str]:
@@ -502,12 +535,12 @@ def scan_folder(folder: str, recursive: bool, exts: set[str]) -> list[str]:
                 dirs[:] = sorted(d for d in dirs if not d.startswith("."))
                 for f in files:
                     if os.path.splitext(f)[1].lower() in exts:
-                        out.append(os.path.join(root, f))
+                        out.append(canon_path(os.path.join(root, f)))
         else:
             with os.scandir(folder) as it:
                 for e in it:
                     if e.is_file() and os.path.splitext(e.name)[1].lower() in exts:
-                        out.append(e.path)
+                        out.append(canon_path(e.path))
     except OSError:
         return []
     out.sort(key=lambda p: (natural_key(os.path.dirname(p)),
@@ -522,12 +555,12 @@ def build_tree(root: str, exts: set[str]) -> dict:
     children}. Se omiten las carpetas ocultas y las que no tienen ninguna
     imagen ni arriba ni abajo, para no llenar la columna de ruido.
     """
-    root = os.path.normpath(root)
+    root = canon_path(os.path.normpath(root))
     nodes: dict[str, dict] = {}
     try:
         walker = os.walk(root, topdown=False, onerror=None)
         for dirpath, dirnames, filenames in walker:
-            dirpath = os.path.normpath(dirpath)
+            dirpath = canon_path(os.path.normpath(dirpath))
             rel = os.path.relpath(dirpath, root)
             if rel != "." and any(part.startswith(".")
                                   for part in rel.split(os.sep)):
@@ -538,7 +571,7 @@ def build_tree(root: str, exts: set[str]) -> dict:
             for d in sorted(dirnames, key=natural_key):
                 if d.startswith("."):
                     continue
-                kid = nodes.get(os.path.join(dirpath, d))
+                kid = nodes.get(os.path.join(dirpath, canon_path(d)))
                 if kid and kid["total"]:
                     children.append(kid)
             nodes[dirpath] = {
@@ -1898,6 +1931,144 @@ def write_selection_pdf(items: list[dict], destino: str, titulo: str, *,
         painter.end()
 
 
+# --------------------------------------------------------------------------- #
+#  Anotaciones de un video en un PDF: una pagina por fotograma comentado o
+#  dibujado, con el dibujo encima y el comentario debajo, con su marca de tiempo
+# --------------------------------------------------------------------------- #
+class FrameGrabber(QObject):
+    """Saca fotogramas concretos de un video, uno tras otro, con su propio
+    reproductor (el del visor sigue donde estaba). grab() espera dentro de un
+    bucle de eventos, asi que la ventana no se congela. El salto a un
+    fotograma sigue el mismo truco que el visor: al primer cuarto del
+    fotograma y, si cae en otro, reintentar un poco antes o despues."""
+    FRAME_TIMEOUT_MS = 4000
+
+    def __init__(self, path: str, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self._loop = QEventLoop(self)
+        self._player = QMediaPlayer(self)
+        self._sink = QVideoSink(self)
+        self._player.setVideoSink(self._sink)
+        self._player.mediaStatusChanged.connect(self._on_status)
+        self._player.errorOccurred.connect(lambda *_: self._finish())
+        self._sink.videoFrameChanged.connect(self._on_frame)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(self.FRAME_TIMEOUT_MS)
+        self._timer.timeout.connect(self._on_timeout)
+        self._frame_us = 40000.0
+        self._queue: list[int] = []
+        self._images: list[QImage] = []
+        self._want_us = None
+        self._tries = 0
+        self._last = QImage()                # el ultimo fotograma que llego
+        self._progress = None
+        self._started = False
+        self._fps_known = False
+
+    def grab(self, mss: list[int], progress=None) -> list[QImage]:
+        """Un QImage por cada ms (nulo si no se pudo). progress(i, n) -> False cancela."""
+        self._queue = list(mss)
+        self._images = []
+        self._progress = progress
+        if not self._queue:
+            return []
+        self._player.setSource(QUrl.fromLocalFile(self.path))
+        self._timer.start()                  # tambien vale para que abra el archivo
+        self._loop.exec()
+        self._timer.stop()
+        self._player.stop()
+        self._player.setSource(QUrl())       # suelta el archivo: en Windows lo bloquea
+        self._images += [QImage()] * (len(mss) - len(self._images))
+        return self._images
+
+    def _on_status(self, estado):
+        if estado == QMediaPlayer.MediaStatus.LoadedMedia and not self._started:
+            self._started = True
+            try:
+                fps = float(self._player.metaData().value(QMediaMetaData.Key.VideoFrameRate))
+            except (TypeError, ValueError):
+                fps = 0.0
+            self._fps_known = fps > 0
+            if fps > 0:
+                self._frame_us = 1_000_000 / fps
+            self._player.pause()
+            self._next()
+        elif estado == QMediaPlayer.MediaStatus.InvalidMedia:
+            self._finish()
+
+    def _next(self):
+        if len(self._images) >= len(self._queue):
+            self._finish()
+            return
+        self._want_us = self._queue[len(self._images)] * 1000.0
+        self._tries = 0
+        self._last = QImage()
+        self._timer.start()
+        self._player.setPosition(int(round((self._want_us + self._frame_us / 4) / 1000)))
+
+    def _on_frame(self, frame):
+        if self._want_us is None or not frame.isValid() or frame.startTime() < 0:
+            return
+        inicio = frame.startTime()
+        if not self._fps_known and frame.endTime() > inicio:
+            self._frame_us = frame.endTime() - inicio
+        error = inicio - self._want_us
+        if abs(error) > self._frame_us * 0.3 and self._tries < 3:
+            self._tries += 1
+            destino = self._want_us + (1000 if error > 0 else self._frame_us * 0.6)
+            self._last = frame.toImage()
+            self._player.setPosition(int(math.ceil(destino / 1000)))
+            return
+        self._accept(frame.toImage())
+
+    def _on_timeout(self):
+        if self._want_us is None:            # aun abriendo el archivo
+            self._finish()
+        else:
+            self._accept(self._last)          # el mas cercano que llego, o nada
+
+    def _accept(self, img: QImage):
+        self._want_us = None
+        self._images.append(img)
+        if self._progress is not None and self._progress(len(self._images), len(self._queue)) is False:
+            self._finish()
+            return
+        QTimer.singleShot(0, self._next)
+
+    def _finish(self):
+        self._want_us = None
+        if self._loop.isRunning():
+            self._loop.quit()
+
+
+def review_page_image(frame: QImage, a: dict) -> QImage:
+    """El fotograma con los dibujos de la anotacion encima, a la medida en que
+    se dibujaron (un video con pixeles no cuadrados se ve de otro tamano)."""
+    if frame.isNull():
+        base = QImage(a.get("w") or 640, a.get("h") or 360, QImage.Format.Format_RGB32)
+        base.fill(QColor("#9a9ca1"))
+        return base
+    img = frame.convertToFormat(QImage.Format.Format_RGB32)
+    w, h = a.get("w") or img.width(), a.get("h") or img.height()
+    if (img.width(), img.height()) != (w, h):
+        img = img.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+    return draw_annotations(img, dict(empty_edit(), draw=a.get("draw") or []), w, h)
+
+
+def write_review_pdf(path: str, lista: list[dict], frames: list[QImage], destino: str,
+                     titulo: str | None = None):
+    """Una pagina por anotacion. 'frames' trae el fotograma de cada una (sin
+    dibujo); asi las pruebas no dependen de un video."""
+    imagenes = [review_page_image(f, a) for f, a in zip(frames, lista)]
+    items = [{"path": path, "name": shown_name(path), "grade": None,
+              "comment": review_text(a)} for a in lista]
+    write_selection_pdf(items, destino, titulo or "DriloBoard \u2014 %s" % (shown_name(path) or "video"),
+                        show_grade=False, images=imagenes)
+
+
 def safe_file_name(nombre: str, otro: str = "DriloBoard") -> str:
     """Un nombre que vale como archivo en cualquier sistema."""
     return re.sub(r'[\\/:*?"<>|]+', "-", nombre).strip(" .") or otro
@@ -1979,8 +2150,8 @@ def is_abs_anywhere(ruta: str) -> bool:
 
 def from_portable(guardada: str, raiz: str) -> str:
     if is_abs_anywhere(guardada) or not raiz:
-        return os.path.normpath(guardada)
-    return os.path.normpath(os.path.join(raiz, guardada.replace("/", os.sep)))
+        return canon_path(os.path.normpath(guardada))
+    return canon_path(os.path.normpath(os.path.join(raiz, guardada.replace("/", os.sep))))
 
 
 def clean_video_marks(crudo) -> dict[str, list[int]]:
@@ -1994,6 +2165,111 @@ def clean_video_marks(crudo) -> dict[str, list[int]]:
                 if ms:
                     limpio[p] = ms
     return limpio
+
+
+# --- anotaciones sobre un video (como en SyncSketch): en un fotograma, un
+# comentario y/o un dibujo. Cada una es {ms, frame, w, h, comment, draw}; los
+# puntos del dibujo estan en pixeles del video (w x h, tal como se veia).
+REVIEW_TOOLS = ("trazo", "flecha", "rect", "elipse", "texto")
+REVIEW_COLORS = ("#e6542f", "#f0a500", "#3fa34d", "#2d8fd5", "#ffffff")
+REVIEW_PEN_LEVELS = 5                # grosores de la barra: 1 a 5
+
+
+def review_pen(nivel: int, alto: float) -> float:
+    """Grosor en pixeles del video: igual de visible en un video pequeno que en uno 4K."""
+    return round(max(1, min(REVIEW_PEN_LEVELS, nivel)) * max(1.0, alto / 270), 1)
+
+
+def clean_review_shape(d) -> dict | None:
+    """Un dibujo leido de un json, o None si no vale."""
+    if not isinstance(d, dict) or d.get("tipo") not in REVIEW_TOOLS:
+        return None
+    pts = []
+    for p in d.get("puntos") or []:
+        if (isinstance(p, (list, tuple)) and len(p) == 2
+                and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                        and math.isfinite(v) for v in p)):
+            pts.append([round(float(p[0]), 1), round(float(p[1]), 1)])
+    if not pts:
+        return None
+    f = {"tipo": d["tipo"], "puntos": pts[:20000]}
+    color = d.get("color")
+    f["color"] = color if isinstance(color, str) and QColor(color).isValid() else REVIEW_COLORS[0]
+    g = d.get("grosor")
+    f["grosor"] = (float(g) if isinstance(g, (int, float)) and not isinstance(g, bool)
+                   and 0 < g < 1000 else 4.0)
+    if d["tipo"] == "texto":
+        texto = d.get("texto")
+        if not isinstance(texto, str) or not texto.strip():
+            return None
+        f["texto"] = texto
+    return f
+
+
+def clean_reviews(crudo) -> dict[str, list[dict]]:
+    """Las anotaciones de los videos leidas de un json: {ruta: [anotacion]},
+    ordenadas por tiempo y con una sola por fotograma. Sin comentario ni
+    dibujo no se guarda."""
+    limpio = {}
+    if not isinstance(crudo, dict):
+        return limpio
+    for p, lista in crudo.items():
+        if not isinstance(p, str) or not isinstance(lista, list):
+            continue
+        por_ms = {}
+        for a in lista:
+            if not isinstance(a, dict):
+                continue
+            ms = a.get("ms")
+            if not isinstance(ms, (int, float)) or isinstance(ms, bool) or ms < 0:
+                continue
+            comentario = a.get("comment")
+            comentario = comentario.rstrip() if isinstance(comentario, str) else ""
+            dibujo = [f for f in map(clean_review_shape, a.get("draw") or []) if f]
+            if not comentario.strip() and not dibujo:
+                continue
+            item = {"ms": int(ms), "comment": comentario, "draw": dibujo}
+            for k in ("frame", "w", "h"):
+                v = a.get(k)
+                item[k] = int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) \
+                    and 0 <= v < 10 ** 7 else 0
+            por_ms[item["ms"]] = item
+        if por_ms:
+            limpio[p] = [por_ms[k] for k in sorted(por_ms)]
+    return limpio
+
+
+def review_stamp(ms: float, frame: int = 0) -> str:
+    """La marca de tiempo que va delante del comentario: '0:03.0 · frame 75'."""
+    decimas = int(ms // 100)                 # hacia abajo, como un reloj
+    h, resto = divmod(decimas, 36000)
+    m, resto = divmod(resto, 600)
+    marca = ("%d:%02d:%04.1f" % (h, m, resto / 10)) if h else "%d:%04.1f" % (m, resto / 10)
+    return "%s · frame %d" % (marca, frame) if frame else marca
+
+
+def review_text(a: dict) -> str:
+    """El comentario con su marca delante: '[0:03 · frame 75] texto'."""
+    texto = " ".join((a.get("comment") or "").split())
+    marca = "[%s]" % review_stamp(a["ms"], a.get("frame", 0))
+    return "%s %s" % (marca, texto) if texto else marca
+
+
+def review_index(lista: list[dict], ms: float, margen_ms: float) -> int | None:
+    """La anotacion que cae en ese tiempo (a menos de margen_ms), o None."""
+    mejor = None
+    for i, a in enumerate(lista):
+        d = abs(a["ms"] - ms)
+        if d <= margen_ms and (mejor is None or d < mejor[0]):
+            mejor = (d, i)
+    return mejor[1] if mejor else None
+
+
+def merge_reviews(mias: list[dict], nuevas: list[dict]) -> list[dict]:
+    """Funde dos listas: en un mismo fotograma gana la que ya estaba."""
+    por_ms = {a["ms"]: a for a in nuevas}
+    por_ms.update({a["ms"]: a for a in mias})
+    return [por_ms[k] for k in sorted(por_ms)]
 
 
 def clean_notes(crudo) -> dict[str, dict]:
@@ -2043,15 +2319,18 @@ def grade_color(g: float) -> str:
 def build_export(folders: list, categories: list, edits: dict,
                  extras: dict | None = None,
                  video_marks: dict | None = None,
-                 notes: dict | None = None) -> dict:
+                 notes: dict | None = None,
+                 video_reviews: dict | None = None) -> dict:
     video_marks = video_marks or {}
     notes = notes or {}
+    video_reviews = video_reviews or {}
     todas = list(folders)
     for c, _ in iter_cats(categories):
         todas.extend(c["images"])
     todas.extend(edits)
     todas.extend(video_marks)
     todas.extend(notes)
+    todas.extend(video_reviews)
     raiz = common_root(todas)
 
     def cats(lista):
@@ -2067,6 +2346,8 @@ def build_export(folders: list, categories: list, edits: dict,
         d["video_marks"] = {to_portable(p, raiz): m for p, m in video_marks.items()}
     if notes:
         d["notes"] = {to_portable(p, raiz): n for p, n in notes.items()}
+    if video_reviews:
+        d["video_reviews"] = {to_portable(p, raiz): a for p, a in video_reviews.items()}
     d.update(extras or {})
     return d
 
@@ -2081,6 +2362,12 @@ def read_export_notes(data: dict, raiz: str) -> dict[str, dict]:
     """Las notas y comentarios de un archivo exportado, con rutas de este equipo."""
     return {from_portable(p, raiz): n
             for p, n in clean_notes(data.get("notes")).items()}
+
+
+def read_export_reviews(data: dict, raiz: str) -> dict[str, list[dict]]:
+    """Las anotaciones de video de un archivo exportado, con rutas de este equipo."""
+    return {from_portable(p, raiz): a
+            for p, a in clean_reviews(data.get("video_reviews")).items()}
 
 
 def read_export(data: dict, raiz: str):
@@ -2130,6 +2417,14 @@ def reveal_in_file_manager(path: str):
             subprocess.Popen(["open", "-R", path])
         else:
             subprocess.Popen(["xdg-open", os.path.dirname(path)])
+    except Exception:
+        pass
+
+
+def open_folder_in_file_manager(folder: str):
+    """Abre la carpeta misma (no su contenedor) en Finder / Explorer."""
+    try:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
     except Exception:
         pass
 
@@ -2305,14 +2600,20 @@ class VideoThumbnailer(QObject):
             return
         self._actual = self._queue.popleft()
         self._objetivo = None
-        self._player = QMediaPlayer(self)
-        self._sink = QVideoSink(self)
-        self._player.setVideoSink(self._sink)
-        self._player.mediaStatusChanged.connect(self._on_status)
-        self._player.errorOccurred.connect(lambda *_: self._terminar(QImage()))
-        self._sink.videoFrameChanged.connect(self._on_frame)
+        player = self._player = QMediaPlayer(self)
+        sink = self._sink = QVideoSink(self)
+        player.setVideoSink(sink)
+        # cada aviso comprueba que viene del video EN MARCHA: un fotograma o un
+        # error rezagado del anterior (llegan en cola) no puede cerrar este ni
+        # quedar guardado en la cache como su miniatura
+        player.mediaStatusChanged.connect(
+            lambda st, pl=player: self._on_status(st) if pl is self._player else None)
+        player.errorOccurred.connect(
+            lambda *_, pl=player: self._terminar(QImage()) if pl is self._player else None)
+        sink.videoFrameChanged.connect(
+            lambda fr, sk=sink: self._on_frame(fr) if sk is self._sink else None)
         self._timeout.start()
-        self._player.setSource(QUrl.fromLocalFile(self._actual[0]))
+        player.setSource(QUrl.fromLocalFile(self._actual[0]))
 
     def _on_status(self, estado):
         if self._player is None:
@@ -2371,6 +2672,7 @@ class ThumbModel(QAbstractListModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._paths: list[str] = []
+        self._row: dict[str, int] = {}          # ruta -> fila, para no buscar en la lista
         # OrderedDict como cache LRU: la ultima usada al final, se tira por
         # delante. Sin tope, recorrer una biblioteca grande se comia gigas.
         self._pix: "OrderedDict[str, QPixmap]" = OrderedDict()
@@ -2432,6 +2734,7 @@ class ThumbModel(QAbstractListModel):
     def set_paths(self, paths: list[str]):
         self.beginResetModel()
         self._paths = paths
+        self._row = {p: i for i, p in enumerate(paths)}
         self._queue.clear()
         self._pending.clear()
         if self.videos is not None:
@@ -2535,10 +2838,8 @@ class ThumbModel(QAbstractListModel):
                 self._queue.remove(p)
             except ValueError:
                 pass
-            try:
-                filas.append(self._paths.index(p))
-            except ValueError:
-                pass
+            if p in self._row:
+                filas.append(self._row[p])
         for f in filas:
             self.dataChanged.emit(self.index(f), self.index(f),
                                   [Qt.ItemDataRole.DecorationRole])
@@ -2601,9 +2902,8 @@ class ThumbModel(QAbstractListModel):
         self._guardar(path, QPixmap.fromImage(
             img.scaled(self.icon, self.icon, Qt.AspectRatioMode.KeepAspectRatio,
                        Qt.TransformationMode.SmoothTransformation)))
-        try:
-            row = self._paths.index(path)
-        except ValueError:
+        row = self._row.get(path)
+        if row is None:
             return
         idx = self.index(row)
         self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
@@ -2616,8 +2916,9 @@ class ThumbDelegate(QStyledItemDelegate):
     """Anade a la miniatura los puntos de sus categorias y la marca A o B."""
 
     def __init__(self, colors_for, mark_of, is_edited, parent=None,
-                 note_of=lambda path: None):
+                 note_of=lambda path: None, removed_of=lambda path: False):
         super().__init__(parent)
+        self.removed_of = removed_of
         self.colors_for = colors_for
         self.mark_of = mark_of
         self.is_edited = is_edited
@@ -2716,6 +3017,22 @@ class ThumbDelegate(QStyledItemDelegate):
         s = super().sizeHint(option, index)
         return QSize(s.width() + 2 * self.PAD, s.height() + 2 * self.PAD)
 
+    def _removed_badge(self, painter, opt, index):
+        """Una X roja abajo a la derecha de la miniatura, y la miniatura apagada."""
+        r = self._picture_rect(opt, index)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 90))
+        painter.drawRect(r)
+        d = 20
+        c = QRectF(r.right() - d - 4, r.bottom() - d - 4, d, d)
+        painter.setPen(QPen(QColor(255, 255, 255, 230), 1.5))
+        painter.setBrush(QColor("#dc2626"))
+        painter.drawEllipse(c)
+        painter.setPen(QPen(QColor("white"), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        m = 6
+        painter.drawLine(QPointF(c.left() + m, c.top() + m), QPointF(c.right() - m, c.bottom() - m))
+        painter.drawLine(QPointF(c.right() - m, c.top() + m), QPointF(c.left() + m, c.bottom() - m))
+
     def paint(self, painter, option, index):
         seleccionada = bool(option.state & QStyle.StateFlag.State_Selected)
         azul = QColor(theme_color("select"))
@@ -2768,6 +3085,8 @@ class ThumbDelegate(QStyledItemDelegate):
         nota = self.note_of(path)
         if nota:
             self._note_badge(painter, opt, index, nota)
+        if self.removed_of(path):
+            self._removed_badge(painter, opt, index)
 
         mark = self.mark_of(path)
         if mark:
@@ -2825,6 +3144,33 @@ class EmptyHint:
         p.drawText(QRectF(r.left(), y + caja_t.height() + 8, r.width(), caja_x.height() + 4),
                    Qt.AlignmentFlag.AlignHCenter | Qt.TextFlag.TextWordWrap, texto)
         p.end()
+
+
+class FolderDelegate(QStyledItemDelegate):
+    """Pinta el nombre de la carpeta y, a continuacion, su nota media con el
+    color de la nota (rojo, ambar o verde)."""
+
+    def paint(self, painter, option, index):
+        media = index.data(AVG_ROLE)
+        super().paint(painter, option, index)
+        if media is None:
+            return
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        widget = opt.widget
+        style = widget.style() if widget else QApplication.style()
+        r = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, widget)
+        f = QFont(opt.font)
+        f.setBold(True)
+        x = int(r.left() + QFontMetricsF(opt.font).horizontalAdvance(opt.text) + 10)
+        painter.save()
+        painter.setClipRect(option.rect)
+        painter.setFont(f)
+        painter.setPen(QColor(grade_color(media)))
+        painter.drawText(QRect(x, r.top(), max(0, r.right() - x + 1), r.height()),
+                         int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                         format_grade(media))
+        painter.restore()
 
 
 class FolderTree(EmptyHint, QTreeWidget):
@@ -3111,12 +3457,18 @@ class MarkSlider(QSlider):
     def __init__(self, parent=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
         self.marks: list[int] = []          # ms
+        self.review_marks: list[int] = []   # ms de los comentarios y dibujos
         self.loop_range = None              # (desde, hasta) en ms, o None
         self.setMinimumHeight(22)
 
     def set_marks(self, marks: list[int]):
         self.marks = list(marks)
         self.update()
+
+    def set_review_marks(self, marks: list[int]):
+        if list(marks) != self.review_marks:
+            self.review_marks = list(marks)
+            self.update()
 
     def set_loop_range(self, rango):
         self.loop_range = rango
@@ -3138,7 +3490,8 @@ class MarkSlider(QSlider):
 
     def paintEvent(self, e):
         super().paintEvent(e)
-        if (not self.marks and not self.loop_range) or self.maximum() <= self.minimum():
+        if ((not self.marks and not self.review_marks and not self.loop_range)
+                or self.maximum() <= self.minimum()):
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -3162,7 +3515,302 @@ class MarkSlider(QSlider):
             p.drawPolygon([QPointF(x, arriba + 7), QPointF(x - 4, arriba + 3),
                            QPointF(x, arriba - 1), QPointF(x + 4, arriba + 3)])
             p.drawLine(QPointF(x, arriba + 7), QPointF(x, self.height() - 3))
+        # los comentarios: un globito rosa abajo, para no pisar los fotogramas clave
+        rosa = QColor(REVIEW_MARK_COLOR)
+        p.setPen(QPen(rosa.darker(140), 1))
+        p.setBrush(rosa)
+        suelo = self.height() - 2.5
+        for ms in self.review_marks:
+            x = self.mark_x(ms)
+            p.drawRoundedRect(QRectF(x - 4, suelo - 7, 8, 7), 2, 2)
+            p.drawPolygon([QPointF(x - 2, suelo - 0.5), QPointF(x - 2, suelo + 2.5),
+                           QPointF(x + 1.5, suelo - 0.5)])
         p.end()
+
+
+class ReviewOverlay(QGraphicsItem):
+    """Lo dibujado sobre el fotograma de un video. Siempre pinta los dibujos
+    de la anotacion que toca (y, fuera del modo anotar, su comentario en una
+    franja abajo); con una herramienta puesta, ademas recoge el raton y crea
+    dibujos nuevos. Los puntos estan en pixeles del video."""
+
+    def __init__(self):
+        super().__init__()
+        self.setZValue(5)
+        self.box = QRectF()
+        self.shapes: list[dict] = []
+        self.caption = ""                    # el comentario del fotograma, o ""
+        self.tool: str | None = None         # None: no dibuja
+        self.color = REVIEW_COLORS[0]
+        self.level = 2
+        self.live: dict | None = None        # el dibujo que se esta haciendo
+        self.can_draw = lambda: True         # False: solo se pausa (el video suena)
+        self.on_shape = lambda forma: None
+        self.on_text = lambda punto: None
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+    def boundingRect(self) -> QRectF:
+        return self.box
+
+    def set_box(self, caja: QRectF):
+        self.prepareGeometryChange()
+        self.box = QRectF(caja)
+        self.update()
+
+    def set_tool(self, tool: str | None):
+        self.tool = tool
+        self.live = None
+        self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton if tool
+                                     else Qt.MouseButton.NoButton)
+        self.setCursor(Qt.CursorShape.CrossCursor if tool else Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def set_content(self, shapes: list[dict], caption: str):
+        self.shapes = shapes
+        self.caption = caption
+        self.update()
+
+    def pen(self) -> float:
+        return review_pen(self.level, self.box.height())
+
+    def _clamp(self, p: QPointF) -> QPointF:
+        return QPointF(min(max(p.x(), 0.0), self.box.width()),
+                       min(max(p.y(), 0.0), self.box.height()))
+
+    def mousePressEvent(self, e):
+        if e.button() != Qt.MouseButton.LeftButton or not self.tool:
+            e.ignore()
+            return
+        e.accept()
+        if not self.can_draw():
+            return
+        p = self._clamp(e.pos())
+        if self.tool == "texto":
+            self.on_text(p)
+            return
+        self.live = {"tipo": self.tool, "puntos": [[p.x(), p.y()]],
+                     "color": self.color, "grosor": self.pen()}
+        self.update()
+
+    def mouseMoveEvent(self, e):
+        if self.live is None:
+            return
+        p = self._clamp(e.pos())
+        pts = self.live["puntos"]
+        if self.live["tipo"] == "trazo":
+            if math.hypot(p.x() - pts[-1][0], p.y() - pts[-1][1]) >= max(1.0, self.pen() / 3):
+                pts.append([p.x(), p.y()])
+        else:
+            self.live["puntos"] = [pts[0], [p.x(), p.y()]]
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        forma, self.live = self.live, None
+        self.update()
+        if forma is None:
+            return
+        pts = forma["puntos"]
+        if forma["tipo"] in ("flecha", "rect", "elipse", "linea"):
+            if len(pts) < 2 or math.hypot(pts[-1][0] - pts[0][0],
+                                          pts[-1][1] - pts[0][1]) < 3:
+                return                       # un clic suelto no es una flecha
+        forma["puntos"] = [[round(x, 1), round(y, 1)] for x, y in pts]
+        self.on_shape(forma)
+
+    def paint(self, p, option, widget=None):
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        for f in self.shapes + ([self.live] if self.live else []):
+            paint_shape(p, f)
+        if self.caption and self.box.height() > 0:
+            self._paint_caption(p)
+
+    def _paint_caption(self, p: QPainter):
+        """El comentario en una franja oscura abajo, de un tamano que depende
+        del video (no de lo que se haya reducido en pantalla)."""
+        W, H = self.box.width(), self.box.height()
+        f = QFont()
+        f.setPixelSize(max(10, int(H / 24)))
+        p.setFont(f)
+        margen = H / 60
+        ancho = W - 2 * margen
+        flags = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+                    | Qt.TextFlag.TextWordWrap)
+        alto = p.boundingRect(QRectF(0, 0, ancho, H), flags, self.caption).height()
+        alto = min(alto, H * 0.4)
+        franja = QRectF(0, H - alto - 2 * margen, W, alto + 2 * margen)
+        p.fillRect(franja, QColor(0, 0, 0, 170))
+        p.setPen(QColor("white"))
+        p.drawText(franja.adjusted(margen, margen, -margen, -margen), flags, self.caption)
+
+
+class ReviewText(QPlainTextEdit):
+    """El comentario de un fotograma: Intro lo guarda, Mayus+Intro es otra linea."""
+    submitted = Signal()
+
+    def keyPressEvent(self, e):
+        if (e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and not e.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            self.submitted.emit()
+            return
+        super().keyPressEvent(e)
+
+    def focusOutEvent(self, e):
+        self.submitted.emit()
+        super().focusOutEvent(e)
+
+
+class ReviewBar(QWidget):
+    """La barra del modo anotar: herramientas de dibujo, color y grosor arriba;
+    abajo, la marca de tiempo del fotograma y su comentario. No sabe de videos:
+    avisa de lo que se hace y PreviewPane lo guarda."""
+    toolChanged = Signal(object)            # herramienta, o None para la mano
+    colorChanged = Signal(str)
+    levelChanged = Signal(int)
+    undoShape = Signal()
+    clearDrawing = Signal()
+    commentTyped = Signal()                 # cada tecla; PreviewPane lo guarda con calma
+    commentSubmitted = Signal()             # Intro o salir de la caja
+    deleteHere = Signal()
+    exportPdf = Signal()
+    jumpTo = Signal(int)                    # ms de un comentario de la lista
+
+    TOOLS = (("move", None, "Hand: no drawing, just look and pan"),
+             ("pencil", "trazo", "Pencil: draw freehand"),
+             ("arrow", "flecha", "Arrow"),
+             ("rect", "rect", "Rectangle"),
+             ("ellipse", "elipse", "Ellipse"),
+             ("text", "texto", "Text on the frame"))
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 3, 6, 3)
+        lay.setSpacing(3)
+        fila = QHBoxLayout()
+        fila.setSpacing(2)
+        self.tool_group = QButtonGroup(self)
+        self.tool_buttons = {}
+        for icono, tool, tip in self.TOOLS:
+            b = QToolButton()
+            b.setCheckable(True)
+            b.setAutoRaise(True)
+            b.setToolTip(tip)
+            themed(b, icon=icono)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.tool_group.addButton(b)
+            self.tool_buttons[tool] = b
+            b.clicked.connect(lambda _=False, t=tool: self.toolChanged.emit(t))
+            fila.addWidget(b)
+        self.tool_buttons["trazo"].setChecked(True)
+        fila.addSpacing(8)
+        self.color_group = QButtonGroup(self)
+        self.color_buttons = {}
+        for c in REVIEW_COLORS:
+            b = QToolButton()
+            b.setCheckable(True)
+            b.setAutoRaise(True)
+            b.setIcon(swatch_icon(c))
+            b.setToolTip("Colour %s" % c)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.color_group.addButton(b)
+            self.color_buttons[c] = b
+            b.clicked.connect(lambda _=False, col=c: self.colorChanged.emit(col))
+            fila.addWidget(b)
+        self.color_buttons[REVIEW_COLORS[0]].setChecked(True)
+        fila.addSpacing(8)
+        self.sld_level = QSlider(Qt.Orientation.Horizontal)
+        self.sld_level.setRange(1, REVIEW_PEN_LEVELS)
+        self.sld_level.setValue(2)
+        self.sld_level.setFixedWidth(70)
+        self.sld_level.setToolTip("Line thickness (and text size)")
+        self.sld_level.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.sld_level.valueChanged.connect(self.levelChanged.emit)
+        fila.addWidget(self.sld_level)
+        fila.addSpacing(8)
+        self.b_undo = QToolButton()
+        self.b_undo.setAutoRaise(True)
+        self.b_undo.setToolTip("Remove the last stroke of this frame")
+        themed(self.b_undo, icon="undo")
+        self.b_undo.clicked.connect(self.undoShape.emit)
+        fila.addWidget(self.b_undo)
+        self.b_clear = QToolButton()
+        self.b_clear.setAutoRaise(True)
+        self.b_clear.setToolTip("Erase the whole drawing of this frame (the comment stays)")
+        themed(self.b_clear, icon="eraser")
+        self.b_clear.clicked.connect(self.clearDrawing.emit)
+        fila.addWidget(self.b_clear)
+        fila.addStretch(1)
+        self.b_list = QToolButton()
+        self.b_list.setText("Comments")
+        self.b_list.setToolTip("Every comment of this video: pick one to go to its frame")
+        self.b_list.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.b_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.menu_list = QMenu(self.b_list)
+        self.b_list.setMenu(self.menu_list)
+        fila.addWidget(self.b_list)
+        lay.addLayout(fila)
+
+        fila2 = QHBoxLayout()
+        self.lbl_stamp = QLabel("")
+        self.lbl_stamp.setStyleSheet("color:%s; font-weight:bold;" % REVIEW_MARK_COLOR)
+        self.lbl_stamp.setMinimumWidth(110)
+        fila2.addWidget(self.lbl_stamp)
+        self.txt = ReviewText()
+        self.txt.setPlaceholderText("Comment on this frame…  (Enter saves, Shift+Enter: new line)")
+        self.txt.setTabChangesFocus(True)
+        self.txt.setFixedHeight(46)
+        self.txt.textChanged.connect(self.commentTyped.emit)
+        self.txt.submitted.connect(self.commentSubmitted.emit)
+        fila2.addWidget(self.txt, 1)
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        self.b_delete = QPushButton("Delete")
+        self.b_delete.setToolTip("Remove the comment and the drawing of this frame")
+        self.b_delete.clicked.connect(self.deleteHere.emit)
+        self.b_delete.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        col.addWidget(self.b_delete)
+        self.b_pdf = QPushButton("  Export PDF")
+        themed(self.b_pdf, icon="save")
+        self.b_pdf.setToolTip("A PDF with a picture of every frame you drew on or commented, "
+                              "with its time stamp and comment")
+        self.b_pdf.clicked.connect(self.exportPdf.emit)
+        self.b_pdf.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        col.addWidget(self.b_pdf)
+        fila2.addLayout(col)
+        lay.addLayout(fila2)
+
+    def set_comment(self, texto: str):
+        """Sin avisar: lo que se ve cambia porque cambia el fotograma, no porque se escriba."""
+        if self.txt.toPlainText() != texto:
+            self.txt.blockSignals(True)
+            self.txt.setPlainText(texto)
+            self.txt.blockSignals(False)
+
+    def comment(self) -> str:
+        return self.txt.toPlainText()
+
+    def set_state(self, stamp: str, has_drawing: bool, exists: bool, n_total: int):
+        self.lbl_stamp.setText(stamp)
+        self.b_undo.setEnabled(has_drawing)
+        self.b_clear.setEnabled(has_drawing)
+        self.b_delete.setEnabled(exists or bool(self.txt.toPlainText().strip()))
+        self.b_pdf.setEnabled(n_total > 0)
+        self.b_list.setText("Comments (%d)" % n_total if n_total else "Comments")
+        self.b_list.setEnabled(n_total > 0)
+
+    def set_list(self, lista: list[dict]):
+        self.menu_list.clear()
+        for a in lista:
+            texto = review_text(a)
+            if len(texto) > 90:
+                texto = texto[:89].rstrip() + "…"
+            act = self.menu_list.addAction(texto)
+            act.triggered.connect(lambda _=False, ms=a["ms"]: self.jumpTo.emit(ms))
+
+    def set_tool(self, tool):
+        b = self.tool_buttons.get(tool)
+        if b is not None:
+            b.setChecked(True)
 
 
 def shortcut_tip(accion: str) -> str:
@@ -5769,6 +6417,16 @@ class PreviewPane(QWidget):
         # fotograma a fotograma y fotogramas clave: estado del paso en curso
         self.marks_for = lambda path: []            # los rellena la ventana principal
         self.on_marks_changed = lambda path, marks, desc: None
+        # anotar: comentarios y dibujos sobre un fotograma, que van a la biblioteca
+        self.reviews_for = lambda path: []
+        self.on_reviews_changed = lambda path, items, desc: None
+        self.on_export_review = lambda path: None
+        self.overlay = None                         # se crea con el reproductor
+        self.review_on = False                      # el modo anotar, que se mantiene de video a video
+        self._review_tool = "trazo"
+        self._rv_key = None                         # (video, ms) de lo que ensena la barra
+        self._rv_dirty = False                      # comentario escrito y sin guardar
+        self._rv_list_sig = None
         self._frame_start_us = 0                    # inicio del fotograma que se ve
         self._frame_us = 40000                      # duracion de un fotograma
         self._want_us = None                        # fotograma al que se va
@@ -5857,6 +6515,33 @@ class PreviewPane(QWidget):
         self._flash_timer.timeout.connect(
             lambda: self._caption_video() if self.showing_video else self.refresh_note())
 
+        # anotar: dibujar sobre el fotograma y comentarlo; y, para ver lo
+        # anotado, ir de un comentario al siguiente
+        self.b_rv_prev = QToolButton()
+        self.b_rv_prev.setAutoRaise(True)
+        self.b_rv_prev.setText("\u25c0")
+        self.b_rv_prev.setToolTip("Go to the previous comment")
+        self.b_rv_prev.clicked.connect(lambda: self.jump_review(-1))
+        self.b_rv_next = QToolButton()
+        self.b_rv_next.setAutoRaise(True)
+        self.b_rv_next.setText("\u25b6")
+        self.b_rv_next.setToolTip("Go to the next comment")
+        self.b_rv_next.clicked.connect(lambda: self.jump_review(1))
+        self.b_annotate = QToolButton()
+        self.b_annotate.setAutoRaise(True)
+        self.b_annotate.setCheckable(True)
+        self.b_annotate.setText(" Annotate")
+        self.b_annotate.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.b_annotate.setToolTip("Draw on the video and comment on frames, like SyncSketch. "
+                                   "Pause on a frame, draw or write; the time stamp is kept "
+                                   "with the comment, and the PDF has a picture of each frame.")
+        themed(self.b_annotate, icon="pencil")
+        self.b_annotate.toggled.connect(self.set_review_mode)
+        vid_lay.addWidget(self.b_rv_prev)
+        vid_lay.addWidget(self.b_annotate)
+        vid_lay.addWidget(self.b_rv_next)
+        vid_lay.addSpacing(8)
+
         self.b_mute = QToolButton()
         self.b_mute.setAutoRaise(True)
         self.b_mute.setCheckable(True)
@@ -5875,9 +6560,28 @@ class PreviewPane(QWidget):
         for w in (self.b_play, self.sld_pos, self.b_mute, self.sld_vol, self.b_key_prev,
                   self.b_frame_prev, self.b_frame_next, self.b_key_next, self.b_key_add,
                   self.b_key_del, self.b_loop, self.b_loop_in, self.b_loop_out,
-                  self.b_loop_clear):
+                  self.b_loop_clear, self.b_annotate, self.b_rv_prev, self.b_rv_next):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.video_bar.hide()
+
+        # la barra del modo anotar, encima de la del video
+        self.review_bar = ReviewBar()
+        self._rv_timer = QTimer(self)               # guarda el comentario al dejar de escribir
+        self._rv_timer.setSingleShot(True)
+        self._rv_timer.setInterval(700)
+        self._rv_timer.timeout.connect(self.flush_review)
+        rb = self.review_bar
+        rb.toolChanged.connect(self._on_review_tool)
+        rb.colorChanged.connect(self._on_review_color)
+        rb.levelChanged.connect(self._on_review_level)
+        rb.undoShape.connect(self.undo_review_shape)
+        rb.clearDrawing.connect(self.clear_review_drawing)
+        rb.commentTyped.connect(self._on_review_typed)
+        rb.commentSubmitted.connect(self.flush_review)
+        rb.deleteHere.connect(self.delete_review)
+        rb.exportPdf.connect(self._on_review_export)
+        rb.jumpTo.connect(self._on_review_jump)
+        self.review_bar.hide()
 
         # barra de GIF: solo con un GIF animado puesto. Arranca solo (no suena)
         # y se mueve fotograma a fotograma con las mismas teclas que un video
@@ -5929,6 +6633,7 @@ class PreviewPane(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         lay.addWidget(self.view, 1)
+        lay.addWidget(self.review_bar)
         lay.addWidget(self.video_bar)
         lay.addWidget(self.gif_bar)
         lay.addWidget(self.cmp_bar)
@@ -6050,6 +6755,12 @@ class PreviewPane(QWidget):
             self._paint_caption()
 
     def show_path(self, path: str | None, immediate: bool = False):
+        if (not immediate and path is not None and self.showing_video and not self.comparing
+                and path == self.path == self.loaded_path):
+            # el mismo video otra vez (deshacer vuelve a elegir la fila): sin
+            # recargarlo, que si no se perdia el fotograma en que estabas
+            return
+        self.flush_review()                 # lo escrito, al video de antes
         if self.comparing:
             self.stop_compare(refit=False)
         self.path = path
@@ -6164,6 +6875,12 @@ class PreviewPane(QWidget):
         self.video_item.hide()
         self.scene.addItem(self.video_item)
         self.video_item.nativeSizeChanged.connect(self._on_native_size)
+        self.overlay = ReviewOverlay()
+        self.overlay.hide()
+        self.overlay.can_draw = self._review_can_draw
+        self.overlay.on_shape = self._on_review_shape
+        self.overlay.on_text = self._on_review_text
+        self.scene.addItem(self.overlay)
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.player.setAudioOutput(self.audio)
@@ -6181,6 +6898,9 @@ class PreviewPane(QWidget):
         """Abre en pausa: se ve el primer fotograma y no suena nada al pasar."""
         self.stop_gif()
         self._ensure_player()
+        self.flush_review()
+        self._rv_key = None
+        self._rv_list_sig = None
         self.player.stop()
         self.item.setPixmap(QPixmap())
         self.item.hide()
@@ -6201,10 +6921,12 @@ class PreviewPane(QWidget):
         self.player.setSource(QUrl.fromLocalFile(path))
         self._apply_loop()
         self.player.pause()
+        self._apply_review_ui()
         self._caption_video()
 
     def stop_video(self):
         """Para y suelta el archivo (en Windows, si no, no se podria mover)."""
+        self.flush_review()
         if self.player is not None:
             self.player.stop()
             self.player.setSource(QUrl())
@@ -6214,6 +6936,8 @@ class PreviewPane(QWidget):
             self.video_item.hide()
             self.item.show()
             self.video_bar.hide()
+            self._rv_key = None
+            self._apply_review_ui()
         self._enable_shortcuts()
 
     # --- fotograma a fotograma ---------------------------------------------
@@ -6297,7 +7021,9 @@ class PreviewPane(QWidget):
     def refresh_marks(self):
         """Tras cambiar las marcas desde fuera (deshacer, importar)."""
         self.sld_pos.set_marks(self.marks())
+        self._rv_list_sig = None
         self._refresh_frame_ui()
+        self._sync_review(force=True)
 
     def set_keyframe(self):
         if not self.showing_video:
@@ -6364,6 +7090,7 @@ class PreviewPane(QWidget):
         despues = any(ms * 1000 > self.current_frame_us() + self._frame_us / 2 for ms in marcas)
         self.b_key_prev.setEnabled(antes)
         self.b_key_next.setEnabled(despues)
+        self._sync_review()
 
     GIF_SHORTCUTS = {"frame_prev", "frame_next", "loop", "loop_in", "loop_out", "loop_clear"}
 
@@ -6373,6 +7100,222 @@ class PreviewPane(QWidget):
         for id, atajo in zip(self._shortcut_ids, self._video_shortcuts):
             atajo.setEnabled(self.showing_video
                              or (self.showing_gif and id in self.GIF_SHORTCUTS))
+
+    # --- anotar: comentarios y dibujos sobre un fotograma --------------------
+    #  Cada anotacion es del fotograma en que se hizo (su ms, como un fotograma
+    #  clave). Se guarda en la biblioteca, con su deshacer; aqui solo se ensena.
+    def reviews(self) -> list[dict]:
+        return list(self.reviews_for(self.loaded_path)) if self.loaded_path else []
+
+    def _review_tol(self) -> float:
+        return max(1.0, self._frame_us / 2000)
+
+    def _review_ms_now(self) -> int:
+        return int(round(self.current_frame_us() / 1000))
+
+    def _review_here(self, lista: list[dict] | None = None):
+        lista = self.reviews() if lista is None else lista
+        i = review_index(lista, self._review_ms_now(), self._review_tol())
+        return lista[i] if i is not None else None
+
+    def set_review_mode(self, on: bool):
+        self.review_on = bool(on)
+        if self.b_annotate.isChecked() != self.review_on:
+            self.b_annotate.blockSignals(True)
+            self.b_annotate.setChecked(self.review_on)
+            self.b_annotate.blockSignals(False)
+        if self.review_on and self.is_playing():
+            self.player.pause()                 # se anota sobre un fotograma quieto
+        if not self.review_on:
+            self.flush_review()
+        self._apply_review_ui()
+        self._sync_review(force=True)
+        if self.showing_video and self._fitted:
+            QTimer.singleShot(80, self.fit)     # la barra cambia el alto de la vista
+
+    def _apply_review_ui(self):
+        activo = self.showing_video and self.review_on
+        self.review_bar.setVisible(activo)
+        if self.overlay is not None:
+            self.overlay.setVisible(self.showing_video)
+            self.overlay.set_tool(self._review_tool if activo else None)
+
+    def _sync_review(self, force: bool = False):
+        """Pone al dia lo que depende del fotograma: el dibujo encima, el
+        comentario (en la barra, o abajo en el video), las marcas de la barra
+        de tiempo y la barra de anotar. Barato: solo rehace si cambio de fotograma."""
+        if not self.showing_video or self.overlay is None:
+            return
+        a = self._review_here()
+        ms = a["ms"] if a else self._review_ms_now()
+        if (self.loaded_path, ms) != self._rv_key:
+            self.flush_review()                 # lo escrito, al fotograma que se deja
+            a = self._review_here()
+            ms = a["ms"] if a else self._review_ms_now()
+            force = True
+        elif not force:
+            return
+        self._rv_key = (self.loaded_path, ms)
+        lista = self.reviews()
+        self.sld_pos.set_review_marks([x["ms"] for x in lista])
+        tiene_texto = bool(a and a["comment"].strip())
+        self.overlay.set_content(list(a["draw"]) if a else [],
+                                 review_text(a) if tiene_texto and not self.review_on else "")
+        margen = self._frame_us / 2
+        antes = any(x["ms"] * 1000 < self.current_frame_us() - margen for x in lista)
+        despues = any(x["ms"] * 1000 > self.current_frame_us() + margen for x in lista)
+        self.b_rv_prev.setEnabled(antes)
+        self.b_rv_next.setEnabled(despues)
+        self.b_rv_prev.setVisible(bool(lista))
+        self.b_rv_next.setVisible(bool(lista))
+        if self.review_on:
+            if not self._rv_dirty:
+                self.review_bar.set_comment(a["comment"] if a else "")
+            self.review_bar.set_state(review_stamp(ms, self.frame_index(ms * 1000)),
+                                      bool(a and a["draw"]), a is not None, len(lista))
+            sig = [(x["ms"], x["comment"], x.get("frame", 0)) for x in lista]
+            if sig != self._rv_list_sig:
+                self._rv_list_sig = sig
+                self.review_bar.set_list(lista)
+
+    def _store_review(self, ms: int, comment: str | None = None,
+                      draw: list | None = None, desc: str = ""):
+        """Cambia el comentario y/o el dibujo del fotograma ms. Sin ninguno de
+        los dos, la anotacion se borra."""
+        if not self.loaded_path:
+            return
+        lista = [dict(x) for x in self.reviews()]
+        i = review_index(lista, ms, self._review_tol())
+        if i is None:
+            tam = self.video_item.size()
+            a = {"ms": int(ms), "frame": self.frame_index(ms * 1000),
+                 "w": int(tam.width()), "h": int(tam.height()), "comment": "", "draw": []}
+        else:
+            a = lista.pop(i)
+        if comment is not None:
+            a["comment"] = comment.rstrip()
+        if draw is not None:
+            a["draw"] = draw
+        if a["comment"].strip() or a["draw"]:
+            lista.append(a)
+            lista.sort(key=lambda x: x["ms"])
+        if lista != self.reviews():
+            self.on_reviews_changed(self.loaded_path, lista, desc)
+
+    def _review_ms(self) -> int:
+        a = self._review_here()
+        return a["ms"] if a else self._review_ms_now()
+
+    def _review_desc(self, que: str, ms: int) -> str:
+        return "%s on frame %d" % (que, self.frame_index(ms * 1000))
+
+    def flush_review(self):
+        """Guarda el comentario escrito y aun no guardado, en el fotograma en que se escribio."""
+        self._rv_timer.stop()
+        if not self._rv_dirty:
+            return
+        self._rv_dirty = False
+        if self._rv_key is None or self._rv_key[0] != self.loaded_path:
+            return
+        ms = self._rv_key[1]
+        self._store_review(ms, comment=self.review_bar.comment(),
+                           desc=self._review_desc("comment", ms))
+        self._rv_list_sig = None
+        if self.showing_video:
+            self._sync_review(force=True)
+
+    def _on_review_typed(self):
+        self._rv_dirty = True
+        self._rv_timer.start()
+
+    def _review_can_draw(self) -> bool:
+        if self.is_playing():
+            self.player.pause()                 # el clic para; el siguiente dibuja
+            return False
+        return True
+
+    def _on_review_shape(self, forma: dict):
+        self.flush_review()
+        a = self._review_here()
+        ms = self._review_ms()
+        self._store_review(ms, draw=(list(a["draw"]) if a else []) + [forma],
+                           desc=self._review_desc("draw", ms))
+        self._sync_review(force=True)
+
+    def _on_review_text(self, punto):
+        texto, ok = QInputDialog.getText(self, APP_NAME, "Text on the frame:")
+        if not ok or not texto.strip():
+            return
+        forma = {"tipo": "texto", "texto": texto.strip(), "color": self.overlay.color,
+                 "grosor": self.overlay.pen(), "puntos": [[round(punto.x(), 1), round(punto.y(), 1)]]}
+        self._on_review_shape(forma)
+
+    def undo_review_shape(self):
+        a = self._review_here()
+        if not self.showing_video or not a or not a["draw"]:
+            return
+        self.flush_review()
+        self._store_review(a["ms"], draw=list(a["draw"][:-1]),
+                           desc=self._review_desc("remove stroke", a["ms"]))
+        self._sync_review(force=True)
+
+    def clear_review_drawing(self):
+        a = self._review_here()
+        if not self.showing_video or not a or not a["draw"]:
+            return
+        self.flush_review()
+        self._store_review(a["ms"], draw=[], desc=self._review_desc("erase drawing", a["ms"]))
+        self._sync_review(force=True)
+
+    def delete_review(self):
+        if not self.showing_video:
+            return
+        self._rv_dirty = False
+        self._rv_timer.stop()
+        ms = self._review_ms()
+        self._store_review(ms, comment="", draw=[], desc=self._review_desc("delete comment", ms))
+        self.review_bar.set_comment("")
+        self._rv_list_sig = None
+        self._sync_review(force=True)
+
+    def jump_review(self, sentido: int):
+        if not self.showing_video:
+            return
+        self.flush_review()
+        actual = self.current_frame_us()
+        margen = self._frame_us / 2
+        if sentido < 0:
+            antes = [x["ms"] for x in self.reviews() if x["ms"] * 1000 < actual - margen]
+            destino = antes[-1] if antes else None
+        else:
+            despues = [x["ms"] for x in self.reviews() if x["ms"] * 1000 > actual + margen]
+            destino = despues[0] if despues else None
+        if destino is None:
+            self.flash("No %s comment" % ("earlier" if sentido < 0 else "later"))
+            return
+        self._go_to_frame_us(destino * 1000)
+
+    def _on_review_jump(self, ms: int):
+        self.flush_review()
+        self._go_to_frame_us(ms * 1000)
+
+    def _on_review_tool(self, tool):
+        self._review_tool = tool
+        if self.overlay is not None and self.review_on:
+            self.overlay.set_tool(tool)
+
+    def _on_review_color(self, color: str):
+        if self.overlay is not None:
+            self.overlay.color = color
+
+    def _on_review_level(self, nivel: int):
+        if self.overlay is not None:
+            self.overlay.level = nivel
+
+    def _on_review_export(self):
+        self.flush_review()
+        if self.loaded_path:
+            self.on_export_review(self.loaded_path)
 
     # --- bucle ---------------------------------------------------------------
     def toggle_loop(self):
@@ -6561,6 +7504,7 @@ class PreviewPane(QWidget):
         if not self.showing_video or not tam.isValid() or tam.isEmpty():
             return
         self.video_item.setSize(tam)
+        self.overlay.set_box(QRectF(QPointF(0, 0), tam))
         self.scene.setSceneRect(QRectF(QPointF(0, 0), tam))
         self.fit()
         self._caption_video()
@@ -6610,6 +7554,7 @@ class PreviewPane(QWidget):
                 self.prefix, shown_name(path) or "this file", scrub_name(texto, path)))
 
     def hideEvent(self, e):
+        self.flush_review()
         if self.is_playing():
             self.player.pause()                 # oculto no deberia seguir sonando
         if self.showing_gif and self.gif.playing:
@@ -7860,6 +8805,85 @@ class ShortcutsDialog(QDialog):
         self.accept()
 
 
+class MirrorWindow(QWidget):
+    """El dibujo del editor, solo para mirar, en otra pantalla (monitor externo
+    o proyector) mientras dibujas en el iPad.
+
+    Comparte la escena del editor: lo que se dibuja, el trazo a medio hacer y
+    cada cambio de imagen salen aqui al instante, siempre la imagen entera
+    ajustada a la ventana. Doble clic o Esc la cierran.
+    """
+    closed = Signal()
+
+    def __init__(self, scene, item, parent=None):
+        super().__init__(parent, Qt.WindowType.Window)
+        self.setWindowTitle("%s - mirror" % APP_NAME)
+        self.item = item
+        self.view = QGraphicsView(scene, self)
+        self.view.setRenderHints(QPainter.RenderHint.SmoothPixmapTransform
+                                 | QPainter.RenderHint.Antialiasing)
+        themed(self.view, canvas=True)
+        self.view.setFrameShape(QFrame.Shape.NoFrame)
+        self.view.setInteractive(False)
+        self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.view.setCursor(Qt.CursorShape.BlankCursor)
+        self.view.viewport().installEventFilter(self)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.view)
+        self.resize(960, 600)
+
+    @staticmethod
+    def otra_pantalla(actual):
+        """Otra pantalla distinta de la del editor, o None si solo hay una."""
+        for scr in QGuiApplication.screens():
+            if scr is not actual:
+                return scr
+        return None
+
+    def mostrar_en(self, pantalla):
+        """Pantalla completa en esa pantalla; sin otra, una ventana normal que
+        se puede arrastrar donde se quiera."""
+        if pantalla is not None:
+            self.setScreen(pantalla)
+            self.setGeometry(pantalla.geometry())
+            self.showFullScreen()
+        else:
+            self.show()
+        self.refit()
+
+    def refit(self):
+        area = self.item.boundingRect()
+        if not area.isEmpty():
+            self.view.resetTransform()
+            self.view.fitInView(area, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.refit()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        QTimer.singleShot(0, self.refit)
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape:
+            self.close()
+            return
+        super().keyPressEvent(e)
+
+    def eventFilter(self, obj, e):
+        if obj is self.view.viewport() and e.type() == QEvent.Type.MouseButtonDblClick:
+            self.close()
+            return True
+        return super().eventFilter(obj, e)
+
+    def closeEvent(self, e):
+        self.closed.emit()
+        super().closeEvent(e)
+
+
 class HoldKey(QObject):
     """Una tecla que vale mientras se mantiene pulsada (antes / despues).
 
@@ -7906,10 +8930,14 @@ class HoldKey(QObject):
 class EditorDialog(QDialog):
     """Editor no destructivo: monta una receta, no toca el archivo."""
 
-    def __init__(self, path: str, edit: dict, parent=None):
-        super().__init__(parent)
+    def __init__(self, path: str, edit: dict, parent=None, independiente: bool = False):
+        # independiente: ventana propia, sin padre. Asi se minimiza sola y la
+        # principal puede quedarse minimizada o cerrarse de vista (el padre
+        # arrastraria al editor con ella)
+        super().__init__(None if independiente else parent)
         self.path = path
         self.edit = normalize_layers(dict(empty_edit(), **(edit or {})))
+        self._sig_inicial = edit_signature(self.edit)   # para saber si hay cambios
         self._undo: list = []
         self._redo: list = []
         self._before = False                   # Z mantenida: se ve el original
@@ -7930,7 +8958,31 @@ class EditorDialog(QDialog):
         self._full_timer.timeout.connect(self.render_full)
         self.src = QImage()
         self.setWindowTitle(self._title())
-        self.resize(1200, 780)
+        # la ventana se puede escalar como se quiera (iPad por Sidecar, pantallas
+        # pequenas): barra maximizar, tirador de esquina y filas que fluyen
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowTitleHint
+                            | Qt.WindowType.WindowSystemMenuHint
+                            | Qt.WindowType.WindowMinMaxButtonsHint
+                            | Qt.WindowType.WindowCloseButtonHint)
+        self.setSizeGripEnabled(True)
+        pantalla = (parent.screen() if parent is not None else None) \
+            or QApplication.primaryScreen()
+        zona = pantalla.availableGeometry() if pantalla else QRect(0, 0, 1920, 1080)
+        self.resize(*fit_to_screen(1200, 780, (zona.width(), zona.height())))
+
+        def fila():
+            return FlowLayout(hspace=8, vspace=4)
+
+        def grupo(*piezas, hueco: int = 0):
+            """Piezas que van siempre juntas (etiqueta + control): el flujo las
+            baja a otra linea de una vez. Devuelve (widget, layout)."""
+            g = QWidget()
+            h = QHBoxLayout(g)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+            for q in piezas:
+                h.addWidget(q)
+            return g, h
 
         self.scene = QGraphicsScene(self)
         self.item = QGraphicsPixmapItem()
@@ -7939,6 +8991,7 @@ class EditorDialog(QDialog):
         self.view = CropView(self.scene, self)
         self.view.setRenderHints(QPainter.RenderHint.SmoothPixmapTransform)
         themed(self.view, canvas=True)
+        self.view.setMinimumSize(160, 200)     # las barras al partirse no se lo comen
         self.view.setFrameShape(QFrame.Shape.NoFrame)
         self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.view.cropped.connect(self.on_crop)
@@ -7964,7 +9017,7 @@ class EditorDialog(QDialog):
         self.sel_item.hide()
         self.scene.addItem(self.sel_item)
 
-        geo = QHBoxLayout()
+        geo = fila()
         for txt, icono, fn, tip in (
                 ("  Rotate left", "rotate_left", lambda: self.rotate(-90),
                  "Turn 90 degrees anticlockwise"),
@@ -7979,9 +9032,7 @@ class EditorDialog(QDialog):
             b.setToolTip(tip)
             b.clicked.connect(fn)
             geo.addWidget(b)
-        geo.addSpacing(12)
         et_angle = ResetLabel("Angle")
-        geo.addWidget(et_angle)
         self.sld_angle = QSlider(Qt.Orientation.Horizontal)
         self.sld_angle.setRange(-1800, 1800)            # en decimas de grado
         self.sld_angle.setSingleStep(5)
@@ -7989,7 +9040,6 @@ class EditorDialog(QDialog):
         self.sld_angle.setFixedWidth(200)
         self.sld_angle.setToolTip("Rotate by any angle, to straighten a photo "
                                   "or tilt a drawing. A grid appears while you turn.")
-        geo.addWidget(self.sld_angle)
         self.spin_angle = QDoubleSpinBox()
         self.spin_angle.setRange(-180.0, 180.0)
         self.spin_angle.setDecimals(1)
@@ -7998,31 +9048,31 @@ class EditorDialog(QDialog):
         self.spin_angle.setKeyboardTracking(False)      # 45 no pasa antes por 4
         self.spin_angle.setFixedWidth(100)
         self.spin_angle.setToolTip("Exact angle in degrees; positive turns clockwise")
-        geo.addWidget(self.spin_angle)
         self.b_angle0 = QPushButton("0 °")
         self.b_angle0.setToolTip("Back to 0 degrees")
         self.b_angle0.setFixedWidth(44)
-        geo.addWidget(self.b_angle0)
-        geo.addSpacing(12)
+        g_angle, _ = grupo(et_angle, self.sld_angle, self.spin_angle, self.b_angle0)
+        geo.add(g_angle, 12)
         self.b_uncrop = QPushButton("  Remove crop")
         themed(self.b_uncrop, icon="crop")
         self.b_uncrop.clicked.connect(self.uncrop)
-        geo.addWidget(self.b_uncrop)
-        geo.addWidget(QLabel("Margin"))
+        geo.add(self.b_uncrop, 12)
         self.cmb_pad = QComboBox()
         for txt, val in PAD_CHOICES:
             self.cmb_pad.addItem(txt, val)
         self.cmb_pad.setToolTip("Colour of the area a crop adds outside the image")
         self.cmb_pad.setCurrentIndex(max(0, self.cmb_pad.findData(self.edit.get("pad"))))
         self.cmb_pad.activated.connect(self.on_pad)
-        geo.addWidget(self.cmb_pad)
-        geo.addStretch(1)
+        g_pad, _ = grupo(QLabel("Margin"), self.cmb_pad)
+        geo.addWidget(g_pad)
 
-        dibujo = QHBoxLayout()
+        dibujo = fila()
         self.grupo = QButtonGroup(self)
         self.grupo.setExclusive(True)
         self._tool_buttons: dict = {}
         self._color_buttons: dict = {}
+        g_tools, l_tools = grupo()
+        l_tools.setSpacing(0)
         for tool, icono, titulo, tip in (
                 (None, "move", "Move and zoom", "Drag the image around and zoom"),
                 ("seleccionar", "select", "Select and move",
@@ -8053,15 +9103,17 @@ class EditorDialog(QDialog):
             b.setToolTip("%s — %s" % (titulo, tip))
             b.clicked.connect(lambda _c, t=tool: self.set_tool(t))
             self.grupo.addButton(b)
-            dibujo.addWidget(b)
+            l_tools.addWidget(b)
             self._tool_buttons[tool] = b
             if tool is None:
                 b.setChecked(True)
             if tool == "recortar":
                 self.b_crop = b
-        dibujo.addSpacing(10)
+        dibujo.addWidget(g_tools)
         self.grupo_color = QButtonGroup(self)
         self.grupo_color.setExclusive(True)
+        g_colors, l_colors = grupo()
+        l_colors.setSpacing(0)
         for nombre, hexa in DRAW_COLORS:
             b = QToolButton()
             b.setCheckable(True)
@@ -8072,30 +9124,35 @@ class EditorDialog(QDialog):
             b.clicked.connect(lambda _c, h=hexa: self.on_color(QColor(h)))
             self.grupo_color.addButton(b)
             self._color_buttons[hexa.lower()] = b
-            dibujo.addWidget(b)
+            l_colors.addWidget(b)
         self.b_color = QToolButton()
         self.b_color.setText("...")
         self.b_color.setToolTip("Pick another colour")
         self.b_color.setAutoRaise(True)
         self.b_color.clicked.connect(self.pick_color)
-        dibujo.addWidget(self.b_color)
-        dibujo.addWidget(QLabel("Size"))
+        l_colors.addWidget(self.b_color)
+        dibujo.add(g_colors, 10)
         self.sld_width = QSlider(Qt.Orientation.Horizontal)
         self.sld_width.setRange(1, 200)
         self.sld_width.setValue(6)
         self.sld_width.setFixedWidth(130)
         self.sld_width.setToolTip("Brush size, from 1 to 200")
         self.sld_width.valueChanged.connect(self.set_width)
-        dibujo.addWidget(self.sld_width)
+        g_size, _ = grupo(QLabel("Size"), self.sld_width)
+        dibujo.addWidget(g_size)
         # opacidad y dureza de lo siguiente que dibujes (la capa elegida se
         # cambia en el panel de capas)
+        g_op, l_op = grupo()
         self.sld_tool_op, self.lbl_tool_op = self._mini_slider(
-            dibujo, "Opacity", 5, 100, 100, "%d %%",
+            l_op, "Opacity", 5, 100, 100, "%d %%",
             "Opacity of the next stroke (0 = invisible, 100 = solid)")
+        dibujo.addWidget(g_op)
         self.sld_tool_op.valueChanged.connect(lambda v: setattr(self.view, "opacity", v))
+        g_hard, l_hard = grupo()
         self.sld_tool_hard, self.lbl_tool_hard = self._mini_slider(
-            dibujo, "Hardness", 0, 100, 100, "%d",
+            l_hard, "Hardness", 0, 100, 100, "%d",
             "Edge of the next stroke: 100 = sharp, lower = softer, like an airbrush")
+        dibujo.addWidget(g_hard)
         self.sld_tool_hard.valueChanged.connect(lambda v: setattr(self.view, "hardness", v))
         self.b_fill = QPushButton("  Colour layer")
         themed(self.b_fill, icon="fill")
@@ -8130,52 +9187,47 @@ class EditorDialog(QDialog):
         themed(self.b_undraw, icon="eraser")
         self.b_undraw.clicked.connect(self.clear_drawings)
         dibujo.addWidget(self.b_undraw)
-        dibujo.addStretch(1)
 
-        ajustes = QHBoxLayout()
+        ajustes = fila()
         et_bright = ResetLabel("Brightness")
-        ajustes.addWidget(et_bright)
         self.sld_bright = QSlider(Qt.Orientation.Horizontal)
         self.sld_bright.setRange(-100, 100)
         self.sld_bright.setFixedWidth(150)
-        ajustes.addWidget(self.sld_bright)
+        g_bright, _ = grupo(et_bright, self.sld_bright)
+        ajustes.addWidget(g_bright)
         et_contrast = ResetLabel("Contrast")
-        ajustes.addWidget(et_contrast)
         self.sld_contrast = QSlider(Qt.Orientation.Horizontal)
         self.sld_contrast.setRange(-100, 100)
         self.sld_contrast.setFixedWidth(150)
-        ajustes.addWidget(self.sld_contrast)
+        g_contrast, _ = grupo(et_contrast, self.sld_contrast)
+        ajustes.addWidget(g_contrast)
         self.chk_gray = QCheckBox("Black and white")
         ajustes.addWidget(self.chk_gray)
-        ajustes.addStretch(1)
 
-        color = QHBoxLayout()
+        color = fila()
         self.sld_color = {}
         for clave, nombre, lo, hi in ADJUST_SLIDERS[2:]:
             et = ResetLabel(nombre)
-            color.addWidget(et)
             sld = QSlider(Qt.Orientation.Horizontal)
             sld.setRange(lo, hi)
             sld.setFixedWidth(120)
             et.clicked.connect(lambda s_=sld, n=nombre: self.reset_slider(s_, n))
-            color.addWidget(sld)
+            g_c, _ = grupo(et, sld)
+            color.addWidget(g_c)
             self.sld_color[clave] = sld
         self.sld_blur = self.sld_color["blur"]
         et_bright.clicked.connect(lambda: self.reset_slider(self.sld_bright, "brightness"))
         et_contrast.clicked.connect(lambda: self.reset_slider(self.sld_contrast, "contrast"))
         et_angle.clicked.connect(lambda: self.sld_angle.setValue(0))
-        color.addStretch(1)
 
-        tam = QHBoxLayout()
-        tam.addWidget(QLabel("Output size:"))
+        tam = fila()
         self.spin_w = QSpinBox()
         self.spin_h = QSpinBox()
         for s in (self.spin_w, self.spin_h):
             s.setRange(1, 30000)
             s.setFixedWidth(90)
-        tam.addWidget(self.spin_w)
-        tam.addWidget(QLabel("x"))
-        tam.addWidget(self.spin_h)
+        g_tam, _ = grupo(QLabel("Output size:"), self.spin_w, QLabel("x"), self.spin_h)
+        tam.addWidget(g_tam)
         self.chk_ratio = QCheckBox("Keep aspect ratio")
         self.chk_ratio.setChecked(True)
         tam.addWidget(self.chk_ratio)
@@ -8185,34 +9237,30 @@ class EditorDialog(QDialog):
         b_orig_size = QPushButton("Original size")
         b_orig_size.clicked.connect(self.clear_resize)
         tam.addWidget(b_orig_size)
-        tam.addStretch(1)
         self.lbl_info = QLabel("")
         themed(self.lbl_info, css="color:%(dim)s;")
         tam.addWidget(self.lbl_info)
 
-        zoom = QHBoxLayout()
-        zoom.addWidget(QLabel("Zoom:"))
+        zoom = fila()
         b_menos = QPushButton()
         themed(b_menos, icon="zoom_out")
         b_menos.setToolTip(keys_text("Zoom out (Ctrl+-)"))
         b_menos.setFixedWidth(34)
         b_menos.clicked.connect(lambda: self.zoom_by(1 / 1.2))
-        zoom.addWidget(b_menos)
         self.sld_zoom = QSlider(Qt.Orientation.Horizontal)
         self.sld_zoom.setRange(ZOOM_MIN, ZOOM_MAX)
         self.sld_zoom.setValue(100)
         self.sld_zoom.setFixedWidth(240)
         self.sld_zoom.valueChanged.connect(self.on_zoom_slider)
-        zoom.addWidget(self.sld_zoom)
         b_mas = QPushButton()
         themed(b_mas, icon="zoom_in")
         b_mas.setToolTip(keys_text("Zoom in (Ctrl++)"))
         b_mas.setFixedWidth(34)
         b_mas.clicked.connect(lambda: self.zoom_by(1.2))
-        zoom.addWidget(b_mas)
         self.lbl_zoom = QLabel("100 %")
         self.lbl_zoom.setFixedWidth(56)
-        zoom.addWidget(self.lbl_zoom)
+        g_zoom, _ = grupo(QLabel("Zoom:"), b_menos, self.sld_zoom, b_mas, self.lbl_zoom)
+        zoom.addWidget(g_zoom)
         b_fit = QPushButton("  Fit")
         themed(b_fit, icon="fit")
         b_fit.setToolTip("Fit the image in the window (key 0)")
@@ -8221,9 +9269,17 @@ class EditorDialog(QDialog):
         b_100 = QPushButton("100 %")
         b_100.clicked.connect(lambda: self.sld_zoom.setValue(100))
         zoom.addWidget(b_100)
-        zoom.addStretch(1)
+        self.b_mirror = QPushButton("  Mirror")
+        themed(self.b_mirror, std="SP_ComputerIcon")
+        self.b_mirror.setCheckable(True)
+        self.b_mirror.setToolTip(
+            "Show this drawing, live, on another screen (an external monitor or a "
+            "projector) while you draw here, for example on the iPad. It opens full "
+            "screen on the other screen; with only one screen it is a window you can "
+            "drag there. Esc or double-click closes it")
+        self.b_mirror.toggled.connect(self.toggle_mirror)
+        zoom.add(self.b_mirror, 12)
 
-        final = QHBoxLayout()
         self.b_undo = QPushButton("  Undo")
         themed(self.b_undo, std="SP_ArrowBack")
         self.b_undo.setToolTip(keys_text("Ctrl+Z"))
@@ -8232,18 +9288,12 @@ class EditorDialog(QDialog):
         themed(self.b_redo, std="SP_ArrowForward")
         self.b_redo.setToolTip(keys_text("Ctrl+Y"))
         self.b_redo.clicked.connect(self.redo)
-        final.addWidget(self.b_undo)
-        final.addWidget(self.b_redo)
-        final.addSpacing(12)
         b_reset = QPushButton("  Reset all")
         themed(b_reset, std="SP_DialogResetButton")
         b_reset.clicked.connect(self.reset_all)
-        final.addWidget(b_reset)
         b_export = QPushButton("  Export a copy…")
         themed(b_export, std="SP_DialogSaveButton")
         b_export.clicked.connect(self.export_one)
-        final.addWidget(b_export)
-        final.addStretch(1)
         b_ok = QPushButton("OK")
         themed(b_ok, std="SP_DialogOkButton")
         b_ok.setDefault(True)
@@ -8251,14 +9301,15 @@ class EditorDialog(QDialog):
         b_cancel = QPushButton("Cancel")
         themed(b_cancel, std="SP_DialogCancelButton")
         b_cancel.clicked.connect(self.reject)
-        final.addWidget(b_cancel)
-        final.addWidget(b_ok)
+        final = WrapRow([self.b_undo, self.b_redo, 12, b_reset, b_export],
+                        [b_cancel, b_ok])
 
         self.lienzo = QSplitter(Qt.Orientation.Horizontal)
         self.lienzo.addWidget(self.view)
         self.lienzo.addWidget(self._build_layers_panel())
         self.lienzo.setStretchFactor(0, 1)
         self.lienzo.setCollapsible(0, False)
+        self.lienzo.setCollapsible(1, True)      # en una ventana estrecha, capas fuera
         self.lienzo.setSizes([800, 210])
         lay = QVBoxLayout(self)
         lay.addWidget(self.lienzo, 1)
@@ -8268,7 +9319,7 @@ class EditorDialog(QDialog):
         lay.addLayout(color)
         lay.addLayout(tam)
         lay.addLayout(zoom)
-        lay.addLayout(final)
+        lay.addWidget(final)
 
         SK.bind(self, "fit", self.fit)
         QShortcut(QKeySequence("Ctrl+]"), self, lambda: self.restack(1))
@@ -8370,6 +9421,8 @@ class EditorDialog(QDialog):
 
         self.item.setPixmap(QPixmap.fromImage(img))
         self.sync_scene_rect()
+        if self._mirror is not None:
+            self._mirror.refit()
         ancho_final = edited_size(self.view_edit(), *self.full_size)[0] or 1
         self.render_scale = (img.width() or 1) / ancho_final
 
@@ -8731,9 +9784,19 @@ class EditorDialog(QDialog):
         if not ok:
             return forma
         k = 1.0 / (self.render_scale or 1.0)
-        pts = [inv.map(QPointF(x * k, y * k)) for x, y in forma["puntos"]]
+        puntos = []
+        for x, y in forma["puntos"]:
+            p = inv.map(QPointF(x * k, y * k))
+            # una decima de pixel del original sobra, y el raton repite el mismo
+            # punto muchas veces: con 17 decimales y repetidos, los trazos eran
+            # el 90 % de biblioteca.json y lo que hacia lento guardar y deshacer
+            q = [round(p.x(), 1), round(p.y(), 1)]
+            if not puntos or q != puntos[-1]:
+                puntos.append(q)
+        if len(puntos) == 1 and len(forma["puntos"]) > 1:
+            puntos.append(list(puntos[0]))     # un clic sin mover sigue siendo un punto
         estira = math.sqrt(abs(inv.determinant())) or 1.0
-        return dict(forma, puntos=[[p.x(), p.y()] for p in pts],
+        return dict(forma, puntos=puntos,
                     grosor=max(0.1, forma.get("grosor", 4) * k * estira))
 
     @Slot(object)
@@ -8878,7 +9941,7 @@ class EditorDialog(QDialog):
         botones.addStretch(1)
         botones.addWidget(self.b_del_layer)
         ld.addLayout(botones)
-        der.setMinimumWidth(190)
+        der.setMinimumWidth(150)
         QShortcut(QKeySequence("Ctrl+Shift+N"), self, lambda: self.new_layer())
         QShortcut(QKeySequence("Ctrl+E"), self, self.merge_layers)
         return der
@@ -9428,6 +10491,20 @@ class EditorDialog(QDialog):
         if self._auto_fit:
             self.fit()
 
+    def toggle_mirror(self, on: bool):
+        if not on:
+            if self._mirror is not None:
+                self._mirror.close()
+            return
+        if self._mirror is None:
+            self._mirror = MirrorWindow(self.scene, self.item, self)
+            self._mirror.closed.connect(self._mirror_closed)
+        self._mirror.mostrar_en(MirrorWindow.otra_pantalla(self.screen()))
+
+    def _mirror_closed(self):
+        if self.b_mirror.isChecked():
+            self.b_mirror.setChecked(False)
+
     def export_one(self):
         destino, _ = QFileDialog.getSaveFileName(
             self, "Export an edited copy", suggested_export_name(self.path))
@@ -9438,13 +10515,44 @@ class EditorDialog(QDialog):
                                 "Saved to:\n%s" % destino if ok
                                 else "Could not save:\n%s" % err)
 
+    def is_dirty(self) -> bool:
+        """Hay algo hecho en esta ventana que aun no se ha guardado."""
+        return edit_signature(self.edit) != self._sig_inicial
+
+    def ask_keep(self) -> str:
+        """'save', 'discard' o 'cancel'. Sin pantalla (las pruebas) no hay a
+        quien preguntar: se descarta, como hacia antes."""
+        if QGuiApplication.platformName() == "offscreen":
+            return "discard"
+        B = QMessageBox.StandardButton
+        r = QMessageBox.question(
+            self, APP_NAME, "This image has changes that are not saved yet.\n\n"
+            "Keep them?", B.Save | B.Discard | B.Cancel, B.Save)
+        return {B.Save: "save", B.Discard: "discard"}.get(r, "cancel")
+
+    def reject(self):
+        """Esc, la X de la ventana y Cancel pasan por aqui. Antes tiraban sin
+        avisar todo lo dibujado; ahora, si hay cambios, se pregunta."""
+        if not self.is_dirty():
+            super().reject()
+            return
+        eleccion = self.ask_keep()
+        if eleccion == "save":
+            self.accept()
+        elif eleccion == "discard":
+            super().reject()
+        # 'cancel': la ventana sigue abierta, con todo
+
     def done(self, r):
+        if self._mirror is not None:
+            self._mirror.close()
         self._full_timer.stop()
         self._pool.clear()
         self._pool.waitForDone(3000)      # que no emita sobre un objeto muerto
         super().done(r)
 
     _sin_recursion = False
+    _mirror = None
     _auto_fit = True
     _mostrado = False
     _angle_gesture = False
@@ -9749,6 +10857,16 @@ To loop just a <b>fragment</b>, go to its first frame and press
 fragment turns blue on the time bar and playback goes round it.
 <b>[[loop_clear]]</b> clears the fragment. The loop button stays on from one
 video to the next; the fragment belongs to the video you set it on.</li>
+<li><b>Annotate</b> (button next to the volume) works like SyncSketch: pause on a frame,
+draw on it (pencil, arrow, rectangle, ellipse, text; five colours and thicknesses) and
+write a comment. The time stamp and frame number stay in front of the comment:
+<i>[0:03.3 &middot; frame 50] Check the arc</i>. A pink bubble on the time bar marks each
+commented frame; the &#9664; and &#9654; buttons jump between them, and when you stop on
+one the drawing and the comment show up over the video, so a student can follow them
+without annotating. <b>Enter</b> saves the comment (<b>Shift+Enter</b> is a new line); it
+is also saved when you change frame. Everything lives in the library and
+<b>Ctrl+Z</b> undoes it. <b>Export PDF</b> writes one page per commented frame, with a
+picture of the frame, your drawing on top and the comment below.</li>
 </ul>
 """
 
@@ -9916,6 +11034,9 @@ class ImageViewer(QDialog):
         if hasattr(parent, "marks_of"):
             self.pane.marks_for = parent.marks_of
             self.pane.on_marks_changed = parent.set_video_marks
+            self.pane.reviews_for = parent.reviews_of
+            self.pane.on_reviews_changed = parent.set_video_reviews
+            self.pane.on_export_review = parent.export_video_review
             QShortcut(QKeySequence.StandardKey.Undo, self, lambda: self._history(parent.undo))
             QShortcut(QKeySequence.StandardKey.Redo, self, lambda: self._history(parent.redo))
 
@@ -9958,6 +11079,7 @@ class ImageViewer(QDialog):
         QTimer.singleShot(60, self.pane.fit)
 
     def _history(self, fn):
+        self.pane.flush_review()
         fn()
         if self.pane.showing_video:
             self.pane.refresh_marks()
@@ -10058,6 +11180,7 @@ class WrapRow(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._editors: dict = {}               # ruta -> editor abierto (ventana propia)
         self.setWindowTitle("%s %s" % (APP_NAME, VERSION))
         self.resize(1500, 900)
         self.image_exts = supported_exts()
@@ -10074,6 +11197,9 @@ class MainWindow(QMainWindow):
         self.edits: dict[str, dict] = {}             # ruta -> receta de edicion
         self.video_marks: dict[str, list[int]] = {}  # ruta de video -> ms clave
         self.notes: dict[str, dict] = {}             # ruta -> {grade, comment}
+        self.folders_done: set[str] = set()          # carpetas marcadas como corregidas
+        self.folders_auto: set[str] = set()          # carpetas que ya se marcaron solas una vez
+        self.video_reviews: dict[str, list[dict]] = {}   # ruta de video -> anotaciones
         self.note_editors: list = []                 # los editores de notas abiertos
         self.note_heights = dict(NOTE_HEIGHTS)       # alto de la caja del comentario
         self.pdf_before_after = {"on": False, "labels": list(BEFORE_AFTER_LABELS)}
@@ -10116,11 +11242,39 @@ class MainWindow(QMainWindow):
         apply_theme(self._saved_theme() or system_theme())
         self._build_ui()
         self._build_menu()
+        self._missing_at_start: list[str] = []
+        self._damaged_copy: str | None = None
+        self._backed_up = False                 # biblioteca.json.bak, una vez por sesion
         self.load_state()
         self.fit_to_screen()
         self.refresh_folders(expand_roots=True)
         self.refresh_categories()
         self.refresh_images()
+        if self._missing_at_start:
+            n = len(self._missing_at_start)
+            self.statusBar().showMessage(
+                "%d folder(s) not found (unplugged drive or cloud folder not synced). "
+                "They stay in the library: connect them and press Refresh." % n, 15000)
+
+    def _library_damaged(self, error: Exception):
+        """biblioteca.json no se puede leer. No se pisa: se aparta una copia
+        con otro nombre antes de que el primer guardado la sobrescriba."""
+        # biblioteca.json.damaged-<fecha>: el .gitignore ya cubre biblioteca.json.*
+        destino = STATE_FILE.with_name(
+            "%s.damaged-%s" % (STATE_FILE.name, time.strftime("%Y%m%d-%H%M%S")))
+        try:
+            shutil.copy2(STATE_FILE, destino)
+            self._damaged_copy = str(destino)
+        except OSError:
+            self._damaged_copy = None
+        texto = ("The library file could not be read:\n%s\n\n%s" % (
+            error, "A copy of it was kept as:\n%s\n\nDriloBoard starts empty; the copy "
+            "is not touched." % destino if self._damaged_copy else
+            "DriloBoard starts empty."))
+        caja = QMessageBox(QMessageBox.Icon.Warning, APP_NAME, texto,
+                           QMessageBox.StandardButton.Ok, self)
+        caja.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        QTimer.singleShot(0, caja.open)         # sin bloquear el arranque
 
     # ---------------- interfaz -------------------------------------------- #
     def _build_ui(self):
@@ -10191,9 +11345,11 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.chk_recursive)
 
         self.folder_tree = FolderTree()
+        self.folder_tree.setItemDelegate(FolderDelegate(self.folder_tree))
         self.folder_tree.foldersDropped.connect(self.add_folders)
         self.folder_tree.reorderRequested.connect(self.reorder_folders)
         self.folder_tree.itemSelectionChanged.connect(self.refresh_images)
+        self.folder_tree.itemChanged.connect(self.on_folder_checked)
         lay.addWidget(self.folder_tree, 1)
 
         self.folder_tree.placeholder = ("Drop folders here",
@@ -10221,6 +11377,12 @@ class MainWindow(QMainWindow):
         self.chk_unassigned = QCheckBox("Uncategorised only")
         self.chk_unassigned.toggled.connect(self.refresh_images)
         bar.addWidget(self.chk_unassigned)
+
+        self.chk_removed = QCheckBox("Show removed")
+        self.chk_removed.setToolTip("Also show the files you removed from DriloBoard, marked "
+                                    "with a red X. Right-click one to recover it")
+        self.chk_removed.toggled.connect(self.refresh_images)
+        bar.addWidget(self.chk_removed)
 
         self.chk_videos = QCheckBox("Videos")
         if HAS_VIDEO:
@@ -10275,7 +11437,8 @@ class MainWindow(QMainWindow):
         self.view.setModel(self.model)
         self.view.setItemDelegate(
             ThumbDelegate(self.colors_for_path, self.mark_of, self.is_edited,
-                          self.view, note_of=self.visible_note_of))
+                          self.view, note_of=self.visible_note_of,
+                          removed_of=lambda p: p in self.removed))
         self.view.setViewMode(QListView.ViewMode.IconMode)
         self.view.setResizeMode(QListView.ResizeMode.Adjust)
         self.view.setMovement(QListView.Movement.Static)
@@ -10287,6 +11450,8 @@ class MainWindow(QMainWindow):
         self.view.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self.image_menu)
+        self.folder_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.folder_tree.customContextMenuRequested.connect(self.folder_menu)
         self.view.doubleClicked.connect(self.on_grid_double_click)
         self.view.installEventFilter(self)          # 1-9: la nota de lo elegido
         # el cronometro empieza con un clic o un doble clic en un archivo
@@ -10309,6 +11474,9 @@ class MainWindow(QMainWindow):
         HoldKey("before", self, self.set_before)
         self.preview.marks_for = self.marks_of
         self.preview.on_marks_changed = self.set_video_marks
+        self.preview.reviews_for = self.reviews_of
+        self.preview.on_reviews_changed = self.set_video_reviews
+        self.preview.on_export_review = self.export_video_review
         self.preview.openBig.connect(self.open_viewer_current)
         self.preview.hide()
 
@@ -10496,6 +11664,7 @@ class MainWindow(QMainWindow):
         on = bool(on)
         self.commit_note()
         self.show_notes = on
+        self.update_folder_labels()
         for w in (self.chk_notes, self.act_notes):
             if w.isChecked() != on:
                 w.blockSignals(True)
@@ -10699,6 +11868,7 @@ class MainWindow(QMainWindow):
         """Guarda lo escrito y aun pendiente en cualquier editor de notas."""
         for e in self.live_note_editors():
             e.commit()
+        self.preview.flush_review()         # y el comentario de un fotograma, si lo hay
 
     def detach_note_editors(self):
         for e in self.live_note_editors():
@@ -10859,7 +12029,7 @@ class MainWindow(QMainWindow):
     def export_notes(self):
         """Nota y comentario de lo que se ve en la rejilla, a un documento."""
         self.commit_note()
-        filas = notes_rows(self.model.paths(), self.notes)
+        filas = notes_rows([p for p in self.model.paths() if p not in self.removed], self.notes)
         if not filas:
             QMessageBox.information(
                 self, APP_NAME, "None of the files in view has a grade or a comment.\n\n"
@@ -11067,7 +12237,7 @@ class MainWindow(QMainWindow):
         Sin 'paths', todo lo que se ve en la rejilla (los videos no van)."""
         if paths is None:
             paths = list(self.model.paths())
-        paths = [p for p in paths if not is_video(p)]
+        paths = [p for p in paths if not is_video(p) and p not in self.removed]
         grupos = folder_groups(paths, self.selected_folders())
         nombres = folder_pdf_names([c for c, _ in grupos], prefijo, sufijo)
         return [(n, c, ps) for n, (c, ps) in zip(nombres, grupos)]
@@ -11144,6 +12314,10 @@ class MainWindow(QMainWindow):
         self.note_editor.clear()
 
     def refresh_note_views(self):
+        if self.auto_check_folders():
+            self.refresh_folders()
+        else:
+            self.update_folder_labels()
         self.update_average()
         self.view.viewport().update()
         self.preview.refresh_note()
@@ -11244,6 +12418,7 @@ class MainWindow(QMainWindow):
 
     @Slot(list)
     def add_folders(self, folders: list[str]):
+        folders = list(dict.fromkeys(canon_path(f) for f in folders))
         nuevas = [f for f in folders if f not in self.folders]
         if nuevas:
             self.push_undo("add %d folder(s)" % len(nuevas))
@@ -11302,7 +12477,43 @@ class MainWindow(QMainWindow):
             self._tree_cache[folder] = node
         return node
 
+    def folder_fully_graded(self, folder: str) -> bool:
+        """Todos los archivos de la carpeta (los quitados no cuentan) tienen nota."""
+        files = [p for p in self.files_of(folder) if p not in self.removed]
+        return bool(files) and all(
+            (self.notes.get(p) or {}).get("grade") is not None for p in files)
+
+    def auto_check_folders(self) -> bool:
+        """Marca sola cada carpeta la PRIMERA vez que todos sus archivos tienen
+        nota. Despues manda el usuario: si la desmarca, no se vuelve a marcar."""
+        cambio = False
+
+        def visita(node):
+            nonlocal cambio
+            f = node["path"]
+            if f not in self.folders_auto and self.folder_fully_graded(f):
+                self.folders_auto.add(f)
+                self.folders_done.add(f)
+                cambio = True
+            if self.recursive:
+                for kid in node["children"]:
+                    visita(kid)
+        for f in self.folders:
+            visita(self.tree_of(f))
+        return cambio
+
+    def on_folder_checked(self, item, col):
+        f = item.data(0, Qt.ItemDataRole.UserRole)
+        on = item.checkState(0) == Qt.CheckState.Checked
+        if on == (f in self.folders_done):
+            return
+        # lo que el usuario decide a mano es definitivo: ya no se marca sola
+        self.folders_auto.add(f)
+        (self.folders_done.add if on else self.folders_done.discard)(f)
+        self.touch()
+
     def refresh_folders(self, expand_roots: bool = False):
+        self.auto_check_folders()
         self.apply_folder_sort()
         tree = self.folder_tree
         keep = set(tree.paths_of(tree.selectedItems()))
@@ -11326,15 +12537,40 @@ class MainWindow(QMainWindow):
                 it.setSelected(True)
         tree.blockSignals(False)
 
-    def _make_item(self, node: dict, root: bool = False) -> QTreeWidgetItem:
+    def _folder_label(self, node: dict) -> str:
+        if not node["total"] and not os.path.isdir(node["path"]):
+            return "%s   (not found)" % node["name"]
         count = node["total"] if self.recursive else node["own"]
         if self.removed:
             raiz = os.path.normpath(node["path"])
             dentro = (lambda d: d == raiz or d.startswith(raiz + os.sep)) if self.recursive \
                 else (lambda d: d == raiz)
             count -= sum(1 for p in self.removed if dentro(os.path.normpath(os.path.dirname(p))))
-        it = QTreeWidgetItem(["%s   (%d)" % (node["name"], count)])
+        return "%s   (%d)" % (node["name"], count)
+
+    def _folder_avg(self, node: dict) -> float | None:
+        if not self.show_notes:
+            return None
+        files = [p for p in self.files_of(node["path"]) if p not in self.removed]
+        media = grade_stats(files, self.notes)["avg"]
+        return None if media is None else round(media, 2)
+
+    def update_folder_labels(self):
+        """Pone al dia contadores y medias sin reconstruir el arbol."""
+        for it in self.folder_tree.all_items():
+            node = it.data(0, NODE_ROLE)
+            if node:
+                it.setText(0, self._folder_label(node))
+                it.setData(0, AVG_ROLE, self._folder_avg(node))
+
+    def _make_item(self, node: dict, root: bool = False) -> QTreeWidgetItem:
+        it = QTreeWidgetItem([self._folder_label(node)])
+        it.setData(0, NODE_ROLE, node)
+        it.setData(0, AVG_ROLE, self._folder_avg(node))
         it.setData(0, Qt.ItemDataRole.UserRole, node["path"])
+        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        it.setCheckState(0, Qt.CheckState.Checked if node["path"] in self.folders_done
+                         else Qt.CheckState.Unchecked)
         if self.recursive and node["children"]:
             it.setToolTip(0, "%s\n%d here, %d including subfolders"
                           % (node["path"], node["own"], node["total"]))
@@ -11347,6 +12583,14 @@ class MainWindow(QMainWindow):
         if root:
             f = it.font(0)
             f.setBold(True)
+            if not os.path.isdir(node["path"]):
+                # no esta ahora (USB, OneDrive): se ve, apagada, y conserva todo
+                f.setItalic(True)
+                it.setForeground(0, QColor(140, 140, 140))
+                it.setToolTip(0, "%s\n\nNot found right now: the drive may be unplugged "
+                              "or the cloud folder not synced. Its categories, edits and "
+                              "grades are kept. Connect it and press Refresh."
+                              % node["path"])
             it.setFont(0, f)
         return it
 
@@ -11582,7 +12826,7 @@ class MainWindow(QMainWindow):
             # un video clasificado cuando la casilla estaba puesta no asoma
             # por una categoria al quitarla
             paths = [p for p in paths if not is_video(p)]
-        if self.removed:                    # lo quitado de DriloBoard no se ve
+        if self.removed and not self.chk_removed.isChecked():   # lo quitado no se ve
             paths = [p for p in paths if p not in self.removed]
         if self.chk_unassigned.isChecked():
             paths = [p for p in paths if p not in self._index]
@@ -11596,12 +12840,15 @@ class MainWindow(QMainWindow):
                             vistos.add(p)
                             todo.append(p)
                 paths = [p for p in todo if (self.show_videos or not is_video(p))
-                         and p not in self.removed]
+                         and (p not in self.removed or self.chk_removed.isChecked())]
             paths = [p for p in paths if matches_search(p, terms)]
         self.model.set_paths(paths)
         self.sync_note_panel()
         videos = sum(1 for p in paths if is_video(p))
         texto = "%d images" % (len(paths) - videos)
+        quitados = sum(1 for p in paths if p in self.removed)
+        if quitados:
+            texto += "  \u00b7  %d removed" % quitados
         if videos:
             texto += "  ·  %d video%s" % (videos, "" if videos == 1 else "s")
         if terms:
@@ -11913,7 +13160,8 @@ class MainWindow(QMainWindow):
             {"recursive": self.recursive,
              "folder_order": self.cmb_folder_order.currentData(),
              "category_order": self.cmb_cat_order.currentData()},
-            video_marks=self.video_marks, notes=self.notes)
+            video_marks=self.video_marks, notes=self.notes,
+            video_reviews=self.video_reviews)
         try:
             with open(destino, "w", encoding="utf-8") as f:
                 json.dump(datos, f, indent=1, ensure_ascii=False)
@@ -12005,6 +13253,7 @@ class MainWindow(QMainWindow):
         folders, cats, edits = read_export(datos, raiz)
         marcas = read_export_marks(datos, raiz)
         notas = read_export_notes(datos, raiz)
+        revisiones = read_export_reviews(datos, raiz)
         self.commit_note()                   # lo escrito, antes; y los editores se sueltan
         self.detach_note_editors()
         self.push_undo("import library")     # se puede deshacer con Ctrl+Z
@@ -12014,6 +13263,7 @@ class MainWindow(QMainWindow):
             self.categories = cats
             self.edits = edits
             self.video_marks = marcas
+            self.video_reviews = revisiones
             self.notes = notas
             nuevas_cats = len(list(iter_cats(cats)))
             nuevas_edits = len(edits)
@@ -12031,6 +13281,8 @@ class MainWindow(QMainWindow):
                     saltadas += 1
             for p, ms in marcas.items():        # fundir: se suman los fotogramas clave
                 self.video_marks[p] = sorted(set(self.video_marks.get(p, [])) | set(ms))
+            for p, a in revisiones.items():     # y las anotaciones; en un fotograma, la tuya
+                self.video_reviews[p] = merge_reviews(self.video_reviews.get(p, []), a)
             nuevas_notas = 0
             for p, n in notas.items():          # la nota o el comentario tuyos no se pisan
                 mia = self.notes.get(p, {})
@@ -12067,6 +13319,7 @@ class MainWindow(QMainWindow):
             "categories": copy.deepcopy(self.categories),
             "edits": copy.deepcopy(self.edits),
             "video_marks": copy.deepcopy(self.video_marks),
+            "video_reviews": copy.deepcopy(self.video_reviews),
             "notes": copy.deepcopy(self.notes),
             "removed": set(self.removed),
             "folder_order": self.cmb_folder_order.currentData(),
@@ -12090,6 +13343,7 @@ class MainWindow(QMainWindow):
         self.categories = snap["categories"]
         self.edits = snap["edits"]
         self.video_marks = snap.get("video_marks", {})
+        self.video_reviews = snap.get("video_reviews", {})
         self.notes = snap.get("notes", {})
         self.removed = set(snap.get("removed", set()))
         self._set_mode(self.cmb_folder_order, snap["folder_order"])
@@ -12161,6 +13415,95 @@ class MainWindow(QMainWindow):
             self.video_marks.pop(path, None)
         self.touch()
 
+    # ---------------- comentarios y dibujos sobre los videos --------------- #
+    def reviews_of(self, path: str | None) -> list[dict]:
+        return list(self.video_reviews.get(path, [])) if path else []
+
+    def set_video_reviews(self, path: str, items: list[dict], descripcion: str):
+        """Como los fotogramas clave: a la biblioteca, y se deshace."""
+        self.push_undo(with_name(descripcion, path))
+        if items:
+            self.video_reviews[path] = list(items)
+        else:
+            self.video_reviews.pop(path, None)
+        self.touch()
+
+    def write_video_review(self, path: str, destino: str, con_progreso: bool = True) -> int | None:
+        """El PDF con un fotograma por anotacion. Devuelve cuantos fotogramas
+        no se pudieron leer, o None si se cancelo. Sin dialogos (salvo la
+        barra de progreso), para que las pruebas usen este mismo camino."""
+        lista = self.reviews_of(path)
+        progreso = None
+        cancelado = [False]
+        if con_progreso:
+            progreso = QProgressDialog("Taking the frames of the video\u2026", "Cancel",
+                                       0, len(lista), self)
+            progreso.setWindowTitle(APP_NAME)
+            progreso.setWindowModality(Qt.WindowModality.WindowModal)
+            progreso.setMinimumDuration(0)
+            progreso.setValue(0)
+
+        def avanza(hechos: int, total: int):
+            if progreso is None:
+                return True
+            progreso.setValue(hechos)
+            if progreso.wasCanceled():
+                cancelado[0] = True
+                return False
+            return True
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            frames = FrameGrabber(path, self).grab([a["ms"] for a in lista], avanza)
+            if not cancelado[0]:
+                write_review_pdf(path, lista, frames, destino)
+        finally:
+            QApplication.restoreOverrideCursor()
+            if progreso is not None:
+                progreso.close()
+        return None if cancelado[0] else sum(1 for f in frames if f.isNull())
+
+    def export_video_review(self, path: str):
+        """El boton Export PDF del modo anotar."""
+        self.commit_note()
+        lista = self.reviews_of(path)
+        if not lista:
+            QMessageBox.information(
+                self, APP_NAME, "This video has no comments or drawings yet.\n\n"
+                "Press Annotate, pause on a frame and draw or write on it.")
+            return
+        base = os.path.splitext(shown_name(path) or "video")[0]
+        destino, _ = QFileDialog.getSaveFileName(
+            self, "Export comments of the video to PDF",
+            os.path.join(self.export_dir or str(Path.home()),
+                         safe_file_name("Comments - %s" % base) + ".pdf"),
+            "PDF (*.pdf)")
+        if not destino:
+            return
+        if not os.path.splitext(destino)[1]:
+            destino += ".pdf"
+        try:
+            falladas = self.write_video_review(path, destino)
+        except OSError as e:
+            QMessageBox.warning(self, APP_NAME, "Could not write the PDF:\n%s" % e)
+            return
+        if falladas is None:
+            return
+        self.export_dir = os.path.dirname(destino)
+        self.touch()
+        caja = QMessageBox(self)
+        caja.setWindowTitle(APP_NAME)
+        caja.setText("%d comment%s saved to:\n%s" % (len(lista), "" if len(lista) == 1 else "s",
+                                                    destino))
+        if falladas:
+            caja.setInformativeText("%d frame%s could not be read from the video: its page has "
+                                    "a grey picture with the drawing." % (
+                                        falladas, "" if falladas == 1 else "s"))
+        b_abrir = caja.addButton("Open", QMessageBox.ButtonRole.AcceptRole)
+        caja.addButton(QMessageBox.StandardButton.Close)
+        caja.exec()
+        if caja.clickedButton() is b_abrir:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(destino))
+
     # ---------------- edicion no destructiva ------------------------------ #
     def edit_of(self, path: str | None) -> dict | None:
         return self.edits.get(path) if path else None
@@ -12216,11 +13559,30 @@ class MainWindow(QMainWindow):
         self.edit_path(path)
 
     def edit_path(self, path: str):
-        d = EditorDialog(path, self.edits.get(path), self)
-        if d.exec() == QDialog.DialogCode.Accepted:
+        """Abre el editor en su propia ventana, sin bloquear la principal: se
+        puede minimizar esta y trabajar solo en el editor (iPad, proyector)."""
+        abierto = self._editors.get(path)
+        if abierto is not None:                 # ya esta abierto: se trae delante
+            abierto.showNormal()
+            abierto.raise_()
+            abierto.activateWindow()
+            return
+        d = EditorDialog(path, self.edits.get(path), self, independiente=True)
+        d.setScreen(self.screen())
+        self._editors[path] = d
+        d.finished.connect(lambda r, d=d, path=path: self._editor_closed(path, d, r))
+        d.show()
+        d.raise_()
+        d.activateWindow()
+
+    def _editor_closed(self, path: str, d, resultado: int):
+        if self._editors.get(path) is d:
+            del self._editors[path]
+        if resultado == QDialog.DialogCode.Accepted:
             self.set_edit(path, d.edit)
             self.statusBar().showMessage(
                 "Edit saved (the original file was not touched).", 6000)
+        d.deleteLater()
 
     def open_adjust(self):
         sel = [p for p in self.selected_images() if not is_video(p)]
@@ -12367,7 +13729,8 @@ class MainWindow(QMainWindow):
         """Nota media de los archivos seleccionados, junto a los botones."""
         if not hasattr(self, "lbl_avg"):
             return
-        sel = self.selected_images() if self.show_notes else []
+        sel = [p for p in self.selected_images() if p not in self.removed] \
+            if self.show_notes else []
         if len(sel) < 2:
             self.lbl_avg.hide()
             return
@@ -12429,6 +13792,33 @@ class MainWindow(QMainWindow):
         if paths:
             ImageViewer(paths, max(0, index.row()), self).exec()
 
+    def removed_in(self, folder: str) -> list[str]:
+        """Los quitados que cuelgan de esa carpeta (con sus subcarpetas)."""
+        raiz = os.path.normpath(folder)
+        return [p for p in self.removed
+                if os.path.normpath(os.path.dirname(p)) == raiz
+                or os.path.normpath(os.path.dirname(p)).startswith(raiz + os.sep)]
+
+    def reset_folder(self, folder: str):
+        self.restore_removed(self.removed_in(folder))
+
+    def folder_menu(self, pos):
+        it = self.folder_tree.itemAt(pos)
+        if it is None:
+            return
+        folder = it.data(0, Qt.ItemDataRole.UserRole)
+        m = QMenu(self)
+        m.addAction("Show in Finder" if MAC else "Show in file manager",
+                    lambda: open_folder_in_file_manager(folder))
+        m.addAction("Copy path", lambda: QApplication.clipboard().setText(folder))
+        m.addSeparator()
+        n = len(self.removed_in(folder))
+        a = m.addAction("Reset folder (%d removed)" % n if n else "Reset folder",
+                        lambda: self.reset_folder(folder))
+        a.setEnabled(n > 0)
+        a.setToolTip("Show again every file of this folder that you removed from DriloBoard")
+        m.exec(self.folder_tree.viewport().mapToGlobal(pos))
+
     def image_menu(self, pos):
         idx = self.view.indexAt(pos)
         if not idx.isValid():
@@ -12441,6 +13831,16 @@ class MainWindow(QMainWindow):
         m.addAction("Copy path",
                     lambda: QApplication.clipboard().setText("\n".join(sel)))
         path = idx.data(PATH_ROLE)
+        quitadas = [p for p in sel if p in self.removed]
+        if quitadas:
+            m.insertAction(m.actions()[0], QAction(
+                "Recover (%d)" % len(quitadas) if len(quitadas) > 1 else "Recover", m,
+                triggered=lambda: self.restore_removed(quitadas)))
+            m.insertSeparator(m.actions()[1])
+            if len(quitadas) == len(sel):       # lo quitado no se edita ni se califica
+                m.exec(self.view.viewport().mapToGlobal(pos))
+                return
+            sel = [p for p in sel if p not in self.removed]
         # marcar, comparar y editar son cosa de imagenes
         solo_videos = all(is_video(p) for p in sel)
         m.addSeparator()
@@ -12520,6 +13920,7 @@ class MainWindow(QMainWindow):
             "theme": _theme,
             "videos": self.show_videos,
             "video_marks": self.video_marks,
+            "video_reviews": self.video_reviews,
             "notes": self.notes,
             "show_notes": self.show_notes,
             "preview_notes": self.preview_notes,
@@ -12530,13 +13931,23 @@ class MainWindow(QMainWindow):
             "pdf_before_after": self.pdf_before_after,
             "pdf_name_affixes": self.pdf_affixes,
             "removed": sorted(self.removed),
+            "folders_done": sorted(self.folders_done),
+            "folders_auto": sorted(self.folders_auto),
             "track_time": self.tracker.enabled,
             "show_timer": self.show_timer,
             "times": self.times,
         }
         try:
+            if not self._backed_up and STATE_FILE.exists():
+                # la biblioteca tal como estaba al abrir: si algo sale mal en
+                # esta sesion, se puede volver a ella
+                shutil.copy2(STATE_FILE, STATE_FILE.with_name(STATE_FILE.name + ".bak"))
+            self._backed_up = True
             tmp = STATE_FILE.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            # sin sangria: con bibliotecas grandes ocupa menos de la mitad y se
+            # escribe tres veces mas rapido (se guarda a cada cambio)
+            tmp.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+                           encoding="utf-8")
             tmp.replace(STATE_FILE)
         except OSError as e:
             self.statusBar().showMessage("Could not save: %s" % e, 6000)
@@ -12546,17 +13957,36 @@ class MainWindow(QMainWindow):
             return
         try:
             data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except Exception:
+            if not isinstance(data, dict):
+                raise ValueError("it is not a DriloBoard library")
+        except Exception as e:
+            self._library_damaged(e)
             return
-        self.folders = [f for f in data.get("folders", []) if os.path.isdir(f)]
+        # una carpeta que no esta (el USB sin enchufar, OneDrive sin abrir) se
+        # queda en la lista: antes se tiraba y el siguiente guardado la perdia
+        self.folders = list(dict.fromkeys(
+            canon_path(f) for f in data.get("folders", []) if isinstance(f, str) and f))
+        self._missing_at_start = [f for f in self.folders if not os.path.isdir(f)]
         # normalize_cats migra el formato plano de versiones anteriores
         self.categories = normalize_cats(data.get("categories", []))
+        for c, _ in iter_cats(self.categories):
+            c["images"] = list(dict.fromkeys(
+                canon_path(p) for p in c["images"] if isinstance(p, str)))
         crudo = data.get("edits", {})
-        self.edits = {p: dict(empty_edit(), **e)
-                      for p, e in crudo.items() if isinstance(e, dict)}
+        crudo = crudo if isinstance(crudo, dict) else {}
+        self.edits = canon_keys({p: dict(empty_edit(), **e)
+                                 for p, e in crudo.items() if isinstance(e, dict)})
         self.edits = {p: e for p, e in self.edits.items() if not is_empty_edit(e)}
-        self.video_marks = clean_video_marks(data.get("video_marks"))
-        self.notes = clean_notes(data.get("notes"))
+        self.video_marks = canon_keys(clean_video_marks(data.get("video_marks")),
+                                      lambda a, b: sorted(set(a) | set(b)))
+        self.video_reviews = canon_keys(clean_reviews(data.get("video_reviews")),
+                                        merge_reviews)
+        self.notes = canon_keys(clean_notes(data.get("notes")))
+        for clave, destino in (("folders_done", self.folders_done),
+                               ("folders_auto", self.folders_auto)):
+            crudo = data.get(clave)
+            if isinstance(crudo, list):
+                destino.update(canon_path(p) for p in crudo if isinstance(p, str))
         self.export_dir = data.get("export_dir", "")
         self._set_mode(self.cmb_folder_order, data.get("folder_order", "manual"))
         self._set_mode(self.cmb_cat_order, data.get("category_order", "manual"))
@@ -12573,7 +14003,7 @@ class MainWindow(QMainWindow):
         if isinstance(af, list) and len(af) == 2 and all(isinstance(x, str) for x in af):
             self.pdf_affixes = list(af)
         quitados = data.get("removed")
-        self.removed = {p for p in quitados if isinstance(p, str)} \
+        self.removed = {canon_path(p) for p in quitados if isinstance(p, str)} \
             if isinstance(quitados, list) else set()
         ba = data.get("pdf_before_after")
         if isinstance(ba, dict) and isinstance(ba.get("labels"), list) and len(ba["labels"]) == 2:
@@ -12581,7 +14011,7 @@ class MainWindow(QMainWindow):
             if rotulos == OLD_BEFORE_AFTER_LABELS:          # el de antes pasa al nuevo
                 rotulos = list(BEFORE_AFTER_LABELS)
             self.pdf_before_after = {"on": bool(ba.get("on")), "labels": rotulos}
-        self.times = clean_times(data.get("times"))
+        self.times = canon_keys(clean_times(data.get("times")), lambda a, b: a + b)
         self.set_show_timer(bool(data.get("show_timer", True)))
         self.set_track_time(bool(data.get("track_time", False)))
         if isinstance(data.get("bank_window"), dict):
@@ -12667,6 +14097,12 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         self._closing = True
+        for d in list(self._editors.values()):      # los editores abiertos se van con ella
+            # lo dibujado en ellos se guarda: es una receta, se puede deshacer
+            if d.is_dirty():
+                d.accept()
+            else:
+                d.reject()
         self.tracker.flush()                    # lo que iba contando, apuntado
         self.tracker.timer.stop()
         self.commit_note()

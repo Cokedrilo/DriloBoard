@@ -145,8 +145,8 @@ win.show()
 win.add_folders([str(carpeta)])
 app.processEvents()
 abiertos = []
-visor.EditorDialog.exec = lambda self: (abiertos.append(("editor", self.path)),
-                                        QDialog.DialogCode.Rejected)[1]
+_show_original = visor.EditorDialog.show
+visor.EditorDialog.show = lambda self: abiertos.append(("editor", self.path))
 visor.ImageViewer.exec = lambda self: (abiertos.append(("visor", self.paths[self.i])), 0)[1]
 filas = {os.path.basename(win.model.index(r).data(visor.PATH_ROLE)): r
          for r in range(win.model.rowCount())}
@@ -154,6 +154,10 @@ win.view.doubleClicked.emit(win.model.index(filas["dibujo.png"]))
 win.view.doubleClicked.emit(win.model.index(filas["anim.gif"]))
 assert abiertos == [("editor", str(carpeta / "dibujo.png")), ("visor", str(carpeta / "anim.gif"))], abiertos
 print("   una imagen abre el editor y un GIF la ventana grande ok")
+visor.EditorDialog.show = _show_original
+for _d in list(win._editors.values()):
+    _d.reject()
+app.processEvents()
 
 print("\n5. PDF CON LA ORIGINAL AL LADO")
 alta = QImage(300, 600, QImage.Format.Format_RGB32)

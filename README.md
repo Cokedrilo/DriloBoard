@@ -168,6 +168,18 @@ show as amber diamonds on the time bar, jump from one to the next, are saved
 with the library and undo with `Ctrl+Z`. Every button shows its shortcut when
 you hover over it.
 
+**Annotate a video, like SyncSketch.** Press **Annotate** next to the volume,
+pause on a frame and draw on it (pencil, arrow, rectangle, ellipse, text — five
+colours and thicknesses) and write a comment. The time stamp stays in front of
+the comment, `[0:03.3 · frame 50] Check the arc`. A pink bubble on the time bar
+marks every commented frame and the ◀ ▶ buttons jump between them; when you stop
+on one, the drawing and the comment appear over the video, so a student can follow
+them without annotating. Enter saves the comment (Shift+Enter is a new line),
+changing frame saves it too, and it all lives in the library: it exports and
+imports with it and undoes with `Ctrl+Z`. **Export PDF** writes one page per
+commented frame: a picture of that frame with your drawing on top, the video name
+and the comment, time stamp first.
+
 ![A video on a keyframe, with keyframes and a loop fragment on the time bar and its grade below, in the light theme](docs/video.png)
 
 **Dark or light**
@@ -297,8 +309,16 @@ Everything sits next to the program:
 | | |
 |---|---|
 | `biblioteca.json` | folders, categories, assignments, edits and drawings |
+| `biblioteca.json.bak` | the library as it was when you opened the program, written on the first save of each session |
 | `traduccion.json` | your DeepL key, if you use the translate button — private, never exported or committed |
 | `cache/` | thumbnails already generated — safe to delete, it rebuilds |
+
+Nothing is lost without a warning: a `biblioteca.json` that cannot be read is
+set aside as `biblioteca.json.damaged-<date>` instead of being overwritten; a
+folder that is not there (an unplugged drive, OneDrive not synced) shows greyed
+out as *not found* and keeps everything until you connect it and press
+*Refresh*; and in the editor, `Esc`, the window's X or *Cancel* ask before
+throwing away what you drew.
 
 <details>
 <summary><b>Tuning for large libraries</b></summary>

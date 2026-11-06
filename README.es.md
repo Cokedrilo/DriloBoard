@@ -200,6 +200,19 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
     «◆ Keyframe» avisa cuando estás encima de una. Se guardan con la
     biblioteca (también al exportarla) y se deshacen con `Ctrl+Z`, sin que el
     vídeo vuelva al principio.
+  - **Anotar, como en SyncSketch**: el botón **Annotate**, junto al volumen,
+    abre la barra de anotar. Pausa en un fotograma, dibuja encima (lápiz,
+    flecha, rectángulo, elipse, texto; cinco colores y grosores) y escribe un
+    comentario. La marca de tiempo queda delante del comentario:
+    `[0:03.3 · frame 50] Revisa el arco`. Un globito rosa en la barra de tiempo
+    señala cada fotograma comentado y los botones ◀ ▶ saltan de uno a otro;
+    al parar en uno, el dibujo y el comentario se ven sobre el vídeo, así que
+    un alumno puede seguirlos sin anotar. `Intro` guarda el comentario
+    (`Mayús+Intro` es otra línea) y cambiar de fotograma también lo guarda.
+    Va todo en la biblioteca (se exporta e importa con ella) y se deshace con
+    `Ctrl+Z`. **Export PDF** escribe una página por fotograma comentado: la
+    captura de ese fotograma con tu dibujo encima, el nombre del vídeo y el
+    comentario, con la marca de tiempo delante.
   - **Bucle**: el botón de bucle (o `L`) repite el vídeo entero. Para repetir
     solo un **tramo**, ve a su primer fotograma y pulsa `I`, luego al último y
     pulsa `O`: el tramo se pinta en azul sobre la barra de tiempo y la
@@ -573,6 +586,13 @@ reordenar carpetas. Se guardan los últimos 40 pasos de la sesión.
 - Se guarda solo: carpetas, categorías, ediciones, dibujos, tamaño de
   miniatura, tema y posición de la ventana. En `biblioteca.json`, junto al programa — cópialo y llevas contigo
   toda la clasificación.
+- **Nada se pierde sin avisar.** Al primer guardado de cada sesión queda
+  `biblioteca.json.bak`, la biblioteca tal como estaba al abrir. Si
+  `biblioteca.json` estuviera dañado, se aparta como
+  `biblioteca.json.damaged-<fecha>` en vez de sobrescribirlo. Una carpeta que
+  no está (el USB sin enchufar, OneDrive sin sincronizar) sale en gris como
+  *not found* y conserva todo: al conectarla, *Refresh*. En el editor, `Esc`,
+  la X o *Cancel* preguntan antes de tirar lo dibujado.
 - Las miniaturas se cachean en la carpeta `cache\` del programa. Se puede
   borrar sin miedo: se regenera sola.
 - **Límites pensados para bibliotecas grandes** (constantes al principio de

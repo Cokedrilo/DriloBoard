@@ -7,7 +7,29 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
-Novedades de la 1.18:
+Novedades de la 2.0:
+
+  - Anotar un video, como en SyncSketch: boton Annotate junto al volumen.
+    Dibujo y comentario sobre un fotograma, con su marca de tiempo; un globito
+    rosa en la barra de tiempo marca cada uno y Export PDF saca una pagina por
+    fotograma comentado.
+  - El editor va en su propia ventana, que se escala como quieras, y Mirror
+    ensena lo que dibujas, en directo, en otra pantalla.
+  - Check en las carpetas: se marca sola la primera vez que todos sus archivos
+    tienen nota, y la media sale con color junto al nombre.
+  - Show removed ensena los archivos quitados para recuperarlos, y Reset
+    folder devuelve de una vez los de una carpeta.
+  - Nada se pierde sin avisar: una carpeta que no esta (USB sin enchufar,
+    OneDrive sin sincronizar) sale en gris como "not found" y conserva todo;
+    un biblioteca.json danado se aparta en vez de sobrescribirse; al abrir se
+    guarda biblioteca.json.bak; y en el editor Esc, la X o Cancel preguntan
+    antes de tirar lo dibujado.
+  - Las notas y ediciones de archivos con tildes ya no se pierden cuando
+    OneDrive o Finder escriben la tilde de otra forma.
+  - Guardar es unas tres veces mas rapido y biblioteca.json ocupa menos de la
+    mitad.
+
+De la 1.18:
 
   - Las columnas de los lados se pliegan con la tira fina de su borde (o con
     View, Ctrl+Shift+L y Ctrl+Shift+R) y se recuerda cuales estaban plegadas.

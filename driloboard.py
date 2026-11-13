@@ -474,6 +474,19 @@ def format_duration(ms: int | None) -> str:
     return "%d:%02d:%02d" % (h, m, s % 60) if h else "%d:%02d" % (m, s % 60)
 
 
+def steady_width(label: QLabel, plantilla: str, minimo: int = 0):
+    """Fija el ancho de una etiqueta que cambia en cada fotograma al de su texto
+    mas largo (cada cifra, la mas ancha de la fuente). Si siguiera al texto, el
+    ancho minimo de la fila cambiaria con cada fotograma y, con la ventana
+    estrecha, la ventana entera temblaria al reproducir."""
+    label.ensurePolished()                  # la fuente de la hoja de estilo
+    fm = label.fontMetrics()
+    cifra = max("0123456789", key=fm.horizontalAdvance)
+    ancho = max(minimo, fm.horizontalAdvance(re.sub(r"\d", cifra, plantilla)) + 6)
+    if label.minimumWidth() != ancho or label.maximumWidth() != ancho:
+        label.setFixedWidth(ancho)
+
+
 def fold_text(texto: str) -> str:
     """Minusculas y sin acentos: 'Álvaro' se encuentra escribiendo 'alvaro'."""
     d = unicodedata.normalize("NFD", texto.casefold())
@@ -3851,8 +3864,10 @@ class ReviewBar(QWidget):
     def comment(self) -> str:
         return self.txt.toPlainText()
 
-    def set_state(self, stamp: str, has_drawing: bool, exists: bool, n_total: int):
+    def set_state(self, stamp: str, has_drawing: bool, exists: bool, n_total: int,
+                  widest: str | None = None):
         self.lbl_stamp.setText(stamp)
+        steady_width(self.lbl_stamp, widest or stamp, 110)
         self.b_undo.setEnabled(has_drawing)
         self.b_clear.setEnabled(has_drawing)
         self.b_delete.setEnabled(exists or bool(self.txt.toPlainText().strip()))
@@ -6532,8 +6547,8 @@ class PreviewPane(QWidget):
         vid_lay.addWidget(self.lbl_time)
         vid_lay.addStretch(1)
         self.lbl_key = QLabel("")
-        self.lbl_key.setMinimumWidth(78)
         self.lbl_key.setStyleSheet("color:%s; font-weight:bold;" % KEYFRAME_COLOR)
+        steady_width(self.lbl_key, "◆ Keyframe", 78)    # aparece y desaparece al reproducir
         vid_lay.addWidget(self.lbl_key)
         self.b_key_add = boton("key_add", self.set_keyframe)
         self.b_key_del = boton("key_del", self.delete_keyframe)
@@ -6946,6 +6961,7 @@ class PreviewPane(QWidget):
         self.sld_gif.setValue(i)
         self.sld_gif.blockSignals(False)
         self.lbl_gif.setText("frame %d / %d" % (i + 1, self.gif.count))
+        steady_width(self.lbl_gif, "frame %d / %d" % (self.gif.count, self.gif.count))
 
     def _on_gif_seek(self, i: int):
         if self.showing_gif and i != self.gif.index:
@@ -7180,10 +7196,13 @@ class PreviewPane(QWidget):
         marcas = self.marks()
         aqui = self._mark_here() is not None
         total = int(round(self.player.duration() * 1000 / (self._frame_us or 40000)))
-        self.lbl_time.setText("%s / %s   frame %d%s"
-                              % (format_duration(self.current_frame_us() / 1000),
-                                 format_duration(self.player.duration()),
-                                 self.frame_index(), " / %d" % total if total else ""))
+        formato = "%s / %s   frame %d%s"
+        dur = format_duration(self.player.duration())
+        self.lbl_time.setText(formato % (format_duration(self.current_frame_us() / 1000), dur,
+                                         self.frame_index(), " / %d" % total if total else ""))
+        # el ancho, el del texto mas largo de este video: asi no tiembla la ventana
+        steady_width(self.lbl_time, formato % (dur, dur, max(total, self.frame_index()),
+                                               " / %d" % total if total else ""))
         self.lbl_key.setText("◆ Keyframe" if aqui else "")
         self.b_key_del.setEnabled(aqui)
         antes = any(ms * 1000 < self.current_frame_us() - self._frame_us / 2 for ms in marcas)
@@ -7271,8 +7290,10 @@ class PreviewPane(QWidget):
         if self.review_on:
             if not self._rv_dirty:
                 self.review_bar.set_comment(a["comment"] if a else "")
+            dur = self.player.duration() if self.player is not None else 0
             self.review_bar.set_state(review_stamp(ms, self.frame_index(ms * 1000)),
-                                      bool(a and a["draw"]), a is not None, len(lista))
+                                      bool(a and a["draw"]), a is not None, len(lista),
+                                      review_stamp(dur, self.frame_index(dur * 1000) or 1))
             sig = [(x["ms"], x["comment"], x.get("frame", 0)) for x in lista]
             if sig != self._rv_list_sig:
                 self._rv_list_sig = sig

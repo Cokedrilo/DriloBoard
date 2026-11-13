@@ -142,7 +142,9 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   carpetas seleccionadas.
 
 **Columna central — Miniaturas y vista previa**
-- El deslizador *Size* va de 64 a 420 px.
+- El deslizador *Size* va de 64 a 420 px. Las miniaturas crecen o menguan un
+  poco para que las columnas llenen todo el ancho, también al cambiar el
+  tamaño de la ventana o plegar un lateral.
 - *Preview below* (o la tecla `V`) parte la columna en dos: las
   miniaturas arriba y la imagen seleccionada, grande, debajo. La divisoria se
   arrastra para dar más sitio a una u otra, y se recuerda al cerrar.
@@ -212,7 +214,8 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
     Va todo en la biblioteca (se exporta e importa con ella) y se deshace con
     `Ctrl+Z`. **Export PDF** escribe una página por fotograma comentado: la
     captura de ese fotograma con tu dibujo encima, el nombre del vídeo y el
-    comentario, con la marca de tiempo delante.
+    comentario, con la marca de tiempo delante. Si el vídeo no tiene ninguna
+    anotación, el PDF lleva su primer y su último fotograma.
   - **Bucle**: el botón de bucle (o `L`) repite el vídeo entero. Para repetir
     solo un **tramo**, ve a su primer fotograma y pulsa `I`, luego al último y
     pulsa `O`: el tramo se pinta en azul sobre la barra de tiempo y la
@@ -451,6 +454,26 @@ después.
     así que girar después no lo estropea. **Ampliar el encuadre**: arrastra
     el rectángulo más allá de los bordes de la imagen y el lienzo crece, con
     un margen transparente, blanco o negro (selector *Margin*).
+  - **Ampliar el lienzo por un lado**: *Extend canvas* añade los píxeles que
+    digas por la derecha, la izquierda, arriba, abajo o por los cuatro lados
+    (el lado tal como lo ves, con el giro puesto), del color de *Margin*. Se
+    puede dibujar en lo añadido, y *Remove crop* lo quita.
+  - **Dibujar directamente en la vista previa**: con *Preview below* puesto,
+    la imagen elegida se edita ahí mismo. Las herramientas de dibujo van a su
+    izquierda, las capas a su derecha y los ajustes de imagen, el zoom y
+    *Mirror* en la barra de abajo. **Clic derecho** en cualquiera de esas tres
+    zonas abre una lista con casillas: marca lo que quieras en ella (se trae
+    de donde estuviera) y desmarca lo que no uses; se recuerda. Lo hecho se
+    guarda al pasar a otro archivo, como un paso de deshacer. `Ctrl+Z` deshace
+    en el editor mientras trabajas en él, y en la biblioteca si estás en las
+    miniaturas. Los vídeos, los GIF y la comparación se ven como antes. El
+    doble clic, `E` o *Edit…* siguen abriendo el editor en su ventana.
+  - **Tamaño, opacidad y dureza como en Krita**: barras con el valor dentro
+    (arrastra, haz clic donde quieras o doble clic para teclear el número; la
+    rueda sube de uno en uno). `[` y `]` cambian el tamaño y `{` y `}` la
+    dureza. El pincel se ve como un aro sobre la imagen, con otro punteado
+    dentro donde empieza la dureza. El **color** es un solo cuadro: al pulsarlo
+    se abre la paleta, los últimos usados y *More colours...*.
   - Brillo, contraste y blanco y negro.
   - **Dibujar encima**, estilo Recortes de Windows: *Pen*, *Highlighter*
     (grueso y transparente, deja ver lo de debajo), *Line*, *Arrow*,
@@ -533,6 +556,9 @@ después.
   editado sale con la original al lado (o encima, si son apaisadas), cada una
   con su rótulo: *Original* / *Edited* (puedes cambiarlos): así
   el alumno ve el cambio. Vale también para el PDF por alumno y se recuerda.
+  Los **vídeos** también entran: una página por cada fotograma que hayas
+  dibujado o comentado (con el dibujo encima y el comentario debajo) o, si el
+  vídeo no tiene anotaciones, su **primer y último fotograma**.
 - **Un PDF por alumno**: *Export…* ▸ *One PDF per folder (per student)*
   (también en el botón derecho y en *Library*). Elige la carpeta de la clase,
   con una subcarpeta por alumno: cada subcarpeta sale como

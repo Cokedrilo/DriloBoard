@@ -86,7 +86,7 @@ dlg.show()
 app.processEvents()
 dlg.sld_tool_op.setValue(60)
 dlg.sld_tool_hard.setValue(25)
-assert dlg.view.opacity == 60 and dlg.view.hardness == 25 and dlg.lbl_tool_op.text() == "60 %"
+assert dlg.view.opacity == 60 and dlg.view.hardness == 25 and dlg.sld_tool_op.texto() == "Opacity  60 %"
 dlg.set_tool("trazo")
 dlg.view._puntos = [QPointF(10, 10), QPointF(100, 100)]
 forma = dlg.view._forma()

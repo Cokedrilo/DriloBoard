@@ -1054,7 +1054,8 @@ assert not im.isNull() and max(im.width(), im.height()) == visor.THUMB_BOX
 t.run()
 assert t._cache_file().exists()
 w.slider.setValue(320)
-assert w.view.iconSize().width() == 320
+# el tamano se ajusta para que las columnas llenen el ancho: cerca de lo pedido
+assert w.view.iconSize().width() == w.fitted_icon_size(320) == w.model.icon
 vpaths = w.model.paths()
 v = visor.ImageViewer(vpaths, 0, w)
 v.step(1); v.step(-1)

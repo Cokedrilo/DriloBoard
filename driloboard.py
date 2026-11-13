@@ -53,8 +53,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication
                                QGraphicsView, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QListView, QListWidget, QListWidgetItem, QMainWindow,
                                QMenu, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton,
-                               QScrollArea, QSizePolicy, QSlider, QSplitter,
-                               QButtonGroup, QColorDialog, QGraphicsPathItem,
+                               QScrollArea, QSizePolicy, QSlider, QSplitter, QStackedWidget,
+                               QButtonGroup, QColorDialog, QGraphicsPathItem, QWidgetAction,
                                QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionSlider,
                                QTextBrowser, QTableWidget, QTableWidgetItem, QHeaderView, QKeySequenceEdit,
                                QToolButton,
@@ -1839,7 +1839,8 @@ def write_selection_pdf(items: list[dict], destino: str, titulo: str, *,
                         show_comment: bool = True, images=None,
                         before_after: bool = False, labels=BEFORE_AFTER_LABELS):
     """items: {path, name, grade, comment}. 'images' da la imagen de cada uno
-    (por defecto, la editada); asi las pruebas no dependen de disco."""
+    (por defecto, la editada); asi las pruebas no dependen de disco. Un hueco
+    (None) en 'images' es la imagen editada de ese archivo."""
     writer = QPdfWriter(destino)
     writer.setTitle(titulo)
     writer.setCreator(APP_NAME)
@@ -1847,7 +1848,8 @@ def write_selection_pdf(items: list[dict], destino: str, titulo: str, *,
     margen_mm = 12
     painter = None
     for n, it in enumerate(items):
-        img = images[n] if images else pdf_page_image(it["path"], it.get("edit"))
+        img = images[n] if images and images[n] is not None else \
+            pdf_page_image(it["path"], it.get("edit"))
         if before_after and not is_empty_edit(it.get("edit")) and not is_video(it["path"]):
             # la original al lado, para que el alumno vea el cambio
             img = before_after_image(pdf_page_image(it["path"], None), img, labels)
@@ -1940,8 +1942,13 @@ class FrameGrabber(QObject):
     reproductor (el del visor sigue donde estaba). grab() espera dentro de un
     bucle de eventos, asi que la ventana no se congela. El salto a un
     fotograma sigue el mismo truco que el visor: al primer cuarto del
-    fotograma y, si cae en otro, reintentar un poco antes o despues."""
+    fotograma y, si cae en otro, reintentar un poco antes o despues.
+
+    Un ms negativo (LAST) pide el ultimo fotograma, que no se sabe hasta abrir
+    el video. Tras grab(), times_ms dice el ms de cada uno y frame_us cuanto
+    dura un fotograma."""
     FRAME_TIMEOUT_MS = 4000
+    LAST = -1
 
     def __init__(self, path: str, parent=None):
         super().__init__(parent)
@@ -1960,6 +1967,7 @@ class FrameGrabber(QObject):
         self._frame_us = 40000.0
         self._queue: list[int] = []
         self._images: list[QImage] = []
+        self.times_ms: list[int] = []
         self._want_us = None
         self._tries = 0
         self._last = QImage()                # el ultimo fotograma que llego
@@ -1971,6 +1979,7 @@ class FrameGrabber(QObject):
         """Un QImage por cada ms (nulo si no se pudo). progress(i, n) -> False cancela."""
         self._queue = list(mss)
         self._images = []
+        self.times_ms = []
         self._progress = progress
         if not self._queue:
             return []
@@ -1981,7 +1990,12 @@ class FrameGrabber(QObject):
         self._player.stop()
         self._player.setSource(QUrl())       # suelta el archivo: en Windows lo bloquea
         self._images += [QImage()] * (len(mss) - len(self._images))
+        self.times_ms += [max(0, int(m)) for m in mss[len(self.times_ms):]]
         return self._images
+
+    @property
+    def frame_us(self) -> float:
+        return self._frame_us
 
     def _on_status(self, estado):
         if estado == QMediaPlayer.MediaStatus.LoadedMedia and not self._started:
@@ -2002,7 +2016,12 @@ class FrameGrabber(QObject):
         if len(self._images) >= len(self._queue):
             self._finish()
             return
-        self._want_us = self._queue[len(self._images)] * 1000.0
+        ms = self._queue[len(self._images)]
+        if ms < 0:                           # el ultimo: su principio, no el final del video
+            ms = max(0.0, (self._player.duration() * 1000 - self._frame_us) / 1000)
+            ms = round(ms * 1000 / self._frame_us) * self._frame_us / 1000
+        self._want_us = ms * 1000.0
+        self.times_ms.append(int(round(ms)))
         self._tries = 0
         self._last = QImage()
         self._timer.start()
@@ -2067,6 +2086,35 @@ def write_review_pdf(path: str, lista: list[dict], frames: list[QImage], destino
               "comment": review_text(a)} for a in lista]
     write_selection_pdf(items, destino, titulo or "DriloBoard \u2014 %s" % (shown_name(path) or "video"),
                         show_grade=False, images=imagenes)
+
+
+VIDEO_ENDS = ("First frame", "Last frame")
+
+
+def video_pdf_marks(lista: list[dict]) -> list[dict]:
+    """Los fotogramas de un video que van al PDF: los anotados y, si no hay
+    ninguno, el primero y el ultimo (su ms se sabe al abrir el video)."""
+    if lista:
+        return [dict(a) for a in lista]
+    return [{"ms": ms, "frame": 0, "w": 0, "h": 0, "comment": texto, "draw": [], "auto": True}
+            for ms, texto in zip((0, FrameGrabber.LAST), VIDEO_ENDS)]
+
+
+def settle_video_marks(lista: list[dict], frames: list[QImage], tiempos: list[int],
+                       frame_us: float) -> tuple[list[dict], list[QImage]]:
+    """Pone a los fotogramas automaticos su ms y su numero, ya leido el video.
+    Un video de un solo fotograma no repite pagina."""
+    out_l, out_f = [], []
+    for a, f, ms in zip(lista, frames, tiempos):
+        if a.get("auto"):
+            a = {k: v for k, v in a.items() if k != "auto"}
+            a["ms"] = int(ms)
+            a["frame"] = int(round(ms * 1000 / (frame_us or 40000)))
+            if out_l and out_l[-1]["ms"] == a["ms"]:
+                continue
+        out_l.append(a)
+        out_f.append(f)
+    return out_l, out_f
 
 
 def safe_file_name(nombre: str, otro: str = "DriloBoard") -> str:
@@ -2745,8 +2793,12 @@ class ThumbModel(QAbstractListModel):
         return self._paths
 
     def set_icon_size(self, px: int):
+        """Otro tamano. Las que ya estan en memoria no se tiran: se reescalan
+        al pintarlas (ver data()), asi al cambiar el ancho de la ventana no
+        parpadean vacias mientras se releen de la cache de disco."""
+        if px == self.icon:
+            return
         self.icon = px
-        self._vaciar_cache()            # se reescalan desde la cache de disco
         self._queue.clear()
         self._pending.clear()
         if self._paths:
@@ -2795,6 +2847,15 @@ class ThumbModel(QAbstractListModel):
             pm = self._pix.get(path)
             if pm is not None:
                 self._pix.move_to_end(path)     # recien usada: la ultima en caer
+                lado = max(pm.width(), pm.height())
+                if lado != self.icon:
+                    # de otro tamano: se ajusta ya con lo que hay; si hay que
+                    # agrandarla se pide tambien la nitida a la cache de disco
+                    pm = pm.scaled(self.icon, self.icon, Qt.AspectRatioMode.KeepAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation)
+                    self._guardar(path, pm)
+                    if lado < self.icon:
+                        self._request(path)
                 return pm
             self._request(path)
             return self._placeholder()
@@ -3772,7 +3833,8 @@ class ReviewBar(QWidget):
         self.b_pdf = QPushButton("  Export PDF")
         themed(self.b_pdf, icon="save")
         self.b_pdf.setToolTip("A PDF with a picture of every frame you drew on or commented, "
-                              "with its time stamp and comment")
+                              "with its time stamp and comment (with none, the first and "
+                              "last frame)")
         self.b_pdf.clicked.connect(self.exportPdf.emit)
         self.b_pdf.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         col.addWidget(self.b_pdf)
@@ -3794,7 +3856,7 @@ class ReviewBar(QWidget):
         self.b_undo.setEnabled(has_drawing)
         self.b_clear.setEnabled(has_drawing)
         self.b_delete.setEnabled(exists or bool(self.txt.toPlainText().strip()))
-        self.b_pdf.setEnabled(n_total > 0)
+        self.b_pdf.setEnabled(True)              # sin anotaciones: primer y ultimo fotograma
         self.b_list.setText("Comments (%d)" % n_total if n_total else "Comments")
         self.b_list.setEnabled(n_total > 0)
 
@@ -6629,10 +6691,15 @@ class PreviewPane(QWidget):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.gif_bar.hide()
 
+        # el sitio de la imagen: el visor, o el editor que pone la ventana principal
+        self.area = QStackedWidget()
+        self.area.addWidget(self.view)
+        self.editor = None
+        self.on_mode_changed = lambda: None     # empieza o acaba una comparacion
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-        lay.addWidget(self.view, 1)
+        lay.addWidget(self.area, 1)
         lay.addWidget(self.review_bar)
         lay.addWidget(self.video_bar)
         lay.addWidget(self.gif_bar)
@@ -6647,6 +6714,37 @@ class PreviewPane(QWidget):
 
     def _on_zoom(self):
         self._fitted = False
+
+    # --- el editor en el sitio de la imagen ---------------------------------
+    def set_editor(self, ed):
+        """Se dibuja directamente aqui: el editor ocupa el sitio de la imagen y
+        su zona de abajo va en la barra, entre el pie y los botones."""
+        self.clear_editor()
+        self.editor = ed
+        self.area.addWidget(ed)
+        self.bar.insertWidget(1, ed.zona_abajo, 4)
+        self.show_editor(True)
+
+    def show_editor(self, si: bool):
+        """El editor o el visor en el sitio de la imagen. Un video o un GIF
+        necesitan el visor a la vista ya: oculto no recibe fotogramas."""
+        if self.editor is None:
+            si = False
+        self.area.setCurrentWidget(self.editor if si else self.view)
+        if self.editor is not None:
+            self.editor.zona_abajo.setVisible(si)
+
+    def clear_editor(self):
+        ed = self.editor
+        if ed is None:
+            return
+        self.editor = None
+        self.area.setCurrentWidget(self.view)
+        self.area.removeWidget(ed)
+        self.bar.removeWidget(ed.zona_abajo)
+
+    def editing(self) -> bool:
+        return self.editor is not None and self.area.currentWidget() is self.editor
 
     # --- nota y comentario -------------------------------------------------
     def attach_notes(self, host, visible: bool):
@@ -6764,6 +6862,8 @@ class PreviewPane(QWidget):
         if self.comparing:
             self.stop_compare(refit=False)
         self.path = path
+        if self.editor is not None and path != self.editor.path:
+            self.show_editor(False)         # lo que llega no es del editor
         self._tokens[0] += 1                # invalida lo que estuviera cargando
         self._timer.stop()
         if self.notes_box is not None:
@@ -7576,6 +7676,7 @@ class PreviewPane(QWidget):
         if self.notes_box is not None:
             self.notes_box.set_path(None)       # dos archivos: la nota no es de ninguno
         self.comparing = True
+        self.show_editor(False)
         self.path, self.path_b = path_a, path_b
         self.loaded_path = self.loaded_path_b = None
         self._tokens[0] += 1
@@ -7595,6 +7696,7 @@ class PreviewPane(QWidget):
         self._pool.start(PreviewTask(1, self._tokens[1], path_b,
                                      self.max_side, self._signals,
                                      self.edit_for(path_b)))
+        self.on_mode_changed()
 
     def stop_compare(self, refit: bool = True):
         if not self.comparing:
@@ -7607,6 +7709,7 @@ class PreviewPane(QWidget):
         self.cmp_bar.hide()
         if refit and self.path:
             self.show_path(self.path, immediate=True)
+        self.on_mode_changed()
 
     def swap_compare(self):
         if self.comparing and self.path and self.path_b:
@@ -7657,6 +7760,9 @@ class PreviewPane(QWidget):
                               "   (scaled down to be able to show it)" if reduced else ""))
 
     def fit(self):
+        if self.editing():
+            self.editor.fit()
+            return
         if self.showing_video:
             if not self.video_item.size().isEmpty():
                 self.view.resetTransform()
@@ -8525,6 +8631,182 @@ class LayerList(QListWidget):
 
 PAD_CHOICES = (("Transparent", None), ("White", "#ffffff"), ("Black", "#000000"))
 CROP_MARGIN = 0.5                   # cuanto se puede ampliar el encuadre, por cada lado
+EXTEND_MAX = 10000                  # pixeles que se pueden anadir de una vez con "Extend canvas"
+# El editor dentro de la vista previa: que controles van en cada zona. Clic
+# derecho en una zona cambia esto, y se guarda en biblioteca.json
+EDIT_ZONES = {"left": "the left side", "right": "the right side", "bottom": "the bottom bar"}
+EDIT_ZONES_DEFAULT = {
+    "left": ["tools", "colours", "size", "opacity", "hardness"],
+    "right": ["layers", "colour_layer", "composition"],
+    "bottom": ["rotate", "flip", "extend", "margin", "brightness", "contrast",
+               "zoom", "mirror"],
+}
+EDIT_ZONE_WIDTHS = (128, 250)       # ancho de los laterales al empezar
+
+
+def clean_edit_zones(crudo) -> dict:
+    """Las zonas leidas de un json: listas de nombres, sin repetir ninguno."""
+    if not isinstance(crudo, dict) or not any(isinstance(crudo.get(n), list)
+                                              for n in EDIT_ZONES):
+        return {n: list(ids) for n, ids in EDIT_ZONES_DEFAULT.items()}
+    vistos, out = set(), {}
+    for n in EDIT_ZONES:
+        out[n] = []
+        for i in crudo.get(n) or []:
+            if isinstance(i, str) and i not in vistos:
+                vistos.add(i)
+                out[n].append(i)
+    return out
+
+
+class ChecklistMenu(QMenu):
+    """Un menu de casillas que no se cierra al marcar: se eligen varias seguidas."""
+
+    def mouseReleaseEvent(self, e):
+        a = self.activeAction()
+        if a is not None and a.isEnabled() and a.isCheckable():
+            a.trigger()
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+EXTEND_MAX_SIDE = 20000             # y el lado mas grande que puede quedar
+
+
+class _BarEdit(QLineEdit):
+    """El cuadro para teclear el valor de una BarSlider: Esc lo deja como estaba."""
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape:
+            self.setText(self.property("antes"))
+            self.clearFocus()
+            e.accept()
+            return
+        super().keyPressEvent(e)
+
+
+class BarSlider(QSlider):
+    """Barra de valor al estilo Krita y Photoshop: el nombre y el valor van
+    DENTRO de la barra, que se llena hasta donde vale. Se arrastra o se hace
+    clic donde quieras; doble clic para teclear el numero; la rueda sube y
+    baja de uno en uno (con Mayus, de diez en diez).
+
+    Sigue siendo un QSlider (valueChanged, setValue, setRange...). Con
+    curva > 1 el principio de la barra es mas fino: para el tamano del
+    pincel, donde importa distinguir 3 de 4 pero casi no 150 de 151.
+    """
+
+    def __init__(self, titulo: str, fmt: str = "%d", curva: float = 1.0, ancho: int = 150,
+                 parent=None):
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self.titulo = titulo
+        self.fmt = fmt
+        self.curva = max(1.0, curva)
+        self.setFixedSize(ancho, 26)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self.setSingleStep(1)
+        self._editor = None
+
+    def texto(self) -> str:
+        return "%s  %s" % (self.titulo, self.fmt % self.value())
+
+    def _fraccion(self) -> float:
+        lo, hi = self.minimum(), self.maximum()
+        f = (self.value() - lo) / max(1, hi - lo)
+        return max(0.0, min(1.0, f)) ** (1.0 / self.curva)
+
+    def _valor_en(self, x: float) -> int:
+        f = max(0.0, min(1.0, x / max(1, self.width() - 1))) ** self.curva
+        return int(round(self.minimum() + f * (self.maximum() - self.minimum())))
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        trazo = QPainterPath()
+        trazo.addRoundedRect(r, 5, 5)
+        p.fillPath(trazo, QColor(theme_color("panel")))
+        p.setClipPath(trazo)
+        relleno = QColor(theme_color("accent"))
+        relleno.setAlpha(125 if self.isEnabled() else 50)
+        p.fillRect(QRectF(r.left(), r.top(), r.width() * self._fraccion(), r.height()), relleno)
+        p.setClipping(False)
+        p.setPen(QPen(QColor(theme_color("accent" if self.hasFocus() else "border")), 1))
+        p.drawPath(trazo)
+        p.setPen(QColor(theme_color("text")))
+        f = QFont(self.font())
+        f.setPointSizeF(max(8.0, f.pointSizeF() - 0.5))
+        p.setFont(f)
+        p.drawText(self.rect().adjusted(8, 0, -8, 0),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter,
+                   self.texto())
+        p.end()
+
+    def setValue(self, v):
+        super().setValue(v)
+        self.update()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.setSliderDown(True)
+            self.setValue(self._valor_en(e.position().x()))
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self.isSliderDown():
+            self.setValue(self._valor_en(e.position().x()))
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self.isSliderDown() and e.button() == Qt.MouseButton.LeftButton:
+            self.setSliderDown(False)
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.editar()
+            e.accept()
+            return
+        super().mouseDoubleClickEvent(e)
+
+    def wheelEvent(self, e):
+        paso = 10 if e.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1
+        self.setValue(self.value() + (paso if e.angleDelta().y() > 0 else -paso))
+        e.accept()
+
+    def editar(self):
+        """Teclear el numero exacto, encima de la barra."""
+        if self._editor is not None:
+            return
+        ed = _BarEdit(str(self.value()), self)
+        ed.setProperty("antes", str(self.value()))
+        ed.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ed.setGeometry(self.rect())
+        self._editor = ed
+
+        def fin():
+            if self._editor is not ed:
+                return
+            self._editor = None
+            try:
+                v = int(ed.text().strip().split()[0])
+            except (ValueError, IndexError):
+                v = None
+            ed.hide()
+            ed.deleteLater()
+            if v is not None:
+                self.setValue(max(self.minimum(), min(self.maximum(), v)))
+        ed.editingFinished.connect(fin)
+        ed.show()
+        ed.setFocus()
+        ed.selectAll()
 
 
 class CropView(QGraphicsView):
@@ -8551,9 +8833,52 @@ class CropView(QGraphicsView):
         self._puntos: list = []
         self._preview = None
         self._arrastre = False
+        self._aro: QPointF | None = None    # donde esta el puntero, para el aro del pincel
+        self.setMouseTracking(True)
+
+    def _radio_aro(self) -> float:
+        """Radio del pincel en la escena, o 0 si la herramienta no lleva aro."""
+        if self.tool not in ("trazo", "rotulador", "borrador"):
+            return 0.0
+        return max(0.5, self.width * (4 if self.tool == "rotulador" else 1)) / 2
+
+    def _repintar_aro(self, centro: QPointF | None):
+        """Repinta solo lo que cubria el aro y lo que va a cubrir."""
+        r = self._radio_aro() + 3 / max(self.transform().m11(), 1e-6)
+        for c in (self._aro, centro):
+            if c is not None:
+                self.viewport().update(self.mapFromScene(
+                    QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r)).boundingRect().adjusted(-2, -2, 2, 2))
+        self._aro = centro
+
+    def refrescar_aro(self):
+        """El tamano o la herramienta cambiaron: que el aro se repinte."""
+        self.viewport().update()
+
+    def leaveEvent(self, e):
+        self._repintar_aro(None)
+        super().leaveEvent(e)
 
     def drawForeground(self, painter, rect):
-        """Rejilla de cuadros sobre la imagen, para enderezar a ojo."""
+        """Rejilla de cuadros sobre la imagen, para enderezar a ojo, y el aro
+        del pincel (su tamano real, y por dentro hasta donde llega lo duro)."""
+        radio = self._radio_aro()
+        if radio and self._aro is not None:
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            dureza = max(0, min(100, self.hardness)) / 100
+            for color, dx in ((QColor(0, 0, 0, 170), 1), (QColor(255, 255, 255, 230), 0)):
+                pen = QPen(color, 0)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                d = dx / max(self.transform().m11(), 1e-6)
+                c = self._aro + QPointF(d, 0)
+                painter.drawEllipse(c, radio, radio)
+                if dureza < 1 and self.tool != "rotulador":
+                    pen.setStyle(Qt.PenStyle.DotLine)
+                    painter.setPen(pen)
+                    painter.drawEllipse(c, radio * dureza, radio * dureza)
+            painter.restore()
         if self.frame_rect is not None and self.tool == "recortar":
             painter.save()
             for color, dx in ((QColor(0, 0, 0, 160), 1), (QColor(255, 255, 255, 220), 0)):
@@ -8668,6 +8993,8 @@ class CropView(QGraphicsView):
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
+        if self._radio_aro():
+            self._repintar_aro(self.mapToScene(e.position().toPoint()))
         if _pan_move(self, e):
             return
         if self.tool == "seleccionar" and self._arrastre:
@@ -8896,6 +9223,7 @@ class HoldKey(QObject):
         super().__init__(ventana)
         self.ventana, self.callback = ventana, callback
         self.activa = False
+        self._top = None            # la ventana que la contenia al pulsar (modo editar)
         self.set_sequence(SK.seq(id))
         SK.items.append((id, self))
         QApplication.instance().installEventFilter(self)
@@ -8909,15 +9237,22 @@ class HoldKey(QObject):
     def _set(self, valor: bool):
         if valor != self.activa:
             self.activa = valor
+            self._top = self.ventana.window() if valor else None
             self.callback(valor)
 
     def eventFilter(self, obj, ev):
         t = ev.type()
-        if t == QEvent.Type.WindowDeactivate and obj is self.ventana:
+        # window(): un editor metido en la ventana principal (modo editar) no es
+        # una ventana; vale cuando la que lo contiene esta activa y el se ve.
+        # Al desactivarse no se pregunta a Qt: al cerrar el programa llegan
+        # avisos de ventanas a medio destruir y llamarlas lo hacia reventar
+        if t == QEvent.Type.WindowDeactivate and (obj is self.ventana or
+                                                  (self._top is not None and obj is self._top)):
             self._set(False)
         elif (t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease)
                 and self.key and ev.key() == self.key and ev.modifiers() == self.mods
-                and (self.activa or QApplication.activeWindow() is self.ventana)):
+                and (self.activa or (QApplication.activeWindow() is self.ventana.window()
+                                     and self.ventana.isVisible()))):
             if isinstance(QApplication.focusWidget(),
                           (QLineEdit, QPlainTextEdit, QAbstractSpinBox)):
                 return False
@@ -8930,11 +9265,22 @@ class HoldKey(QObject):
 class EditorDialog(QDialog):
     """Editor no destructivo: monta una receta, no toca el archivo."""
 
-    def __init__(self, path: str, edit: dict, parent=None, independiente: bool = False):
+    pop_out = Signal()                         # desde la vista previa: a ventana propia
+    zones_changed = Signal(dict)               # se movio una pieza de zona (clic derecho)
+
+    def __init__(self, path: str, edit: dict, parent=None, independiente: bool = False,
+                 incrustado: bool = False, zonas: dict | None = None,
+                 anchos: list | None = None):
         # independiente: ventana propia, sin padre. Asi se minimiza sola y la
         # principal puede quedarse minimizada o cerrarse de vista (el padre
         # arrastraria al editor con ella)
-        super().__init__(None if independiente else parent)
+        # incrustado: no es ventana; va dentro de la principal, en el sitio de
+        # la vista previa (el modo editar). Quien lo mete alli le pone el padre
+        super().__init__(None if (independiente or incrustado) else parent)
+        self.incrustado = incrustado
+        # cada control con nombre: en la vista previa se reparten por zonas
+        self._piezas: "OrderedDict[str, tuple[str, QWidget]]" = OrderedDict()
+        self._anchos_fijos: dict = {}           # slider -> ancho en una fila
         self.path = path
         self.edit = normalize_layers(dict(empty_edit(), **(edit or {})))
         self._sig_inicial = edit_signature(self.edit)   # para saber si hay cambios
@@ -8960,18 +9306,40 @@ class EditorDialog(QDialog):
         self.setWindowTitle(self._title())
         # la ventana se puede escalar como se quiera (iPad por Sidecar, pantallas
         # pequenas): barra maximizar, tirador de esquina y filas que fluyen
-        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowTitleHint
-                            | Qt.WindowType.WindowSystemMenuHint
-                            | Qt.WindowType.WindowMinMaxButtonsHint
-                            | Qt.WindowType.WindowCloseButtonHint)
-        self.setSizeGripEnabled(True)
-        pantalla = (parent.screen() if parent is not None else None) \
-            or QApplication.primaryScreen()
-        zona = pantalla.availableGeometry() if pantalla else QRect(0, 0, 1920, 1080)
-        self.resize(*fit_to_screen(1200, 780, (zona.width(), zona.height())))
+        if incrustado:
+            self.setWindowFlags(Qt.WindowType.Widget)
+        else:
+            self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowTitleHint
+                                | Qt.WindowType.WindowSystemMenuHint
+                                | Qt.WindowType.WindowMinMaxButtonsHint
+                                | Qt.WindowType.WindowCloseButtonHint)
+            self.setSizeGripEnabled(True)
+            pantalla = (parent.screen() if parent is not None else None) \
+                or QApplication.primaryScreen()
+            zona = pantalla.availableGeometry() if pantalla else QRect(0, 0, 1920, 1080)
+            self.resize(*fit_to_screen(1200, 780, (zona.width(), zona.height())))
 
         def fila():
             return FlowLayout(hspace=8, vspace=4)
+
+        def pieza(fila_, id_, titulo, w, hueco=0):
+            """Un control con nombre. En la ventana va a su fila; en la vista
+            previa (incrustado) lo coloca luego la zona que le toque."""
+            self._piezas[id_] = (titulo, w)
+            for sld in w.findChildren(QSlider) + ([w] if isinstance(w, QSlider) else []):
+                if sld.minimumWidth() == sld.maximumWidth():
+                    self._anchos_fijos[sld] = sld.minimumWidth()
+            if incrustado:
+                return
+            if hueco:
+                fila_.add(w, hueco)
+            else:
+                fila_.addWidget(w)
+
+        def caja_que_fluye():
+            """Botones que bajan de linea: en un lateral estrecho, columnas."""
+            g = QWidget()
+            return g, FlowLayout(g, hspace=0, vspace=0)
 
         def grupo(*piezas, hueco: int = 0):
             """Piezas que van siempre juntas (etiqueta + control): el flujo las
@@ -9018,20 +9386,24 @@ class EditorDialog(QDialog):
         self.scene.addItem(self.sel_item)
 
         geo = fila()
-        for txt, icono, fn, tip in (
+        g_rot, l_rot = grupo()
+        g_flip, l_flip = grupo()
+        for txt, icono, fn, tip, destino in (
                 ("  Rotate left", "rotate_left", lambda: self.rotate(-90),
-                 "Turn 90 degrees anticlockwise"),
+                 "Turn 90 degrees anticlockwise", l_rot),
                 ("  Rotate right", "rotate_right", lambda: self.rotate(90),
-                 "Turn 90 degrees clockwise"),
+                 "Turn 90 degrees clockwise", l_rot),
                 ("  Flip H", "flip_h", lambda: self.flip("flip_h"),
-                 "Mirror horizontally"),
+                 "Mirror horizontally", l_flip),
                 ("  Flip V", "flip_v", lambda: self.flip("flip_v"),
-                 "Mirror vertically")):
+                 "Mirror vertically", l_flip)):
             b = QPushButton(txt)
             themed(b, icon=icono)
             b.setToolTip(tip)
             b.clicked.connect(fn)
-            geo.addWidget(b)
+            destino.addWidget(b)
+        pieza(geo, "rotate", "Rotate 90°", g_rot)
+        pieza(geo, "flip", "Flip", g_flip)
         et_angle = ResetLabel("Angle")
         self.sld_angle = QSlider(Qt.Orientation.Horizontal)
         self.sld_angle.setRange(-1800, 1800)            # en decimas de grado
@@ -9052,11 +9424,11 @@ class EditorDialog(QDialog):
         self.b_angle0.setToolTip("Back to 0 degrees")
         self.b_angle0.setFixedWidth(44)
         g_angle, _ = grupo(et_angle, self.sld_angle, self.spin_angle, self.b_angle0)
-        geo.add(g_angle, 12)
+        pieza(geo, "angle", "Angle", g_angle, 12)
         self.b_uncrop = QPushButton("  Remove crop")
         themed(self.b_uncrop, icon="crop")
         self.b_uncrop.clicked.connect(self.uncrop)
-        geo.add(self.b_uncrop, 12)
+        pieza(geo, "uncrop", "Remove crop", self.b_uncrop, 12)
         self.cmb_pad = QComboBox()
         for txt, val in PAD_CHOICES:
             self.cmb_pad.addItem(txt, val)
@@ -9064,15 +9436,37 @@ class EditorDialog(QDialog):
         self.cmb_pad.setCurrentIndex(max(0, self.cmb_pad.findData(self.edit.get("pad"))))
         self.cmb_pad.activated.connect(self.on_pad)
         g_pad, _ = grupo(QLabel("Margin"), self.cmb_pad)
-        geo.addWidget(g_pad)
+        pieza(geo, "margin", "Margin colour", g_pad)
+        # ampliar el lienzo: pixeles nuevos por un lado, del color de "Margin"
+        self.cmb_side = QComboBox()
+        for txt, val in (("Right", "right"), ("Left", "left"), ("Top", "top"),
+                         ("Bottom", "bottom"), ("All sides", "all")):
+            self.cmb_side.addItem(txt, val)
+        self.cmb_side.setToolTip("Side of the image (as you see it) that gets the new pixels")
+        self.spin_extend = QSpinBox()
+        self.spin_extend.setRange(1, EXTEND_MAX)
+        self.spin_extend.setValue(200)
+        self.spin_extend.setSuffix(" px")
+        self.spin_extend.setToolTip("How many pixels to add, at the image's full resolution")
+        self.b_extend = QPushButton("Add")
+        self.b_extend.setToolTip("Make the image bigger by adding pixels on that side. The new "
+                                 "area takes the Margin colour and you can draw on it. "
+                                 "Remove crop takes it away again.")
+        self.b_extend.clicked.connect(
+            lambda: self.extend_canvas(self.cmb_side.currentData(), self.spin_extend.value()))
+        g_ext, _ = grupo(QLabel("Extend canvas"), self.cmb_side, self.spin_extend,
+                         self.b_extend)
+        pieza(geo, "extend", "Extend canvas", g_ext, 12)
 
         dibujo = fila()
         self.grupo = QButtonGroup(self)
         self.grupo.setExclusive(True)
         self._tool_buttons: dict = {}
-        self._color_buttons: dict = {}
-        g_tools, l_tools = grupo()
-        l_tools.setSpacing(0)
+        if incrustado:
+            g_tools, l_tools = caja_que_fluye()
+        else:
+            g_tools, l_tools = grupo()
+            l_tools.setSpacing(0)
         for tool, icono, titulo, tip in (
                 (None, "move", "Move and zoom", "Drag the image around and zoom"),
                 ("seleccionar", "select", "Select and move",
@@ -9109,57 +9503,46 @@ class EditorDialog(QDialog):
                 b.setChecked(True)
             if tool == "recortar":
                 self.b_crop = b
-        dibujo.addWidget(g_tools)
-        self.grupo_color = QButtonGroup(self)
-        self.grupo_color.setExclusive(True)
-        g_colors, l_colors = grupo()
-        l_colors.setSpacing(0)
-        for nombre, hexa in DRAW_COLORS:
-            b = QToolButton()
-            b.setCheckable(True)
-            b.setIcon(swatch_icon(hexa))
-            b.setIconSize(QSize(18, 18))
-            b.setToolTip(nombre)
-            b.setAutoRaise(True)
-            b.clicked.connect(lambda _c, h=hexa: self.on_color(QColor(h)))
-            self.grupo_color.addButton(b)
-            self._color_buttons[hexa.lower()] = b
-            l_colors.addWidget(b)
+        pieza(dibujo, "tools", "Drawing tools", g_tools)
+        # un solo cuadro con el color actual: al pulsarlo se abre la paleta
         self.b_color = QToolButton()
-        self.b_color.setText("...")
-        self.b_color.setToolTip("Pick another colour")
         self.b_color.setAutoRaise(True)
-        self.b_color.clicked.connect(self.pick_color)
-        l_colors.addWidget(self.b_color)
-        dibujo.add(g_colors, 10)
-        self.sld_width = QSlider(Qt.Orientation.Horizontal)
+        self.b_color.setIconSize(QSize(30, 20))
+        self.b_color.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.b_color.setToolTip("Drawing colour: click to choose another")
+        self.b_color.setMenu(self._menu_colores())
+        pieza(dibujo, "colours", "Colour", self.b_color)
+        # tamano, opacidad y dureza: barras con el valor dentro, como Krita.
+        # Valen para lo siguiente que dibujes (la capa elegida se cambia en
+        # el panel de capas)
+        self.sld_width = BarSlider("Size", "%d px", curva=2.0)
         self.sld_width.setRange(1, 200)
         self.sld_width.setValue(6)
-        self.sld_width.setFixedWidth(130)
-        self.sld_width.setToolTip("Brush size, from 1 to 200")
+        self.sld_width.setToolTip("Brush size, from 1 to 200 px. Drag, or double-click to type "
+                                  "a number. Keys [ and ] make it smaller and bigger")
         self.sld_width.valueChanged.connect(self.set_width)
-        g_size, _ = grupo(QLabel("Size"), self.sld_width)
-        dibujo.addWidget(g_size)
-        # opacidad y dureza de lo siguiente que dibujes (la capa elegida se
-        # cambia en el panel de capas)
-        g_op, l_op = grupo()
-        self.sld_tool_op, self.lbl_tool_op = self._mini_slider(
-            l_op, "Opacity", 5, 100, 100, "%d %%",
-            "Opacity of the next stroke (0 = invisible, 100 = solid)")
-        dibujo.addWidget(g_op)
+        pieza(dibujo, "size", "Brush size", self.sld_width)
+        self.sld_tool_op = BarSlider("Opacity", "%d %%")
+        self.sld_tool_op.setRange(1, 100)
+        self.sld_tool_op.setValue(100)
+        self.sld_tool_op.setToolTip("Opacity of the next stroke (1 = almost invisible, 100 = "
+                                    "solid). Drag, or double-click to type a number")
+        pieza(dibujo, "opacity", "Stroke opacity", self.sld_tool_op)
         self.sld_tool_op.valueChanged.connect(lambda v: setattr(self.view, "opacity", v))
-        g_hard, l_hard = grupo()
-        self.sld_tool_hard, self.lbl_tool_hard = self._mini_slider(
-            l_hard, "Hardness", 0, 100, 100, "%d",
-            "Edge of the next stroke: 100 = sharp, lower = softer, like an airbrush")
-        dibujo.addWidget(g_hard)
-        self.sld_tool_hard.valueChanged.connect(lambda v: setattr(self.view, "hardness", v))
+        self.sld_tool_hard = BarSlider("Hardness", "%d %%")
+        self.sld_tool_hard.setRange(0, 100)
+        self.sld_tool_hard.setValue(100)
+        self.sld_tool_hard.setToolTip("Edge of the next stroke: 100 = sharp, lower = softer, "
+                                      "like an airbrush. Drag, or double-click to type a number. "
+                                      "Keys { and } change it")
+        pieza(dibujo, "hardness", "Stroke hardness", self.sld_tool_hard)
+        self.sld_tool_hard.valueChanged.connect(self._set_hardness)
         self.b_fill = QPushButton("  Colour layer")
         themed(self.b_fill, icon="fill")
         self.b_fill.setToolTip("Cover the image with a see-through layer of the chosen colour, "
                                "to draw on top of it. Change its opacity in Layers")
         self.b_fill.clicked.connect(self.add_colour_layer)
-        dibujo.addWidget(self.b_fill)
+        pieza(dibujo, "colour_layer", "Colour layer", self.b_fill)
         self.b_guides = QToolButton()
         self.b_guides.setText("  Composition")
         themed(self.b_guides, icon="guides")
@@ -9182,11 +9565,11 @@ class EditorDialog(QDialog):
             else:
                 menu.addAction(nombre, lambda c=clave: self.add_guide(c))
         self.b_guides.setMenu(menu)
-        dibujo.addWidget(self.b_guides)
+        pieza(dibujo, "composition", "Composition guides", self.b_guides)
         self.b_undraw = QPushButton("  Clear drawings")
         themed(self.b_undraw, icon="eraser")
         self.b_undraw.clicked.connect(self.clear_drawings)
-        dibujo.addWidget(self.b_undraw)
+        pieza(dibujo, "clear", "Clear drawings", self.b_undraw)
 
         ajustes = fila()
         et_bright = ResetLabel("Brightness")
@@ -9194,15 +9577,15 @@ class EditorDialog(QDialog):
         self.sld_bright.setRange(-100, 100)
         self.sld_bright.setFixedWidth(150)
         g_bright, _ = grupo(et_bright, self.sld_bright)
-        ajustes.addWidget(g_bright)
+        pieza(ajustes, "brightness", "Brightness", g_bright)
         et_contrast = ResetLabel("Contrast")
         self.sld_contrast = QSlider(Qt.Orientation.Horizontal)
         self.sld_contrast.setRange(-100, 100)
         self.sld_contrast.setFixedWidth(150)
         g_contrast, _ = grupo(et_contrast, self.sld_contrast)
-        ajustes.addWidget(g_contrast)
+        pieza(ajustes, "contrast", "Contrast", g_contrast)
         self.chk_gray = QCheckBox("Black and white")
-        ajustes.addWidget(self.chk_gray)
+        pieza(ajustes, "gray", "Black and white", self.chk_gray)
 
         color = fila()
         self.sld_color = {}
@@ -9213,7 +9596,7 @@ class EditorDialog(QDialog):
             sld.setFixedWidth(120)
             et.clicked.connect(lambda s_=sld, n=nombre: self.reset_slider(s_, n))
             g_c, _ = grupo(et, sld)
-            color.addWidget(g_c)
+            pieza(color, clave, nombre, g_c)
             self.sld_color[clave] = sld
         self.sld_blur = self.sld_color["blur"]
         et_bright.clicked.connect(lambda: self.reset_slider(self.sld_bright, "brightness"))
@@ -9227,19 +9610,20 @@ class EditorDialog(QDialog):
             s.setRange(1, 30000)
             s.setFixedWidth(90)
         g_tam, _ = grupo(QLabel("Output size:"), self.spin_w, QLabel("x"), self.spin_h)
-        tam.addWidget(g_tam)
         self.chk_ratio = QCheckBox("Keep aspect ratio")
         self.chk_ratio.setChecked(True)
-        tam.addWidget(self.chk_ratio)
         b_apply_size = QPushButton("Apply size")
         b_apply_size.clicked.connect(self.apply_resize)
-        tam.addWidget(b_apply_size)
         b_orig_size = QPushButton("Original size")
         b_orig_size.clicked.connect(self.clear_resize)
-        tam.addWidget(b_orig_size)
         self.lbl_info = QLabel("")
         themed(self.lbl_info, css="color:%(dim)s;")
-        tam.addWidget(self.lbl_info)
+        if incrustado:
+            g_out, _ = grupo(g_tam, self.chk_ratio, b_apply_size, b_orig_size, self.lbl_info)
+            pieza(tam, "output_size", "Output size", g_out)
+        else:
+            for w_ in (g_tam, self.chk_ratio, b_apply_size, b_orig_size, self.lbl_info):
+                tam.addWidget(w_)
 
         zoom = fila()
         b_menos = QPushButton()
@@ -9260,15 +9644,15 @@ class EditorDialog(QDialog):
         self.lbl_zoom = QLabel("100 %")
         self.lbl_zoom.setFixedWidth(56)
         g_zoom, _ = grupo(QLabel("Zoom:"), b_menos, self.sld_zoom, b_mas, self.lbl_zoom)
-        zoom.addWidget(g_zoom)
+        pieza(zoom, "zoom", "Zoom", g_zoom)
         b_fit = QPushButton("  Fit")
         themed(b_fit, icon="fit")
         b_fit.setToolTip("Fit the image in the window (key 0)")
         b_fit.clicked.connect(self.fit)
-        zoom.addWidget(b_fit)
+        pieza(zoom, "fit", "Fit", b_fit)
         b_100 = QPushButton("100 %")
         b_100.clicked.connect(lambda: self.sld_zoom.setValue(100))
-        zoom.addWidget(b_100)
+        pieza(zoom, "zoom100", "Zoom 100 %", b_100)
         self.b_mirror = QPushButton("  Mirror")
         themed(self.b_mirror, std="SP_ComputerIcon")
         self.b_mirror.setCheckable(True)
@@ -9278,7 +9662,7 @@ class EditorDialog(QDialog):
             "screen on the other screen; with only one screen it is a window you can "
             "drag there. Esc or double-click closes it")
         self.b_mirror.toggled.connect(self.toggle_mirror)
-        zoom.add(self.b_mirror, 12)
+        pieza(zoom, "mirror", "Mirror", self.b_mirror, 12)
 
         self.b_undo = QPushButton("  Undo")
         themed(self.b_undo, std="SP_ArrowBack")
@@ -9301,27 +9685,48 @@ class EditorDialog(QDialog):
         b_cancel = QPushButton("Cancel")
         themed(b_cancel, std="SP_DialogCancelButton")
         b_cancel.clicked.connect(self.reject)
-        final = WrapRow([self.b_undo, self.b_redo, 12, b_reset, b_export],
-                        [b_cancel, b_ok])
-
         self.lienzo = QSplitter(Qt.Orientation.Horizontal)
-        self.lienzo.addWidget(self.view)
-        self.lienzo.addWidget(self._build_layers_panel())
-        self.lienzo.setStretchFactor(0, 1)
-        self.lienzo.setCollapsible(0, False)
-        self.lienzo.setCollapsible(1, True)      # en una ventana estrecha, capas fuera
-        self.lienzo.setSizes([800, 210])
-        lay = QVBoxLayout(self)
-        lay.addWidget(self.lienzo, 1)
-        lay.addLayout(geo)
-        lay.addLayout(dibujo)
-        lay.addLayout(ajustes)
-        lay.addLayout(color)
-        lay.addLayout(tam)
-        lay.addLayout(zoom)
-        lay.addWidget(final)
+        if incrustado:
+            # en la vista previa no hay OK ni Cancel: lo hecho se guarda solo
+            g_undo, _ = grupo(self.b_undo, self.b_redo)
+            pieza(None, "undo", "Undo / Redo", g_undo)
+            pieza(None, "reset", "Reset all", b_reset)
+            pieza(None, "export", "Export a copy", b_export)
+            b_win = QPushButton("  Own window")
+            themed(b_win, std="SP_TitleBarMaxButton")
+            b_win.setToolTip("Edit this image in a window of its own (another screen, iPad)")
+            b_win.clicked.connect(self.pop_out.emit)
+            pieza(None, "own_window", "Own window", b_win)
+            b_ok.deleteLater()
+            b_cancel.deleteLater()
+            pieza(None, "layers", "Layers", self._build_layers_panel())
+            self._build_zones(zonas, anchos)
+            lay = QVBoxLayout(self)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.addWidget(self.lienzo, 1)
+        else:
+            final = WrapRow([self.b_undo, self.b_redo, 12, b_reset, b_export],
+                            [b_cancel, b_ok])
+            self.lienzo.addWidget(self.view)
+            self.lienzo.addWidget(self._build_layers_panel())
+            self.lienzo.setStretchFactor(0, 1)
+            self.lienzo.setCollapsible(0, False)
+            self.lienzo.setCollapsible(1, True)      # en una ventana estrecha, capas fuera
+            self.lienzo.setSizes([800, 210])
+            lay = QVBoxLayout(self)
+            lay.addWidget(self.lienzo, 1)
+            lay.addLayout(geo)
+            lay.addLayout(dibujo)
+            lay.addLayout(ajustes)
+            lay.addLayout(color)
+            lay.addLayout(tam)
+            lay.addLayout(zoom)
+            lay.addWidget(final)
 
         SK.bind(self, "fit", self.fit)
+        for tecla, que, delta in (("[", "size", -1), ("]", "size", 1),
+                                  ("{", "hard", -1), ("}", "hard", 1)):
+            QShortcut(QKeySequence(tecla), self, lambda q=que, d=delta: self.nudge(q, d))
         QShortcut(QKeySequence("Ctrl+]"), self, lambda: self.restack(1))
         QShortcut(QKeySequence("Ctrl+["), self, lambda: self.restack(-1))
         HoldKey("before", self, self.set_before)
@@ -9661,17 +10066,70 @@ class EditorDialog(QDialog):
             self.view.frame_rect = None
             self.scene.setSceneRect(area)
 
+    _recientes: list = []                   # colores usados, el ultimo primero (todos los editores)
+
+    def _menu_colores(self) -> QMenu:
+        """La paleta que se abre desde el cuadro de color: los colores de
+        siempre, los ultimos que usaste y 'More colours...'."""
+        menu = QMenu(self.b_color)
+        cont = QWidget()
+        lay = QVBoxLayout(cont)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+        self._rejilla = QGridLayout()
+        self._rejilla.setSpacing(2)
+        lay.addLayout(self._rejilla)
+        lay.addWidget(QLabel("Recent"))
+        self._rejilla_rec = QGridLayout()
+        self._rejilla_rec.setSpacing(2)
+        lay.addLayout(self._rejilla_rec)
+        mas = QPushButton("More colours...")
+        mas.clicked.connect(lambda: (menu.close(), QTimer.singleShot(0, self.pick_color)))
+        lay.addWidget(mas)
+        for i, (nombre, hexa) in enumerate(DRAW_COLORS):
+            self._rejilla.addWidget(self._boton_color(hexa, nombre, menu), i // 5, i % 5)
+        self._menu_col = menu
+        self._cont_recientes = lay
+        self._pintar_recientes()
+        accion = QWidgetAction(menu)
+        accion.setDefaultWidget(cont)
+        menu.addAction(accion)
+        return menu
+
+    def _boton_color(self, hexa: str, nombre: str, menu: QMenu) -> QToolButton:
+        b = QToolButton()
+        b.setIcon(swatch_icon(hexa, 26))
+        b.setIconSize(QSize(26, 26))
+        b.setAutoRaise(True)
+        b.setToolTip("%s  %s" % (nombre, hexa))
+        b.clicked.connect(lambda _c, h=hexa: (menu.close(), self.on_color(QColor(h))))
+        return b
+
+    def _pintar_recientes(self):
+        g = self._rejilla_rec
+        while g.count():
+            w = g.takeAt(0).widget()
+            if w is not None:
+                w.deleteLater()
+        for i, hexa in enumerate(EditorDialog._recientes[:10]):
+            g.addWidget(self._boton_color(hexa, "Recent", self._menu_col), i // 5, i % 5)
+
     def set_color(self, c: QColor):
         self.view.color = c
-        b = self._color_buttons.get(c.name().lower())
-        if b is not None and not b.isChecked():
-            b.setChecked(True)
-        elif b is None:                     # un color de fuera de la paleta
-            self.b_color.setIcon(swatch_icon(c.name()))
-            self.grupo_color.setExclusive(False)
-            for otro in self.grupo_color.buttons():
-                otro.setChecked(False)
-            self.grupo_color.setExclusive(True)
+        self.b_color.setIcon(swatch_icon(c.name(), 30))
+        self.b_color.setToolTip("Drawing colour %s: click to choose another" % c.name())
+        self.view.refrescar_aro()
+
+    def _recordar_color(self, c: QColor):
+        hexa = c.name().lower()
+        if hexa in [h.lower() for _n, h in DRAW_COLORS]:
+            return
+        rec = EditorDialog._recientes
+        if hexa in rec:
+            rec.remove(hexa)
+        rec.insert(0, hexa)
+        del rec[10:]
+        self._pintar_recientes()
 
     def pick_color(self):
         c = QColorDialog.getColor(self.view.color, self, "Drawing colour")
@@ -9680,20 +10138,21 @@ class EditorDialog(QDialog):
 
     def set_width(self, v: int):
         self.view.width = v
+        self.view.refrescar_aro()
 
-    def _mini_slider(self, fila, titulo: str, lo: int, hi: int, valor: int, fmt: str, tip: str):
-        fila.addWidget(QLabel(titulo))
-        sld = QSlider(Qt.Orientation.Horizontal)
-        sld.setRange(lo, hi)
-        sld.setValue(valor)
-        sld.setFixedWidth(80)
-        sld.setToolTip(tip)
-        lbl = QLabel(fmt % valor)
-        lbl.setMinimumWidth(34)
-        sld.valueChanged.connect(lambda v: lbl.setText(fmt % v))
-        fila.addWidget(sld)
-        fila.addWidget(lbl)
-        return sld, lbl
+    def _set_hardness(self, v: int):
+        self.view.hardness = v
+        self.view.refrescar_aro()
+
+    def nudge(self, que: str, delta: int):
+        """Teclas [ ] (tamano) y { } (dureza), como en Photoshop. El tamano
+        sube a saltos proporcionales: de 3 en 3 pequeno, de 20 en 20 grande."""
+        if que == "size":
+            v = self.sld_width.value()
+            paso = max(1, int(round(v * 0.1)))
+            self.sld_width.setValue(v + delta * paso)
+        else:
+            self.sld_tool_hard.setValue(self.sld_tool_hard.value() + delta * 10)
 
     # --- capas (contenedores de trazos) -------------------------------------
     #
@@ -9838,6 +10297,7 @@ class EditorDialog(QDialog):
 
     def _build_layers_panel(self) -> QWidget:
         der = QWidget()
+        der.setObjectName("capas")              # ya es vertical: las zonas no lo giran
         ld = QVBoxLayout(der)
         ld.setContentsMargins(6, 0, 0, 0)
         ld.setSpacing(4)
@@ -10296,6 +10756,7 @@ class EditorDialog(QDialog):
         trazo con Select and move, tambien se lo pone a el. Para repintar una
         capa entera esta el boton del panel de capas."""
         self.set_color(c)
+        self._recordar_color(c)
         f = self.selected_shape()
         if f is not None and f.get("tipo") not in ("difuminar", "borrar") \
                 and f.get("color", "").lower() != c.name().lower():
@@ -10376,6 +10837,37 @@ class EditorDialog(QDialog):
             self.edit["capas"] = []
             self.sel = None
             self.render_preview(reajustar=False)
+
+    def extend_canvas(self, lado: str, px: int) -> bool:
+        """Anade 'px' pixeles de lienzo por un lado de lo que se ve, o por los
+        cuatro. En la receta es un recorte que se sale de la imagen, como cuando
+        se arrastra el recorte hacia fuera: lo nuevo toma el color de 'Margin'.
+        El lado es el que se ve, con el giro y los volteos ya puestos."""
+        if px <= 0:
+            return False
+        e = dict(self.edit, resize=None)
+        _cx, _cy, cw, ch = e.get("crop") or (0, 0, *straightened_size(e, *self.full_size))
+        W, H = (ch, cw) if e.get("rot", 0) % 360 in (90, 270) else (cw, ch)
+        x, y, w, h = 0, 0, W, H
+        for l in (("left", "right", "top", "bottom") if lado == "all" else (lado,)):
+            if l == "left":
+                x, w = x - px, w + px
+            elif l == "right":
+                w += px
+            elif l == "top":
+                y, h = y - px, h + px
+            elif l == "bottom":
+                h += px
+        if max(w, h) > EXTEND_MAX_SIDE:
+            QMessageBox.information(
+                self, APP_NAME, "That would make the image %d x %d pixels. The limit is "
+                "%d on each side." % (w, h, EXTEND_MAX_SIDE))
+            return False
+        self.push("extend canvas")
+        self.edit["crop"] = display_to_source_rect([x, y, w, h], e, *self.full_size)
+        self.edit["resize"] = None          # el tamano de salida era para el encuadre de antes
+        self.render_preview()
+        return True
 
     def uncrop(self):
         self.push("remove crop")
@@ -10515,6 +11007,185 @@ class EditorDialog(QDialog):
                                 "Saved to:\n%s" % destino if ok
                                 else "Could not save:\n%s" % err)
 
+    # --- zonas (el editor dentro de la vista previa) ------------------------
+    def _build_zones(self, zonas: dict | None, anchos: list | None):
+        """Izquierda (herramientas) y derecha (capas) a los lados del lienzo;
+        la de abajo la coloca la vista previa en su barra. Con clic derecho en
+        cualquiera, una lista con checks decide que va en ella."""
+        self.zonas: dict = {}
+        for nombre in EDIT_ZONES:
+            caja = QWidget()
+            caja.setObjectName("zona_" + nombre)
+            if nombre == "bottom":
+                lay = FlowLayout(caja, hspace=10, vspace=4)
+            else:
+                lay = QVBoxLayout(caja)
+                lay.setContentsMargins(6, 6, 6, 6)
+                lay.setSpacing(10)
+                lay.addStretch(1)
+            vacia = QLabel("Right-click to add tools")
+            vacia.setWordWrap(True)
+            themed(vacia, css="color:%(dim)s; font-size:11px;")
+            caja.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            caja.customContextMenuRequested.connect(
+                lambda pos, n=nombre, c=caja: self.zone_menu(n, c.mapToGlobal(pos)))
+            self.zonas[nombre] = {"caja": caja, "lay": lay, "vacia": vacia, "ids": []}
+        for nombre in ("left", "right"):
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setWidget(self.zonas[nombre]["caja"])
+            scroll.setMinimumWidth(40)
+            self.zonas[nombre]["marco"] = scroll
+        self.zona_abajo = self.zonas["bottom"]["caja"]      # vive en la barra de la previa
+        self.zona_abajo.setMinimumHeight(24)
+        self.lienzo.addWidget(self.zonas["left"]["marco"])
+        self.lienzo.addWidget(self.view)
+        self.lienzo.addWidget(self.zonas["right"]["marco"])
+        self.lienzo.setStretchFactor(1, 1)
+        self.lienzo.setCollapsible(1, False)
+        a_izq, a_der = (anchos or [])[:2] if anchos and len(anchos) >= 2 else EDIT_ZONE_WIDTHS
+        self.lienzo.setSizes([int(a_izq), 800, int(a_der)])
+        self.apply_zones(zonas)
+
+    def zone_layout(self) -> dict:
+        """Lo que hay en cada zona, en orden: lo que se guarda."""
+        return {n: list(z["ids"]) for n, z in self.zonas.items()}
+
+    def zone_widths(self) -> list:
+        t = self.lienzo.sizes()
+        return [t[0], t[2]] if len(t) == 3 else list(EDIT_ZONE_WIDTHS)
+
+    def apply_zones(self, zonas: dict | None):
+        """Coloca cada pieza en su zona; las que no estan en ninguna se esconden."""
+        zonas = clean_edit_zones(zonas)
+        for z in self.zonas.values():
+            for i in list(z["ids"]):
+                self._sacar(i)
+        for nombre, ids in zonas.items():
+            for i in ids:
+                if i in self._piezas:
+                    self._meter(i, nombre)
+        for i, (_t, w) in self._piezas.items():
+            if not any(i in z["ids"] for z in self.zonas.values()):
+                w.hide()
+                w.setParent(self)               # aparcada: sigue viva y conectada
+                w.hide()
+        self._sync_vacias()
+
+    def _sacar(self, i: str):
+        w = self._piezas[i][1]
+        for z in self.zonas.values():
+            if i in z["ids"]:
+                z["lay"].removeWidget(w)
+                z["ids"].remove(i)
+
+    def _meter(self, i: str, nombre: str):
+        z = self.zonas[nombre]
+        w = self._piezas[i][1]
+        vertical = nombre != "bottom"
+        self._orientar(w, vertical)
+        if vertical:
+            z["lay"].insertWidget(z["lay"].count() - 1, w)     # antes del muelle
+        else:
+            z["lay"].addWidget(w)
+        z["ids"].append(i)
+        w.show()
+
+    def _orientar(self, w: QWidget, vertical: bool):
+        """En un lateral, lo que iba en fila va de arriba abajo y las barras
+        se estiran al ancho del lateral; abajo, como en la ventana."""
+        lay = w.layout()
+        if isinstance(lay, QBoxLayout) and w.objectName() != "capas":
+            lay.setDirection(QBoxLayout.Direction.TopToBottom if vertical
+                             else QBoxLayout.Direction.LeftToRight)
+        for sld in w.findChildren(QSlider) + ([w] if isinstance(w, QSlider) else []):
+            ancho = self._anchos_fijos.get(sld)
+            if ancho is None:
+                continue
+            if vertical:
+                sld.setMinimumWidth(50)
+                sld.setMaximumWidth(16777215)
+            else:
+                sld.setFixedWidth(ancho)
+
+    def _sync_vacias(self):
+        """Una zona vacia dice como llenarla (y asi tiene donde hacer clic derecho)."""
+        for z in self.zonas.values():
+            vacia = z["vacia"]
+            dentro = z["lay"].indexOf(vacia) >= 0
+            if z["ids"]:
+                if dentro:
+                    z["lay"].removeWidget(vacia)
+                vacia.hide()
+                continue
+            if not dentro:
+                if isinstance(z["lay"], QVBoxLayout):
+                    z["lay"].insertWidget(0, vacia)
+                else:
+                    z["lay"].addWidget(vacia)
+            vacia.show()
+
+    def move_piece(self, i: str, nombre: str | None):
+        """Lleva una pieza a una zona (al final), o la quita de todas."""
+        if i not in self._piezas:
+            return
+        self._sacar(i)
+        if nombre is None:
+            w = self._piezas[i][1]
+            w.hide()
+            w.setParent(self)
+            w.hide()
+        else:
+            self._meter(i, nombre)
+        self._sync_vacias()
+        self.zones_changed.emit(self.zone_layout())
+
+    def zone_menu(self, nombre: str, donde: QPoint):
+        """Clic derecho en una zona: todas las piezas, con check en las suyas.
+        Marcar una la trae aqui (aunque estuviera en otra zona)."""
+        m = ChecklistMenu(self)
+        cab = m.addAction("Show in %s" % EDIT_ZONES[nombre])
+        cab.setEnabled(False)
+        m.addSeparator()
+        for i, (titulo, _w) in self._piezas.items():
+            otra = next((n for n, z in self.zonas.items() if i in z["ids"]), None)
+            texto = titulo if otra in (None, nombre) else \
+                "%s   (now in %s)" % (titulo, EDIT_ZONES[otra])
+            a = m.addAction(texto)
+            a.setCheckable(True)
+            a.setChecked(otra == nombre)
+            a.toggled.connect(lambda on, i=i: self.move_piece(i, nombre if on else None))
+        m.addSeparator()
+        m.addAction("Back to the default layout",
+                    lambda: (self.apply_zones(None),
+                             self.zones_changed.emit(self.zone_layout())))
+        m.exec(donde)
+
+    def dispose(self):
+        """Se retira el editor de la vista previa: suelta hilos y espejo, y la
+        zona de abajo, que vive fuera de el (en la barra de la previa)."""
+        if self._mirror is not None:
+            self._mirror.close()
+        self._full_timer.stop()
+        self._pool.clear()
+        self._pool.waitForDone(3000)
+        # sus atajos, fuera ya: hasta que Qt lo borre seguiria colgando de la
+        # ventana principal y sus Ctrl+Z se mezclarian con los del siguiente
+        for sc in self.findChildren(QShortcut):
+            sc.setEnabled(False)
+        abajo = getattr(self, "zona_abajo", None)
+        if abajo is not None:
+            for sc in abajo.findChildren(QShortcut):
+                sc.setEnabled(False)
+            abajo.hide()
+            abajo.setParent(None)
+            abajo.deleteLater()
+        self.hide()
+        self.setParent(None)
+        self.deleteLater()
+
     def is_dirty(self) -> bool:
         """Hay algo hecho en esta ventana que aun no se ha guardado."""
         return edit_signature(self.edit) != self._sig_inicial
@@ -10533,6 +11204,8 @@ class EditorDialog(QDialog):
     def reject(self):
         """Esc, la X de la ventana y Cancel pasan por aqui. Antes tiraban sin
         avisar todo lo dibujado; ahora, si hay cambios, se pregunta."""
+        if self.incrustado:
+            return                  # en la vista previa no hay que cerrar: Esc no hace nada
         if not self.is_dirty():
             super().reject()
             return
@@ -10584,7 +11257,9 @@ A → Z / Z → A. This order decides the order of the thumbnails too.</li>
 
 <h3>2 · Thumbnails and preview (centre)</h3>
 <ul>
-<li>The <b>Size</b> slider goes from 64 to 420 px. Files are sorted naturally:
+<li>The <b>Size</b> slider goes from 64 to 420 px. The thumbnails then grow or
+shrink a little so the columns fill the whole width, also when you resize the
+window or fold a side panel. Files are sorted naturally:
 <i>plate2</i> comes before <i>plate10</i>.</li>
 <li><b>Preview below</b> (key <b>V</b>) splits the column and shows the selected
 image large underneath, at full resolution. Move through the thumbnails with
@@ -10713,6 +11388,19 @@ everything nested inside it, whatever folder the images come from.</li>
 <li><i>Edit…</i> (key <b>[[edit]]</b>) opens the editor: rotate, flip, crop,
 brightness, contrast, hue, saturation, lightness, blur, black and white, and
 output size.</li>
+<li><b>Draw straight on the preview</b>: with <i>Preview below</i> on, the chosen
+image can be edited right there. The drawing tools sit on its left, the layers on
+its right and the image adjustments, zoom and Mirror in the bar underneath.
+<b>Right-click</b> any of those three areas for a list with checkboxes: tick what
+you want there (it moves from wherever it was), untick what you do not use. What
+you do is saved when you move to another file, as one step of Ctrl+Z.
+<b>Ctrl+Z</b> undoes in the editor while you are working in it, and in the
+library when you are in the thumbnails. Videos, GIFs and comparisons show as
+before. <b>[[edit]]</b>, a double-click or <i>Edit…</i> still open the editor in a
+window of its own.</li>
+<li><b>Extend canvas</b> adds pixels on one side of the image as you see it
+(right, left, top, bottom or all sides), in the <i>Margin</i> colour. You can
+draw on the new area; <i>Remove crop</i> takes it away.</li>
 <li><b>Crop</b> can also <b>enlarge the frame</b>: drag the rectangle past the
 edges of the image and the canvas grows, with a margin you colour with
 <i>Margin</i> (transparent, white or black).</li>
@@ -10734,9 +11422,15 @@ arrows (bring forward / send back), <b>merge</b> and the bin (or Delete) act on 
 them; the paint button gives them the chosen colour. Hidden layers stay out of exports
 and PDFs. With <b>Select and move</b> click a stroke to pick it (and its layer) and drag
 it; click a colour to recolour it, double-click a text to change it.</li>
-<li><b>Opacity</b> and <b>Hardness</b>, next to <i>Size</i>, set the next stroke: a lower
-hardness softens its edge like an airbrush (the centre stays solid). The Layers panel
-changes both for the selected drawing.</li>
+<li><b>Size</b>, <b>Opacity</b> and <b>Hardness</b> are bars with the value inside, as in
+Krita: drag, click anywhere on one, or double-click to type the number (the wheel moves it
+by one, with Shift by ten). They set the next stroke; a lower hardness softens its edge
+like an airbrush (the centre stays solid). The brush shows as a ring over the image, with
+a dotted ring inside where the hardness starts. The keys <b>[</b> and <b>]</b> change the
+size and <b>{</b> and <b>}</b> the hardness. The Layers panel changes opacity and hardness
+for the selected drawing.</li>
+<li>The <b>colour</b> is a single square: click it to choose from the palette, the colours
+you used last or <i>More colours...</i>.</li>
 <li><b>Composition</b> adds a guide over the final frame — rule of thirds, centre,
 diagonals, golden ratio grid, dynamic symmetry, golden triangles or the golden spiral
 (four ways round) — fitted to its proportions. It is a layer: hide it, recolour it,
@@ -10768,7 +11462,9 @@ resolution into the folder you choose. Existing files are never overwritten.</li
 puts the selected images, edits applied, in a PDF. Tick what goes under each
 image: the <b>file name</b>, the <b>grade</b> and the <b>comments</b>. Tick <b>The original
 next to the edited one</b> and every edited file shows both, with a label above each
-(<i>Original</i> / <i>Edited</i>, or write your own), so the student sees the change.</li>
+(<i>Original</i> / <i>Edited</i>, or write your own), so the student sees the change.
+Selected <b>videos</b> add a page per frame you drew on or commented, or their first and
+last frame if they have no annotations.</li>
 <li><i>Export…</i> ▸ <i>One PDF per folder</i> (also in the right-click menu and in
 <b>Library</b>) makes <b>one PDF for each student</b>: choose the class folder, with a
 subfolder per student, and every subfolder becomes <i>Name of the folder.pdf</i> (add a
@@ -10866,7 +11562,8 @@ one the drawing and the comment show up over the video, so a student can follow 
 without annotating. <b>Enter</b> saves the comment (<b>Shift+Enter</b> is a new line); it
 is also saved when you change frame. Everything lives in the library and
 <b>Ctrl+Z</b> undoes it. <b>Export PDF</b> writes one page per commented frame, with a
-picture of the frame, your drawing on top and the comment below.</li>
+picture of the frame, your drawing on top and the comment below; a video with no
+annotations gives its first and last frame.</li>
 </ul>
 """
 
@@ -11181,6 +11878,13 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._editors: dict = {}               # ruta -> editor abierto (ventana propia)
+        self._panel = None                     # el editor de la vista previa (siempre a mano)
+        self._closing = False
+        self._committing = False               # guardando lo del editor: sin repetir
+        self._muted: list = []                 # atajos callados mientras hay editor
+        self._routers: list = []               # y los que reparten segun el foco
+        self.edit_zones = clean_edit_zones(None)    # que va en cada zona del editor
+        self.edit_zone_widths = list(EDIT_ZONE_WIDTHS)
         self.setWindowTitle("%s %s" % (APP_NAME, VERSION))
         self.resize(1500, 900)
         self.image_exts = supported_exts()
@@ -11454,12 +12158,24 @@ class MainWindow(QMainWindow):
         self.folder_tree.customContextMenuRequested.connect(self.folder_menu)
         self.view.doubleClicked.connect(self.on_grid_double_click)
         self.view.installEventFilter(self)          # 1-9: la nota de lo elegido
+        # al cambiar el ancho, las miniaturas se reajustan para llenarlo
+        self._fit_timer = QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.setInterval(60)
+        self._fit_timer.timeout.connect(self._refit_thumbs)
+        self.view.viewport().installEventFilter(self)
         # el cronometro empieza con un clic o un doble clic en un archivo
         self.view.clicked.connect(lambda i: self.tracker.file_clicked(i.data(PATH_ROLE)))
         self.view.doubleClicked.connect(lambda i: self.tracker.file_clicked(i.data(PATH_ROLE)))
         themed(self.view, css="QListView{background:%(grid)s;} "
                            "QListView::item{color:%(grid_text)s;}")
         self.view.selectionModel().currentChanged.connect(self.on_current_image)
+        # la imagen elegida se puede dibujar ya en la vista previa
+        self._panel_timer = QTimer(self)
+        self._panel_timer.setSingleShot(True)
+        self._panel_timer.setInterval(150)      # pasando rapido con las flechas, no
+        self._panel_timer.timeout.connect(self._sync_panel)
+        self.view.selectionModel().currentChanged.connect(lambda *_: self._panel_timer.start())
         self.view.selectionModel().currentChanged.connect(self.sync_note_panel)
         self.view.selectionModel().currentChanged.connect(
             lambda i, _a: self.tracker.follow(i.data(PATH_ROLE) if i.isValid() else None))
@@ -11478,6 +12194,7 @@ class MainWindow(QMainWindow):
         self.preview.on_reviews_changed = self.set_video_reviews
         self.preview.on_export_review = self.export_video_review
         self.preview.openBig.connect(self.open_viewer_current)
+        self.preview.on_mode_changed = self._sync_panel
         self.preview.hide()
 
         self.center_split = QSplitter(Qt.Orientation.Vertical)
@@ -11881,6 +12598,9 @@ class MainWindow(QMainWindow):
             e.load(pane.note_path() if pane is not None else self.note_target())
 
     def eventFilter(self, obj, e):
+        if e.type() == QEvent.Type.Resize and getattr(self, "view", None) is not None \
+                and obj is self.view.viewport():
+            self._fit_timer.start()
         if obj is getattr(self, "view", None) and e.type() == QEvent.Type.KeyPress:
             mods = e.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
             if mods == Qt.KeyboardModifier.NoModifier and \
@@ -12093,14 +12813,52 @@ class MainWindow(QMainWindow):
                         "edit": self.edits.get(p) if edicion else None})
         return out
 
-    def write_selection_pdf(self, paths: list[str], destino: str, **opciones):
-        """Sin dialogos, para que las pruebas usen este mismo camino."""
+    def selection_pdf_pages(self, paths: list[str], before_after: bool = False,
+                            labels=BEFORE_AFTER_LABELS, con_progreso: bool = False):
+        """(items, images) para write_selection_pdf: cada video se abre en sus
+        fotogramas anotados (o el primero y el ultimo), con el dibujo encima;
+        las imagenes dejan un hueco (None) y salen con su edicion. None si se
+        cancelo la lectura de los videos."""
+        videos = [p for p in dict.fromkeys(paths) if is_video(p)]
+        leidos = self.video_pdf_frames(videos, con_progreso) if videos else {}
+        if leidos is None:
+            return None
+        items, images = [], []
+        for it in self.selection_pdf_items(paths):
+            if it["path"] not in leidos:
+                items.append(it)
+                images.append(None)
+                continue
+            lista, frames = leidos[it["path"]]
+            for k, (a, f) in enumerate(zip(lista, frames)):
+                texto = review_text(a)
+                if k == 0 and (it.get("comment") or "").strip():
+                    texto = it["comment"].strip() + "\n" + texto   # el del video, en la primera
+                items.append(dict(it, comment=texto, edit=None,
+                                  grade=it.get("grade") if k == 0 else None))
+                img = review_page_image(f, a)
+                if before_after and a.get("draw"):
+                    img = before_after_image(review_page_image(f, dict(a, draw=[])), img, labels)
+                images.append(img)
+        return items, images
+
+    def write_selection_pdf(self, paths: list[str], destino: str, con_progreso: bool = False,
+                            **opciones) -> bool:
+        """Sin dialogos (salvo, si se pide, la barra de progreso de los videos),
+        para que las pruebas usen este mismo camino. False si se cancelo."""
+        paginas = self.selection_pdf_pages(paths, opciones.get("before_after", False),
+                                           opciones.get("labels", BEFORE_AFTER_LABELS),
+                                           con_progreso)
+        if paginas is None:
+            return False
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            write_selection_pdf(self.selection_pdf_items(paths), destino,
-                                "DriloBoard \u2014 %s" % self.view_title(), **opciones)
+            write_selection_pdf(paginas[0], destino,
+                                "DriloBoard \u2014 %s" % self.view_title(),
+                                images=paginas[1], **opciones)
         finally:
             QApplication.restoreOverrideCursor()
+        return True
 
     def pdf_options(self, titulo: str, texto: str, paths: list[str], ejemplo: str | None = None):
         """Que va debajo de cada imagen. None si se cancela. Con 'ejemplo' (el
@@ -12153,7 +12911,8 @@ class MainWindow(QMainWindow):
             lay.addWidget(QLabel("<i>None of these files has a grade or a comment.</i>"))
         # la original junto a la editada, para que el alumno vea el cambio
         chk_ba = QCheckBox("The original next to the edited one")
-        editadas = sum(1 for p in paths if not is_empty_edit(self.edits.get(p)))
+        editadas = sum(1 for p in paths if not is_empty_edit(self.edits.get(p))
+                       or any(a.get("draw") for a in self.reviews_of(p)))
         chk_ba.setToolTip("Files with edits or drawings show both, side by side or one above "
                           "the other; the others, as they are")
         chk_ba.setChecked(bool(self.pdf_before_after.get("on")) and editadas > 0)
@@ -12201,9 +12960,12 @@ class MainWindow(QMainWindow):
         if not sel:
             self.statusBar().showMessage("Select the images to export first.", 5000)
             return
-        opciones = self.pdf_options(
-            "Export to PDF", "%d image%s, one per page, with their edits applied."
-            % (len(sel), "" if len(sel) == 1 else "s"), sel)
+        texto = "%d file%s, one image per page, with their edits applied." % (
+            len(sel), "" if len(sel) == 1 else "s")
+        if any(is_video(p) for p in sel):
+            texto += ("\nEach video adds a page per frame you drew on or commented,\n"
+                      "or its first and last frame if it has none.")
+        opciones = self.pdf_options("Export to PDF", texto, sel)
         if opciones is None:
             return
         nombre = safe_file_name(self.view_title())
@@ -12215,7 +12977,8 @@ class MainWindow(QMainWindow):
         if not destino.lower().endswith(".pdf"):
             destino += ".pdf"
         try:
-            self.write_selection_pdf(sel, destino, **opciones)
+            if not self.write_selection_pdf(sel, destino, con_progreso=True, **opciones):
+                return
         except OSError as e:
             QMessageBox.warning(self, APP_NAME, "Could not write the PDF:\n%s" % e)
             return
@@ -12223,7 +12986,7 @@ class MainWindow(QMainWindow):
         self.touch()
         caja = QMessageBox(self)
         caja.setWindowTitle(APP_NAME)
-        caja.setText("%d image%s saved to:\n%s" % (len(sel), "" if len(sel) == 1 else "s", destino))
+        caja.setText("%d file%s saved to:\n%s" % (len(sel), "" if len(sel) == 1 else "s", destino))
         b_abrir = caja.addButton("Open", QMessageBox.ButtonRole.AcceptRole)
         caja.addButton(QMessageBox.StandardButton.Close)
         caja.exec()
@@ -12234,10 +12997,11 @@ class MainWindow(QMainWindow):
                         sufijo: str = "") -> list[tuple[str, str, list[str]]]:
         """[(nombre del PDF, carpeta, imagenes)]: un PDF por alumno.
 
-        Sin 'paths', todo lo que se ve en la rejilla (los videos no van)."""
+        Sin 'paths', todo lo que se ve en la rejilla (los videos, con sus
+        fotogramas anotados o el primero y el ultimo)."""
         if paths is None:
             paths = list(self.model.paths())
-        paths = [p for p in paths if not is_video(p) and p not in self.removed]
+        paths = [p for p in paths if p not in self.removed]
         grupos = folder_groups(paths, self.selected_folders())
         nombres = folder_pdf_names([c for c, _ in grupos], prefijo, sufijo)
         return [(n, c, ps) for n, (c, ps) in zip(nombres, grupos)]
@@ -12251,7 +13015,10 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("PDF %d of %d: %s" % (i + 1, len(plan), nombre))
                 QApplication.processEvents()
                 destino = os.path.join(carpeta, nombre + ".pdf")
-                write_selection_pdf(self.selection_pdf_items(ps), destino, nombre, **opciones)
+                items, images = self.selection_pdf_pages(
+                    ps, opciones.get("before_after", False),
+                    opciones.get("labels", BEFORE_AFTER_LABELS))
+                write_selection_pdf(items, destino, nombre, images=images, **opciones)
                 hechos.append(destino)
         finally:
             QApplication.restoreOverrideCursor()
@@ -12265,14 +13032,14 @@ class MainWindow(QMainWindow):
         plan = self.folder_pdf_plan(sel if len(sel) > 1 else None)
         if not plan:
             QMessageBox.information(
-                self, APP_NAME, "There are no images in view.\n\nChoose the class "
+                self, APP_NAME, "There are no files in view.\n\nChoose the class "
                 "folder (with one subfolder per student) or the students' folders first.")
             return
         n_img = sum(len(ps) for _n, _c, ps in plan)
         muestra = ", ".join(n for n, _c, _p in plan[:4]) + (u", \u2026" if len(plan) > 4 else "")
         opciones = self.pdf_options(
             "One PDF per folder",
-            "%d PDF%s (%s), %d image%s in all.\nEach PDF takes the name of its folder, "
+            "%d PDF%s (%s), %d file%s in all.\nEach PDF takes the name of its folder, "
             "with the prefix and suffix you write below."
             % (len(plan), "" if len(plan) == 1 else "s", muestra, n_img,
                "" if n_img == 1 else "s")
@@ -12854,6 +13621,8 @@ class MainWindow(QMainWindow):
         if terms:
             texto += "  ·  search"
         self.lbl_count.setText(texto)
+        if hasattr(self, "_panel_timer"):
+            self._panel_timer.start()
 
     def set_ui_scale(self, esc: float):
         """Guarda el tamano y reinicia para aplicarlo."""
@@ -12937,12 +13706,44 @@ class MainWindow(QMainWindow):
         self.apply_icon_size(px)
         self.touch()
 
+    THUMB_CELL_EXTRA = 22           # lo que la celda tiene de ancho ademas de la miniatura
+
+    def fitted_icon_size(self, px: int) -> int:
+        """El tamano que llena el ancho de la rejilla sin dejar hueco a la derecha.
+
+        'px' (la barra Size) es el tamano aproximado: con el cabe un numero de
+        columnas, y la miniatura crece o mengua un poco hasta que esas columnas
+        ocupan todo el ancho. El ancho no depende de si hay barra de scroll (se
+        le reserva siempre su sitio): si no, al aparecer y desaparecer la barra
+        las miniaturas cambiarian de tamano sin parar.
+        """
+        v = self.view
+        if v.style().styleHint(QStyle.StyleHint.SH_ScrollBar_Transient, None, v):
+            ancho = v.viewport().width()        # la barra flota encima: no quita sitio
+        else:
+            ancho = v.width() - 2 * v.frameWidth() - \
+                v.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent, None, v)
+        ancho -= 2 * v.spacing()
+        celda = px + self.THUMB_CELL_EXTRA
+        if ancho < celda:
+            return px
+        # las columnas mas cercanas a lo pedido: asi crece o mengua lo menos posible
+        columnas = max(1, round(ancho / celda))
+        return max(32, ancho // columnas - self.THUMB_CELL_EXTRA)
+
     def apply_icon_size(self, px: int):
-        self.model.set_icon_size(px)
-        self.view.setIconSize(QSize(px, px))
+        px = self.fitted_icon_size(px)
         extra = 34 if self.model.names_visible else 10
         extra += 2 * ThumbDelegate.PAD              # el aire del marco de seleccion
-        self.view.setGridSize(QSize(px + 22, px + extra))
+        rejilla = QSize(px + self.THUMB_CELL_EXTRA, px + extra)
+        if px == self.model.icon and rejilla == self.view.gridSize():
+            return
+        self.model.set_icon_size(px)
+        self.view.setIconSize(QSize(px, px))
+        self.view.setGridSize(rejilla)
+
+    def _refit_thumbs(self):
+        self.apply_icon_size(self.slider.value())
 
     def on_names(self, on: bool):
         self.model.set_show_names(on)
@@ -12951,6 +13752,7 @@ class MainWindow(QMainWindow):
 
     def on_preview_toggled(self, on: bool):
         self.preview.setVisible(on)
+        self._sync_panel()                      # sin vista previa no hay donde dibujar
         if on:
             sizes = self.center_split.sizes()
             if sizes[1] == 0:                       # primera vez o panel plegado
@@ -13327,6 +14129,9 @@ class MainWindow(QMainWindow):
         }
 
     def push_undo(self, descripcion: str):
+        # lo dibujado en la vista previa va antes, como su propio paso: si no,
+        # deshacer lo siguiente se lo llevaria por delante
+        self._commit_panel()
         self._undo.append((descripcion, self.snapshot()))
         del self._undo[:-UNDO_LIMIT]
         self._redo.clear()
@@ -13365,6 +14170,7 @@ class MainWindow(QMainWindow):
             self.preview.refresh_marks()
         elif self.preview.path:
             self.preview.show_path(self.preview.path, immediate=True)
+        self._reload_panel_if_stale()
         self.touch()
 
     def reselect(self, paths: set, actual: str | None):
@@ -13383,6 +14189,7 @@ class MainWindow(QMainWindow):
 
     def undo(self):
         self.commit_note()                  # lo recien escrito es lo primero que se deshace
+        self._commit_panel()                # y lo recien dibujado en la vista previa
         if not self._undo:
             self.statusBar().showMessage("Nothing to undo.", 3000)
             return
@@ -13393,6 +14200,7 @@ class MainWindow(QMainWindow):
 
     def redo(self):
         self.commit_note()
+        self._commit_panel()
         if not self._redo:
             self.statusBar().showMessage("Nothing to redo.", 3000)
             return
@@ -13428,49 +14236,70 @@ class MainWindow(QMainWindow):
             self.video_reviews.pop(path, None)
         self.touch()
 
-    def write_video_review(self, path: str, destino: str, con_progreso: bool = True) -> int | None:
-        """El PDF con un fotograma por anotacion. Devuelve cuantos fotogramas
-        no se pudieron leer, o None si se cancelo. Sin dialogos (salvo la
-        barra de progreso), para que las pruebas usen este mismo camino."""
-        lista = self.reviews_of(path)
+    def video_pdf_frames(self, paths: list[str], con_progreso: bool = True
+                         ) -> dict[str, tuple[list[dict], list[QImage]]] | None:
+        """{video: (anotaciones, fotogramas)} con lo que va al PDF de cada uno:
+        sus fotogramas anotados o, sin ninguno, el primero y el ultimo. None si
+        se cancelo. La barra de progreso es lo unico con ventana."""
+        planes = {p: video_pdf_marks(self.reviews_of(p)) for p in paths}
+        total = sum(len(v) for v in planes.values())
         progreso = None
         cancelado = [False]
+        hechos = [0]
         if con_progreso:
             progreso = QProgressDialog("Taking the frames of the video\u2026", "Cancel",
-                                       0, len(lista), self)
+                                       0, total, self)
             progreso.setWindowTitle(APP_NAME)
             progreso.setWindowModality(Qt.WindowModality.WindowModal)
             progreso.setMinimumDuration(0)
             progreso.setValue(0)
 
-        def avanza(hechos: int, total: int):
+        def avanza(n: int, _total: int):
             if progreso is None:
                 return True
-            progreso.setValue(hechos)
+            progreso.setValue(hechos[0] + n)
             if progreso.wasCanceled():
                 cancelado[0] = True
                 return False
             return True
+        out = {}
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            frames = FrameGrabber(path, self).grab([a["ms"] for a in lista], avanza)
-            if not cancelado[0]:
-                write_review_pdf(path, lista, frames, destino)
+            for p, lista in planes.items():
+                g = FrameGrabber(p, self)
+                frames = g.grab([a["ms"] for a in lista], avanza)
+                tiempos, frame_us = list(g.times_ms), g.frame_us
+                g.deleteLater()
+                if cancelado[0]:
+                    return None
+                hechos[0] += len(lista)
+                out[p] = settle_video_marks(lista, frames, tiempos, frame_us)
         finally:
             QApplication.restoreOverrideCursor()
             if progreso is not None:
                 progreso.close()
-        return None if cancelado[0] else sum(1 for f in frames if f.isNull())
+        return out
+
+    def write_video_review(self, path: str, destino: str, con_progreso: bool = True) -> int | None:
+        """El PDF con un fotograma por anotacion (o el primero y el ultimo, si
+        no tiene). Devuelve cuantos fotogramas no se pudieron leer, o None si
+        se cancelo. Sin dialogos (salvo la barra de progreso), para que las
+        pruebas usen este mismo camino."""
+        leidos = self.video_pdf_frames([path], con_progreso)
+        if leidos is None:
+            return None
+        lista, frames = leidos[path]
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            write_review_pdf(path, lista, frames, destino)
+        finally:
+            QApplication.restoreOverrideCursor()
+        return sum(1 for f in frames if f.isNull())
 
     def export_video_review(self, path: str):
         """El boton Export PDF del modo anotar."""
         self.commit_note()
         lista = self.reviews_of(path)
-        if not lista:
-            QMessageBox.information(
-                self, APP_NAME, "This video has no comments or drawings yet.\n\n"
-                "Press Annotate, pause on a frame and draw or write on it.")
-            return
         base = os.path.splitext(shown_name(path) or "video")[0]
         destino, _ = QFileDialog.getSaveFileName(
             self, "Export comments of the video to PDF",
@@ -13492,8 +14321,12 @@ class MainWindow(QMainWindow):
         self.touch()
         caja = QMessageBox(self)
         caja.setWindowTitle(APP_NAME)
-        caja.setText("%d comment%s saved to:\n%s" % (len(lista), "" if len(lista) == 1 else "s",
-                                                    destino))
+        if lista:
+            caja.setText("%d comment%s saved to:\n%s" % (
+                len(lista), "" if len(lista) == 1 else "s", destino))
+        else:
+            caja.setText("The video has no comments or drawings: its first and last frame "
+                         "saved to:\n%s" % destino)
         if falladas:
             caja.setInformativeText("%d frame%s could not be read from the video: its page has "
                                     "a grey picture with the drawing." % (
@@ -13545,6 +14378,7 @@ class MainWindow(QMainWindow):
                                  self.preview.sld_opacity.value())
         elif self.preview.path in paths:
             self.preview.show_path(self.preview.path, immediate=True)
+        self._reload_panel_if_stale(paths)
         self.touch()
 
     def edit_current(self):
@@ -13556,24 +14390,200 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "Videos can be played, sorted and exported, but not edited.", 5000)
             return
-        self.edit_path(path)
+        self.edit_somewhere(path)
 
-    def edit_path(self, path: str):
+    def edit_somewhere(self, path: str):
+        """La ventana propia del editor. Lo que llevaba la vista previa se
+        guarda antes, para que la ventana empiece desde ahi."""
+        if self._panel is not None and self._panel.path == path:
+            self._commit_panel()
+        self.edit_path(path)
+        self._sync_panel()                      # la misma imagen no se edita en dos sitios
+
+    def edit_path(self, path: str, receta: dict | None = None):
         """Abre el editor en su propia ventana, sin bloquear la principal: se
-        puede minimizar esta y trabajar solo en el editor (iPad, proyector)."""
+        puede minimizar esta y trabajar solo en el editor (iPad, proyector).
+        'receta': lo que ya se llevaba hecho sin guardar (viene del modo editar)."""
         abierto = self._editors.get(path)
         if abierto is not None:                 # ya esta abierto: se trae delante
             abierto.showNormal()
             abierto.raise_()
             abierto.activateWindow()
             return
-        d = EditorDialog(path, self.edits.get(path), self, independiente=True)
+        d = EditorDialog(path, receta if receta is not None else self.edits.get(path),
+                         self, independiente=True)
+        if receta is not None:                  # lo traido aun no esta guardado
+            d._sig_inicial = edit_signature(
+                normalize_layers(dict(empty_edit(), **(self.edits.get(path) or {}))))
         d.setScreen(self.screen())
         self._editors[path] = d
         d.finished.connect(lambda r, d=d, path=path: self._editor_closed(path, d, r))
         d.show()
         d.raise_()
         d.activateWindow()
+
+    # ---------------- el editor en la vista previa ----------------------- #
+    def _panel_target(self) -> str | None:
+        """La imagen que se puede dibujar en la vista previa ahora, o None."""
+        if not self.chk_preview.isChecked() or self.preview.comparing or self._closing:
+            return None
+        path = self.current_image_path()
+        if not path or is_video(path) or is_gif(path) or path in self._editors:
+            return None
+        return path if os.path.isfile(path) else None
+
+    def _sync_panel(self):
+        """Pone en la vista previa el editor de la imagen elegida, o lo quita
+        (un video, un GIF, al comparar, sin vista previa). Lo hecho en la
+        imagen anterior se guarda al irse de ella."""
+        self._panel_timer.stop()
+        quiero = self._panel_target()
+        d = self._panel
+        if d is not None and d.path == quiero:
+            self.preview.show_editor(True)      # se fue y volvio en menos de la espera
+            self._reload_panel_if_stale()
+            return
+        self._drop_panel(guardar=True)
+        if quiero:
+            self._make_panel(quiero)
+
+    def _make_panel(self, path: str):
+        d = EditorDialog(path, self.edits.get(path), self, incrustado=True,
+                         zonas=self.edit_zones, anchos=self.edit_zone_widths)
+        d.zones_changed.connect(self._on_zones_changed)
+        d.pop_out.connect(lambda p=path: self.edit_somewhere(p))
+        d.lienzo.splitterMoved.connect(lambda *_: self._remember_zone_widths())
+        d.view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._panel = d
+        self.preview.set_editor(d)
+        self._route_shortcuts(d)
+
+    def _drop_panel(self, guardar: bool):
+        d = self._panel
+        if d is None:
+            return
+        if guardar:
+            self._commit_panel()
+        self._remember_zone_widths()
+        self._panel = None
+        self._unroute_shortcuts()
+        foco = QApplication.focusWidget()
+        if foco is not None and (foco is d or d.isAncestorOf(foco)
+                                 or d.zona_abajo.isAncestorOf(foco)):
+            self.view.setFocus()                # que el foco no se vaya con el editor
+        self.preview.clear_editor()
+        d.dispose()
+
+    def _commit_panel(self):
+        """Lo dibujado en la vista previa pasa a la biblioteca: un paso de deshacer."""
+        d = self._panel
+        if d is None or self._committing or not d.is_dirty():
+            return
+        self._committing = True
+        try:
+            d._sig_inicial = edit_signature(d.edit)     # lo de la biblioteca, desde ya
+            self.set_edit(d.path, copy.deepcopy(d.edit))
+        finally:
+            self._committing = False
+
+    def _reload_panel_if_stale(self, paths=None):
+        """La receta de la imagen cambio por otro lado (deshacer, girar desde
+        las miniaturas, importar): el editor vuelve a empezar desde ella."""
+        d = self._panel
+        if d is None or self._committing or (paths is not None and d.path not in paths):
+            return
+        # lo del editor ya estaba guardado: cualquier cambio en la biblioteca
+        # pasa antes por push_undo, que lo guarda
+        if edit_signature(self.edits.get(d.path)) != d._sig_inicial:
+            self._drop_panel(guardar=False)
+            self._sync_panel()
+
+    def _on_zones_changed(self, zonas: dict):
+        self.edit_zones = clean_edit_zones(zonas)
+        self.touch()
+
+    def _remember_zone_widths(self):
+        d = self._panel
+        if d is not None and d.isVisible():
+            anchos = d.zone_widths()
+            if all(a >= 0 for a in anchos):
+                self.edit_zone_widths = anchos
+                self.touch()
+
+    def _route_shortcuts(self, ed):
+        """El editor y la ventana tienen atajos iguales (Ctrl+Z, 0, Ctrl+E...) y
+        dos iguales en la misma ventana se anulan. Se callan los dos y uno nuevo
+        reparte: si estas en el editor, al editor; si no (miniaturas, carpetas),
+        a la biblioteca, como siempre. Un atajo estandar lleva varias teclas
+        (rehacer: Ctrl+Y y Cmd+Mayus+Z): cuentan todas."""
+        self._unroute_shortcuts()
+
+        def del_editor(obj) -> bool:
+            p = obj.parent()
+            return isinstance(p, QWidget) and (p is ed or ed.isAncestorOf(p)
+                                               or ed.zona_abajo.isAncestorOf(p))
+
+        def teclas(obj) -> set:
+            lista = obj.keys() if isinstance(obj, QShortcut) else obj.shortcuts()
+            return {k.toString() for k in lista if not k.isEmpty()}
+
+        propios = [sc for sc in ed.findChildren(QShortcut) if sc.isEnabled()]
+        mios = [sc for sc in self.findChildren(QShortcut)
+                if sc.isEnabled() and not del_editor(sc)]
+        acciones = [a for a in self.findChildren(QAction)
+                    if a.shortcuts() and not del_editor(a)]
+        de_ed = set().union(*(teclas(sc) for sc in propios)) if propios else set()
+        de_ve = set().union(*(teclas(o) for o in mios + acciones)) if mios or acciones \
+            else set()
+        choque = de_ed & de_ve
+        if not choque:
+            return
+        p_mudos = [sc for sc in propios if teclas(sc) & choque]
+        m_mudos = [sc for sc in mios if teclas(sc) & choque]
+        a_mudas = [a for a in acciones if teclas(a) & choque]
+        # al callar un atajo se callan todas sus teclas: todas necesitan reparto
+        todas = set().union(*(teclas(o) for o in p_mudos + m_mudos + a_mudas))
+        for sc in p_mudos + m_mudos:
+            sc.setEnabled(False)
+            self._muted.append((sc, None))
+        for a in a_mudas:
+            self._muted.append((a, a.shortcuts()))
+            a.setShortcuts([])
+        for k in sorted(todas):
+            r = QShortcut(QKeySequence(k), self)
+            r.activated.connect(
+                lambda e=ed, p=[sc for sc in p_mudos if k in teclas(sc)],
+                m=[sc for sc in m_mudos if k in teclas(sc)],
+                a=[x for x in a_mudas if k in teclas(x)]: self._dispatch(e, p, m, a))
+            self._routers.append(r)
+
+    def _dispatch(self, ed, propios, mios, acciones):
+        foco = QApplication.focusWidget()
+        en_editor = foco is not None and (foco is ed or ed.isAncestorOf(foco)
+                                          or ed.zona_abajo.isAncestorOf(foco))
+        if propios and (en_editor or not (mios or acciones)):
+            for sc in propios:
+                sc.activated.emit()
+            return
+        for sc in mios:
+            sc.activated.emit()
+        for a in acciones:
+            a.trigger()
+
+    def _unroute_shortcuts(self):
+        for r in self._routers:
+            r.setEnabled(False)
+            r.deleteLater()
+        self._routers = []
+        for obj, atajos in self._muted:
+            try:
+                if atajos is None:
+                    obj.setEnabled(True)
+                else:
+                    obj.setShortcuts(atajos)
+            except RuntimeError:                # murio con su editor
+                pass
+        self._muted = []
 
     def _editor_closed(self, path: str, d, resultado: int):
         if self._editors.get(path) is d:
@@ -13583,6 +14593,8 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "Edit saved (the original file was not touched).", 6000)
         d.deleteLater()
+        if not self._closing:
+            self._sync_panel()
 
     def open_adjust(self):
         sel = [p for p in self.selected_images() if not is_video(p)]
@@ -13785,7 +14797,7 @@ class MainWindow(QMainWindow):
         if not path or is_video(path) or is_gif(path):
             self.open_viewer(index)
             return
-        self.edit_path(path)
+        self.edit_somewhere(path)
 
     def open_viewer(self, index):
         paths = self.model.paths()
@@ -13936,6 +14948,8 @@ class MainWindow(QMainWindow):
             "track_time": self.tracker.enabled,
             "show_timer": self.show_timer,
             "times": self.times,
+            "edit_zones": self.edit_zones,
+            "edit_zone_widths": self.edit_zone_widths,
         }
         try:
             if not self._backed_up and STATE_FILE.exists():
@@ -14012,6 +15026,11 @@ class MainWindow(QMainWindow):
                 rotulos = list(BEFORE_AFTER_LABELS)
             self.pdf_before_after = {"on": bool(ba.get("on")), "labels": rotulos}
         self.times = canon_keys(clean_times(data.get("times")), lambda a, b: a + b)
+        self.edit_zones = clean_edit_zones(data.get("edit_zones"))
+        anchos = data.get("edit_zone_widths")
+        if isinstance(anchos, list) and len(anchos) == 2 and \
+                all(isinstance(a, int) and 0 <= a <= 2000 for a in anchos):
+            self.edit_zone_widths = anchos
         self.set_show_timer(bool(data.get("show_timer", True)))
         self.set_track_time(bool(data.get("track_time", False)))
         if isinstance(data.get("bank_window"), dict):
@@ -14097,6 +15116,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         self._closing = True
+        self._drop_panel(guardar=True)              # lo dibujado en la previa, guardado
         for d in list(self._editors.values()):      # los editores abiertos se van con ella
             # lo dibujado en ellos se guarda: es una receta, se puede deshacer
             if d.is_dirty():

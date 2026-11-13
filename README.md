@@ -56,7 +56,9 @@ originals alone. **Export ▸ PDF** puts the selected images in a PDF, one per
 page, with the edits applied and, if you tick them, the file name, the grade
 and the comments underneath. **Export ▸ One PDF per folder** makes a PDF for
 each student folder in view, named after the folder. Both can put **the original
-next to the edited image**, so the student sees the change.
+next to the edited image**, so the student sees the change. Videos go in too: one
+page per frame you drew on or commented, with the drawing on top and the comment
+below, or the **first and last frame** if the video has no annotations.
 
 **Comment bank**: your ready-made phrases in two columns of coloured cards —
 click one and it goes into the comment; a `{}` asks you for a piece of data.
@@ -85,8 +87,9 @@ subfolders are left out. Order them by hand or A→Z / Z→A. Files are sorted
 naturally, so `plate2` comes before `plate10`.
 
 **Thumbnails and preview (centre)**
-Adjustable size (64–420 px), generated in background threads with an on-disk
-cache. *Preview below* splits the column and shows the selected image large
+Adjustable size (64–420 px) that fits the width: the thumbnails grow or shrink a
+little so the columns fill the window, also when you resize it. Generated in
+background threads with an on-disk cache. *Preview below* splits the column and shows the selected image large
 underneath at full resolution — arrow through the thumbnails and the preview
 follows. Double-click opens a large window with zoom, pan and fullscreen.
 Selected thumbnails get a clear **blue frame**.
@@ -151,7 +154,19 @@ move any stroke with the mouse. Strokes have **opacity and hardness** (soft, air
 edges), a **colour layer** tints the whole image so your marks stand out, and
 **composition guides** (thirds, centre, diagonals, golden ratio, dynamic
 symmetry, golden triangles, golden spiral) sit over the final frame.
-Double-click an image to edit it. Right-click rotates or
+**Extend canvas** adds a set number of pixels on one side (or all four) in the
+margin colour, and you can draw on the new area.
+**Draw straight on the preview.** With *Preview below* on, the chosen image is
+editable right there: drawing tools on its left, layers on its right, image
+adjustments, zoom and Mirror in the bar underneath. Right-click any of those
+areas for a checklist of every control and tick what you want in it; the layout
+is remembered. Size, opacity and hardness are Krita-style bars (drag, or
+double-click to type; `[` `]` change the size and `{` `}` the hardness) with a
+brush ring over the image, and the colour is one square that opens a palette.
+Your work is saved when you move to another file, as one undo
+step, and `Ctrl+Z` undoes in the editor while you work in it and in the library
+when you are in the thumbnails. Double-click (or `E`) still opens the editor in
+a window of its own. Right-click rotates or
 flips every selected image at once.
 
 ![The editor, with a plate straightened by a few degrees and annotated](docs/editor.png)
@@ -178,7 +193,8 @@ them without annotating. Enter saves the comment (Shift+Enter is a new line),
 changing frame saves it too, and it all lives in the library: it exports and
 imports with it and undoes with `Ctrl+Z`. **Export PDF** writes one page per
 commented frame: a picture of that frame with your drawing on top, the video name
-and the comment, time stamp first.
+and the comment, time stamp first. A video with no annotations exports its first
+and last frame.
 
 ![A video on a keyframe, with keyframes and a loop fragment on the time bar and its grade below, in the light theme](docs/video.png)
 

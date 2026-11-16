@@ -4074,6 +4074,7 @@ class GifPlayer(QObject):
         self.go(self.index + delta)
 
 
+NOTE_FONT_RANGE = (8, 40)             # tamano de la letra de la caja del comentario (pt)
 NOTE_HEIGHTS = {False: 180, True: 80}   # alto de la caja del comentario (columna / visor)
 NOTE_HEIGHT_RANGE = (40, 900)
 
@@ -4465,6 +4466,20 @@ class NoteEditor(QWidget):
         self.deepl.translated.connect(self._translated)
         self.deepl.failed.connect(self._translate_failed)
         self._translating = None            # (archivo, texto, seleccion o None) mientras espera
+        self.b_font_up = QPushButton("A+")
+        self.b_font_down = QPushButton("A\u2212")
+        self.b_para = QPushButton("\u00b6" if compact else "\u00b6  Paragraph")
+        self.b_font_up.setToolTip("Bigger text in the comment boxes (Ctrl + mouse wheel too)")
+        self.b_font_down.setToolTip("Smaller text in the comment boxes")
+        self.b_para.setToolTip("Add a paragraph: a blank line where the cursor is")
+        self.b_font_up.clicked.connect(lambda: host.bump_note_font(1))
+        self.b_font_down.clicked.connect(lambda: host.bump_note_font(-1))
+        self.b_para.clicked.connect(self.add_paragraph)
+        for b in (self.b_font_up, self.b_font_down, self.b_para):
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)    # la caja no pierde el cursor
+        for b in (self.b_font_up, self.b_font_down):
+            b.setMinimumWidth(32)
+        self.txt.viewport().installEventFilter(self)
         self.b_bank = QPushButton("" if compact else "  Phrases")
         themed(self.b_bank, icon="bank")
         self.b_bank.setToolTip("Comment bank: ready-made phrases to add to the comment (%s)"
@@ -4504,6 +4519,12 @@ class NoteEditor(QWidget):
             col.addWidget(self.b_copy, 1, 0)
             col.addWidget(self.b_clear, 1, 1)
             lay.addLayout(col)
+            col3 = QGridLayout()
+            col3.setSpacing(2)
+            col3.addWidget(self.b_font_up, 0, 0)
+            col3.addWidget(self.b_font_down, 0, 1)
+            col3.addWidget(self.b_para, 1, 0, 1, 2)
+            lay.addLayout(col3)
             self.lbl_file.hide()
         else:
             lay = QVBoxLayout(self)
@@ -4522,6 +4543,9 @@ class NoteEditor(QWidget):
             fila.addWidget(self.b_bank)
             fila.addWidget(self.b_translate)
             fila.addWidget(self.b_copy)
+            fila.addWidget(self.b_para)
+            fila.addWidget(self.b_font_down)
+            fila.addWidget(self.b_font_up)
             lay.addLayout(fila)
 
         # se guarda al dejar de escribir un momento: un paso de deshacer por
@@ -4531,7 +4555,31 @@ class NoteEditor(QWidget):
         self.timer.setInterval(800)
         self.timer.timeout.connect(self.commit)
         host.note_editors.append(self)
+        self.apply_font(host.note_font_pt())
         self.load(None)
+
+    def apply_font(self, pt: int):
+        if pt > 0:
+            f = QFont(self.txt.font())
+            f.setPointSize(pt)
+            self.txt.setFont(f)
+
+    def add_paragraph(self):
+        """Un parrafo nuevo: una linea en blanco donde esta el cursor."""
+        if not self.txt.isEnabled():
+            return
+        c = self.txt.textCursor()
+        antes = self.txt.toPlainText()[:c.position()]
+        if not antes:
+            pass
+        elif antes.endswith("\n\n"):
+            pass
+        elif antes.endswith("\n"):
+            c.insertText("\n")
+        else:
+            c.insertText("\n\n")
+        self.txt.setTextCursor(c)
+        self.txt.setFocus()
 
     def load(self, path: str | None):
         """Ensena lo guardado de 'path', sin guardar nada."""
@@ -4734,6 +4782,11 @@ class NoteEditor(QWidget):
     def eventFilter(self, obj, e):
         if e.type() == QEvent.Type.FocusIn and hasattr(self.host, "note_focused"):
             self.host.note_focused(self)
+        if (e.type() == QEvent.Type.Wheel and obj is self.txt.viewport()
+                and e.modifiers() & Qt.KeyboardModifier.ControlModifier
+                and hasattr(self.host, "bump_note_font")):
+            self.host.bump_note_font(1 if e.angleDelta().y() > 0 else -1)
+            return True
         return False
 
     def insert_text(self, texto: str) -> bool:
@@ -11952,6 +12005,7 @@ class MainWindow(QMainWindow):
         self.folders_auto: set[str] = set()          # carpetas que ya se marcaron solas una vez
         self.video_reviews: dict[str, list[dict]] = {}   # ruta de video -> anotaciones
         self.note_editors: list = []                 # los editores de notas abiertos
+        self.note_font = 0                           # pt de la letra del comentario; 0: la de siempre
         self.note_heights = dict(NOTE_HEIGHTS)       # alto de la caja del comentario
         self.pdf_before_after = {"on": False, "labels": list(BEFORE_AFTER_LABELS)}
         self.pdf_affixes = ["", ""]                  # prefijo y sufijo de los PDF por alumno
@@ -12600,6 +12654,22 @@ class MainWindow(QMainWindow):
         g = w.geometry()
         return {"visible": w.isVisible(), "geometry": [g.x(), g.y(), g.width(), g.height()],
                 "on_top": w.chk_top.isChecked()}
+
+    def note_font_pt(self) -> int:
+        return getattr(self, "note_font", 0)
+
+    def set_note_font(self, pt: int, guardar: bool = True):
+        lo, hi = NOTE_FONT_RANGE
+        self.note_font = max(lo, min(hi, int(pt)))
+        for e in self.live_note_editors():
+            e.apply_font(self.note_font)
+        if guardar:
+            self.touch()
+
+    def bump_note_font(self, paso: int):
+        """Mas grande o mas pequena, en todas las cajas de comentario."""
+        actual = self.note_font or int(round(QApplication.font().pointSizeF())) or 13
+        self.set_note_font(actual + paso)
 
     def note_height(self, compact: bool) -> int:
         return getattr(self, "note_heights", NOTE_HEIGHTS)[bool(compact)]
@@ -14984,6 +15054,7 @@ class MainWindow(QMainWindow):
             "show_notes": self.show_notes,
             "preview_notes": self.preview_notes,
             "viewer_notes": self.viewer_notes,
+            "note_font": self.note_font,
             "note_height": self.note_heights[False],
             "note_height_compact": self.note_heights[True],
             "bank_window": self.bank_state(),
@@ -15084,6 +15155,8 @@ class MainWindow(QMainWindow):
             self._bank_state = data["bank_window"]
             if self._bank_state.get("visible"):
                 QTimer.singleShot(300, self.show_bank)
+        if isinstance(data.get("note_font"), (int, float)) and data["note_font"] > 0:
+            self.set_note_font(int(data["note_font"]), guardar=False)
         for compacta, clave in ((False, "note_height"), (True, "note_height_compact")):
             h = data.get(clave)
             if isinstance(h, (int, float)):

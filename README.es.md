@@ -189,7 +189,9 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
     para moverse (también en pausa, se ve el fotograma), tiempo y volumen. En
     el visor grande, `Espacio` reproduce y pausa. También **un clic sobre el
     vídeo** lo reproduce o lo pausa, y en el visor grande deja esa ventana como
-    la activa, así que `Espacio` funciona justo después de pinchar.
+    la activa, así que `Espacio` funciona justo después de pinchar. Un clic en **cualquier punto
+    de la barra de tiempo** (no solo en el círculo) salta ahí y reproduce desde ese
+    punto; si arrastras tras el clic, sigues moviéndote.
   - Se clasifican en categorías igual que las imágenes, y *Export…* los copia
     tal cual. El editor y la comparación A/B son solo para imágenes: con un
     vídeo avisan en la barra de estado.

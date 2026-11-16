@@ -180,7 +180,8 @@ in the preview and the large window, opening paused so browsing stays silent,
 and they go into categories and export like images. The editor and the A/B
 comparison stay image-only.
 **Click the video** to play or pause it; in the large window that also makes it the
-active window, so `Space` works right after the click.
+active window, so `Space` works right after the click. Click **anywhere on the time bar** (not
+only on its handle) to play from that point; dragging after the click keeps scrubbing.
 **Loop** the whole video, or just a fragment marked with `I` and `O`.
 Step **frame by frame** and set **keyframes** on the frames that matter: they
 show as amber diamonds on the time bar, jump from one to the next, are saved

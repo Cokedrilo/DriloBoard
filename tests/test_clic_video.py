@@ -68,5 +68,22 @@ QTest.keyClick(v, Qt.Key.Key_Space)
 assert espera(lambda: not p.is_playing()), "Espacio deberia pausar"
 QTest.keyClick(v, Qt.Key.Key_Space)
 assert espera(lambda: p.is_playing()), "Espacio deberia reproducir"
-v.close()
+
+print("4. CLIC EN CUALQUIER PUNTO DE LA LINEA DE TIEMPO")
+p.toggle_play()
+assert espera(lambda: not p.is_playing())
+sl = p.sld_pos
+assert sl.maximum() > 0
+x = int(sl.width() * 0.5)
+y = sl.height() // 2
+QTest.mouseClick(sl, Qt.MouseButton.LeftButton, pos=QPoint(x, y))
+assert espera(lambda: p.is_playing()), "deberia reproducir desde ahi"
+assert p.player.position() > sl.maximum() * 0.3, p.player.position()
+print("   clic lejos del tirador: salta y reproduce")
+p.toggle_play()
+assert espera(lambda: not p.is_playing())
 print("\nCLIC VIDEO OK")
+# cerrar tras un salto y reproducir cuelga el reproductor sin pantalla (tambien
+# sin esta funcion): se sale sin cerrar
+sys.stdout.flush()
+os._exit(0)

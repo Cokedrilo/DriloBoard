@@ -3534,10 +3534,14 @@ class PreviewTask(QRunnable):
 
 
 class MarkSlider(QSlider):
-    """Barra de tiempo que ensena encima los fotogramas clave."""
+    """Barra de tiempo que ensena encima los fotogramas clave. Un clic en
+    cualquier punto va alli (no solo sobre el tirador) y se puede seguir
+    arrastrando; al soltar avisa con jumped."""
+    jumped = Signal()
 
     def __init__(self, parent=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
+        self._jump = False
         self.marks: list[int] = []          # ms
         self.review_marks: list[int] = []   # ms de los comentarios y dibujos
         self.loop_range = None              # (desde, hasta) en ms, o None
@@ -3555,6 +3559,50 @@ class MarkSlider(QSlider):
     def set_loop_range(self, rango):
         self.loop_range = rango
         self.update()
+
+    def _value_at(self, x: float) -> int:
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        estilo = self.style()
+        surco = estilo.subControlRect(QStyle.ComplexControl.CC_Slider, opt,
+                                      QStyle.SubControl.SC_SliderGroove, self)
+        tirador = estilo.subControlRect(QStyle.ComplexControl.CC_Slider, opt,
+                                        QStyle.SubControl.SC_SliderHandle, self)
+        recorrido = max(1, surco.width() - tirador.width())
+        return QStyle.sliderValueFromPosition(
+            self.minimum(), max(self.minimum(), self.maximum()),
+            int(round(x - surco.left() - tirador.width() / 2)), recorrido)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self.maximum() > self.minimum():
+            opt = QStyleOptionSlider()
+            self.initStyleOption(opt)
+            tirador = self.style().subControlRect(
+                QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderHandle, self)
+            if not tirador.contains(e.position().toPoint()):
+                self._jump = True
+                self.setSliderDown(True)
+                self.setSliderPosition(self._value_at(e.position().x()))
+                e.accept()
+                return
+        self._jump = False
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._jump and self.isSliderDown():
+            self.setSliderPosition(self._value_at(e.position().x()))
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self._jump and e.button() == Qt.MouseButton.LeftButton:
+            self._jump = False
+            self.setSliderDown(False)
+            e.accept()
+            self.jumped.emit()
+            return
+        super().mouseReleaseEvent(e)
 
     def mark_x(self, ms: int) -> float:
         """Donde cae un tiempo, en pixeles: igual que el tirador del estilo."""
@@ -6597,10 +6645,11 @@ class PreviewPane(QWidget):
         self.b_frame_next = boton("frame_next", lambda: self.step_frame(1))
         self.b_key_next = boton("key_next", lambda: self.jump_keyframe(1))
         self.sld_pos = MarkSlider()
-        self.sld_pos.setToolTip("Drag to move through the video. "
+        self.sld_pos.setToolTip("Click anywhere to play from there, or drag to move through the video. "
                                 "Keyframes are marked above the bar.")
         self.sld_pos.sliderMoved.connect(self._on_seek)
         self.sld_pos.valueChanged.connect(self._on_seek_click)
+        self.sld_pos.jumped.connect(self._on_seek_jumped)
         vid_col.addWidget(self.sld_pos)
         vid_col.addLayout(vid_lay)
         self.lbl_time = QLabel("0:00 / 0:00")
@@ -7730,6 +7779,12 @@ class PreviewPane(QWidget):
         self._frame_start_us = ms * 1000        # provisional: el fotograma lo afina
         if self.player is not None:
             self.player.setPosition(ms)         # tambien en pausa: se ve el fotograma
+
+    def _on_seek_jumped(self):
+        """Clic en la barra, lejos del tirador: va alli y reproduce desde ese punto."""
+        if self.showing_video and self.player is not None and not self.is_playing():
+            self._want_us = None
+            self.player.play()
 
     def _on_seek_click(self, ms: int):
         if not self.sld_pos.isSliderDown():     # clic o flechas sobre la barra

@@ -61,7 +61,8 @@ page per frame you drew on or commented, with the drawing on top and the comment
 below, or the **first and last frame** if the video has no annotations.
 
 **Comment bank**: your ready-made phrases in two columns of coloured cards —
-click one and it goes into the comment; a `{}` asks you for a piece of data.
+click one and it goes into the comment, followed by a line break so the next one
+starts below; a `{}` asks you for a piece of data.
 Several banks, import / export as .json (the files of Feedback 3000 open as they are).
 
 **Translate to English** (optional): the *Translate to EN* button under a comment sends it
@@ -194,7 +195,7 @@ with the library and undo with `Ctrl+Z`. Every button shows its shortcut when
 you hover over it.
 
 **Annotate a video, like SyncSketch.** Press **Annotate** next to the volume,
-pause on a frame and draw on it (pencil, arrow, rectangle, ellipse, text — five
+pause on a frame and draw on it (pencil, straight line, arrow, rectangle, ellipse, text — five
 colours and thicknesses) and write a comment. The time stamp stays in front of
 the comment, `[0:03.3 · frame 50] Check the arc`. A pink bubble on the time bar
 marks every commented frame and the ◀ ▶ buttons jump between them; when you stop

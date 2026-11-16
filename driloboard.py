@@ -2231,9 +2231,17 @@ def clean_video_marks(crudo) -> dict[str, list[int]]:
 # --- anotaciones sobre un video (como en SyncSketch): en un fotograma, un
 # comentario y/o un dibujo. Cada una es {ms, frame, w, h, comment, draw}; los
 # puntos del dibujo estan en pixeles del video (w x h, tal como se veia).
-REVIEW_TOOLS = ("trazo", "flecha", "rect", "elipse", "texto")
+REVIEW_TOOLS = ("trazo", "linea", "flecha", "rect", "elipse", "texto")
 REVIEW_COLORS = ("#e6542f", "#f0a500", "#3fa34d", "#2d8fd5", "#ffffff")
 REVIEW_PEN_LEVELS = 5                # grosores de la barra: 1 a 5
+
+
+def snap_45(a: QPointF, b: QPointF) -> QPointF:
+    """El final de una recta desde a, girado al multiplo de 45 grados mas cercano."""
+    dx, dy = b.x() - a.x(), b.y() - a.y()
+    largo = math.hypot(dx, dy)
+    ang = round(math.atan2(dy, dx) / (math.pi / 4)) * (math.pi / 4)
+    return QPointF(a.x() + math.cos(ang) * largo, a.y() + math.sin(ang) * largo)
 
 
 def review_pen(nivel: int, alto: float) -> float:
@@ -3731,6 +3739,9 @@ class ReviewOverlay(QGraphicsItem):
             if math.hypot(p.x() - pts[-1][0], p.y() - pts[-1][1]) >= max(1.0, self.pen() / 3):
                 pts.append([p.x(), p.y()])
         else:
+            if (self.live["tipo"] in ("linea", "flecha")
+                    and e.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+                p = self._clamp(snap_45(QPointF(*pts[0]), p))
             self.live["puntos"] = [pts[0], [p.x(), p.y()]]
         self.update()
 
@@ -3806,6 +3817,7 @@ class ReviewBar(QWidget):
 
     TOOLS = (("move", None, "Hand: no drawing, just look and pan"),
              ("pencil", "trazo", "Pencil: draw freehand"),
+             ("line", "linea", "Straight line (hold Shift for 45\u00b0 steps)"),
              ("arrow", "flecha", "Arrow"),
              ("rect", "rect", "Rectangle"),
              ("ellipse", "elipse", "Ellipse"),
@@ -4830,7 +4842,9 @@ class NoteEditor(QWidget):
         return False
 
     def insert_text(self, texto: str) -> bool:
-        """Mete una frase donde esta el cursor, con un espacio de separacion."""
+        """Mete una frase donde esta el cursor y salta a la linea siguiente,
+        para que la proxima frase empiece debajo."""
+        texto = (texto or "").rstrip(" \t\n")
         if not self.path or not texto:
             return False
         c = self.txt.textCursor()
@@ -4839,9 +4853,9 @@ class NoteEditor(QWidget):
         despues = doc[c.position()] if c.position() < len(doc) else ""
         if antes and not antes.isspace() and not texto[:1].isspace():
             texto = " " + texto
-        if not texto[-1:].isspace() and not despues.isspace():   # "".isspace() es False
-            texto += " "
-        c.insertText(texto)
+        c.insertText(texto if despues == "\n" else texto + "\n")
+        if despues == "\n":                    # ya habia un salto: se pasa por encima
+            c.movePosition(QTextCursor.MoveOperation.NextCharacter)
         self.txt.setTextCursor(c)
         self.txt.ensureCursorVisible()
         return True
@@ -11512,7 +11526,8 @@ the comment box to make it taller or shorter (double-click it for the usual size
 <li><b>Comment bank</b> (<i>Phrases</i> under the comment, <b>[[bank]]</b>, or
 <i>View ▸ Comment bank</i>): your ready-made phrases, as in Feedback 3000, in two
 columns of coloured cards with a title and a category. <b>Click a card</b> and its text
-goes into the comment where the cursor is (a double click puts it in once; the bank says where it went); a <b>{}</b> in a phrase asks you for that piece
+goes into the comment where the cursor is, followed by a line break so the next phrase
+starts below (a double click puts it in once; the bank says where it went); a <b>{}</b> in a phrase asks you for that piece
 of data (a shot number, a date) when you use it. <i>Paragraph</i> starts a new line.
 Filter each column by category or search it; drag cards to reorder them or to move them
 to the other column; the pencil edits a card, the bin deletes it, and ticking several
@@ -11770,7 +11785,8 @@ fragment turns blue on the time bar and playback goes round it.
 <b>[[loop_clear]]</b> clears the fragment. The loop button stays on from one
 video to the next; the fragment belongs to the video you set it on.</li>
 <li><b>Annotate</b> (button next to the volume) works like SyncSketch: pause on a frame,
-draw on it (pencil, arrow, rectangle, ellipse, text; five colours and thicknesses) and
+draw on it (pencil, straight line — Shift keeps it at 45° steps —, arrow, rectangle,
+ellipse, text; five colours and thicknesses) and
 write a comment. The time stamp and frame number stay in front of the comment:
 <i>[0:03.3 &middot; frame 50] Check the arc</i>. A pink bubble on the time bar marks each
 commented frame; the &#9664; and &#9654; buttons jump between them, and when you stop on

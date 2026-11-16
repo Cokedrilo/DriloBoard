@@ -135,11 +135,16 @@ ov = p.overlay
 
 class Ev:
     """Lo minimo de un evento de raton de la escena."""
-    def __init__(self, x, y):
+    def __init__(self, x, y, mayus=False):
         self._p = QPointF(x, y)
+        self._mayus = mayus
 
     def pos(self):
         return self._p
+
+    def modifiers(self):
+        return (Qt.KeyboardModifier.ShiftModifier if self._mayus
+                else Qt.KeyboardModifier.NoModifier)
 
     def button(self):
         return Qt.MouseButton.LeftButton
@@ -187,11 +192,25 @@ ov.mousePressEvent(Ev(10, 10))
 ov.mouseReleaseEvent(Ev(10, 10))
 assert len(p.reviews()[0]["draw"]) == 2
 
-# el rectangulo y la elipse
-for t in ("rect", "elipse"):
+# la linea recta: con Mayus va en pasos de 45 grados (sin soltar: no se guarda)
+p.review_bar.tool_buttons["linea"].click()
+assert ov.tool == "linea"
+ov.mousePressEvent(Ev(100, 100))
+ov.mouseMoveEvent(Ev(160, 108, mayus=True))
+assert ov.live["puntos"][1][1] == 100, "casi horizontal: horizontal"
+ov.mouseMoveEvent(Ev(150, 145, mayus=True))
+dx, dy = (ov.live["puntos"][1][0] - 100, ov.live["puntos"][1][1] - 100)
+assert abs(dx - dy) < 0.01, "casi diagonal: diagonal"
+ov.mouseMoveEvent(Ev(160, 108))
+assert ov.live["puntos"][1] == [160, 108], "sin Mayus, donde esta el raton"
+ov.live = None
+
+# la linea, el rectangulo y la elipse
+for t in ("linea", "rect", "elipse"):
     p.review_bar.tool_buttons[t].click()
     trazo((30, 100), (90, 160), 2)
-assert [d["tipo"] for d in p.reviews()[0]["draw"]] == ["trazo", "flecha", "rect", "elipse"]
+assert [d["tipo"] for d in p.reviews()[0]["draw"]] == ["trazo", "flecha", "linea", "rect", "elipse"]
+assert len(p.reviews()[0]["draw"][2]["puntos"]) == 2, "una recta son dos puntos"
 
 # el texto (sin dialogo: se llama a lo que llama el dialogo)
 p._on_review_shape({"tipo": "texto", "texto": "Mas arco", "color": "#ffffff", "grosor": 2,

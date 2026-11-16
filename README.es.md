@@ -215,7 +215,8 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
     vídeo vuelva al principio.
   - **Anotar, como en SyncSketch**: el botón **Annotate**, junto al volumen,
     abre la barra de anotar. Pausa en un fotograma, dibuja encima (lápiz,
-    flecha, rectángulo, elipse, texto; cinco colores y grosores) y escribe un
+    línea recta —con `Mayús`, en pasos de 45°—, flecha, rectángulo, elipse,
+    texto; cinco colores y grosores) y escribe un
     comentario. La marca de tiempo queda delante del comentario:
     `[0:03.3 · frame 50] Revisa el arco`. Un globito rosa en la barra de tiempo
     señala cada fotograma comentado y los botones ◀ ▶ saltan de uno a otro;
@@ -321,7 +322,8 @@ lo que ya ves. `Intro` salta al primer resultado. En modo ciego se apaga.
 - **Banco de frases** (como Feedback 3000): botón *Phrases* bajo el comentario,
   `Ctrl+Shift+F` o *View ▸ Comment bank*. Tus frases hechas en dos columnas de
   tarjetas de color, con título y categoría. **Un clic en una tarjeta** y su
-  texto va al comentario, donde esté el cursor (con doble clic, una sola vez; el
+  texto va al comentario, donde esté el cursor, seguido de un salto de línea
+  para que la siguiente frase empiece debajo (con doble clic, una sola vez; el
   banco te dice abajo dónde la ha puesto, o por qué no); si la frase lleva `{}`, te pide
   el dato (un número de plano, una fecha) al usarla. *Paragraph* añade un
   salto de línea.

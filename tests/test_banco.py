@@ -111,31 +111,33 @@ win.note_editor.set_path(ana)
 win._active_note = None
 assert bank._editor() is win.note_editor
 bank.insert_phrase(1)                                   # "Muy buen ejercicio :)"
-assert win.note_editor.txt.toPlainText() == "Muy buen ejercicio :) "
+assert win.note_editor.txt.toPlainText() == "Muy buen ejercicio :)\n", "y salta de linea"
 pedidos = []
 QInputDialog.getText = staticmethod(lambda *a, **k: (pedidos.append(a[2]) or ("3", True)))
 bank.insert_phrase(2)                                   # "Entregado {} dias tarde."
-assert win.note_editor.txt.toPlainText() == "Muy buen ejercicio :) Entregado 3 dias tarde. "
+assert win.note_editor.txt.toPlainText() == "Muy buen ejercicio :)\nEntregado 3 dias tarde.\n"
 assert len(pedidos) == 1 and "Entregado {} dias tarde." in pedidos[0]
 QInputDialog.getText = staticmethod(lambda *a, **k: ("", False))
 bank.insert_phrase(3)                                   # cancelar: nada
-assert win.note_editor.txt.toPlainText().endswith("tarde. ")
+assert win.note_editor.txt.toPlainText().endswith("tarde.\n")
 bank.insert_paragraph()
-bank.insert_phrase(0)                                   # "0010: " ya acaba en espacio
+bank.insert_phrase(0)                                   # "0010: ": sin espacio colgando
 assert win.note_editor.txt.toPlainText() == \
-    "Muy buen ejercicio :) Entregado 3 dias tarde.\n0010: ", repr(win.note_editor.txt.toPlainText())
+    "Muy buen ejercicio :)\nEntregado 3 dias tarde.\n\n0010:\n", repr(win.note_editor.txt.toPlainText())
 win.note_editor.commit()
-assert win.notes[ana]["comment"] == "Muy buen ejercicio :) Entregado 3 dias tarde.\n0010:"
-# en mitad del texto, donde esta el cursor
+assert win.notes[ana]["comment"] == "Muy buen ejercicio :)\nEntregado 3 dias tarde.\n\n0010:"
+# en mitad del texto, donde esta el cursor: al final de una linea no dobla el salto
 c = win.note_editor.txt.textCursor()
 c.setPosition(len("Muy buen ejercicio :)"))
 win.note_editor.txt.setTextCursor(c)
 bank.insert_phrase(1)
 assert win.note_editor.txt.toPlainText().startswith(
-    "Muy buen ejercicio :) Muy buen ejercicio :) Entregado"), repr(win.note_editor.txt.toPlainText())
+    "Muy buen ejercicio :) Muy buen ejercicio :)\nEntregado"), repr(win.note_editor.txt.toPlainText())
+assert win.note_editor.txt.textCursor().position() == len(
+    "Muy buen ejercicio :) Muy buen ejercicio :)\n"), "el cursor queda en la linea siguiente"
 win.undo()
 app.processEvents()
-assert win.notes[ana]["comment"].startswith("Muy buen ejercicio :) Entregado"), "se deshace"
+assert win.notes[ana]["comment"].startswith("Muy buen ejercicio :)\nEntregado"), "se deshace"
 # el editor que tocaste ultimo manda
 win.preview.notes_box.set_path(luis) if win.preview.notes_box is not None else None
 if win.preview.notes_box is not None:
@@ -153,14 +155,14 @@ lst = bank.lists[2]
 rect = lst.visualItemRect(lst.item(0))
 antes = win.note_editor.txt.toPlainText()
 QTest.mouseClick(lst.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
-assert win.note_editor.txt.toPlainText() == antes + " Muy buen ejercicio :) ", "el clic inserta"
+assert win.note_editor.txt.toPlainText() == antes + " Muy buen ejercicio :)\n", "el clic inserta"
 assert bank.lbl_msg.text().startswith("\u2713 Added to the comment of ana.png")
 # un doble clic de verdad (pulsar, soltar, doble, soltar) la pone una sola vez
 win.note_editor.txt.clear()
 for paso in ("press", "release", "dclick", "release"):
     {"press": QTest.mousePress, "release": QTest.mouseRelease,
      "dclick": QTest.mouseDClick}[paso](lst.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
-assert win.note_editor.txt.toPlainText() == "Muy buen ejercicio :) ", \
+assert win.note_editor.txt.toPlainText() == "Muy buen ejercicio :)\n", \
     "doble clic = una frase: %r" % win.note_editor.txt.toPlainText()
 antes = win.note_editor.txt.toPlainText()
 z = lst.delegate.zones(rect)
@@ -268,7 +270,7 @@ viewer.pane.notes_box.txt.clear()
 win.bank_store.set_phrases(win.bank_store.phrases + [
     {"plano": "Bien", "texto": "Bien hecho.", "tag": "", "col": 2, "color": "success"}])
 viewer.bank.insert_phrase(len(win.bank_store.phrases) - 1)
-assert viewer.pane.notes_box.txt.toPlainText() == "Bien hecho. "
+assert viewer.pane.notes_box.txt.toPlainText() == "Bien hecho.\n"
 assert win.active_note_editor() is not viewer.pane.notes_box, "la ventana suelta no escribe ahi"
 viewer.pane.notes_box.toggle_bank = None
 win.toggle_bank(viewer.pane.notes_box)                  # el boton Phrases de la ventana grande

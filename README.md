@@ -112,7 +112,10 @@ the clipboard. Press `N` to jump to the grade box. **A+ / A−** (or `Ctrl` + mo
 make the comment text bigger or smaller in every comment box, and **¶ Paragraph**
 starts a new line where the cursor is. Saved as you type, undoable, and carried by *Export library…*.
 The same grade and comment bar sits under the preview and the large window,
-so you can grade while you watch. *Library ▸ Export grades and comments…*
+so you can grade while you watch. Beside the file comment, a **General comment**
+box belongs to the student (the folder) rather than to a file: click a folder
+without choosing a file and that is the only box you can write in. The comment
+bank writes into whichever box you clicked last. *Library ▸ Export grades and comments…*
 writes the files in view to a **PDF with thumbnails**, a **spreadsheet (CSV)**
 or a **Word document**.
 Untick *Grades* (or `Ctrl+G`) to hide them all — handy before projecting in

@@ -4548,6 +4548,21 @@ class NoteEditor(QWidget):
         for w in (self.txt, self.spn):          # el banco escribe en el ultimo que tocaste
             w.installEventFilter(self)
 
+        # el comentario general del alumno: de su carpeta, no de un archivo
+        self.gen_folder: str | None = None
+        self._gen_loading = False
+        self.gen = QPlainTextEdit()
+        self.gen.setTabChangesFocus(True)
+        self.gen.setToolTip("General comment for the whole student (the folder), not for "
+                            "one file. Click a folder without choosing a file to write only here.")
+        self.gen.textChanged.connect(self._gen_typed)
+        self.gen.installEventFilter(self)
+        self.gen.viewport().installEventFilter(self)
+        self.lbl_gen = QLabel("General comment")
+        self.lbl_gen.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        themed(self.lbl_gen, css="color:%(dim)s; font-size:11px;")
+        self._box = self.txt                    # la caja que tocaste ultimo: ahi escribe el banco
+
         self.lbl_file = QLabel("")
         # un nombre largo no debe ensanchar la columna: se recorta (el
         # nombre entero va en el tooltip)
@@ -4559,6 +4574,11 @@ class NoteEditor(QWidget):
         self.grip.moved.connect(lambda h: host.set_note_height(compact, h, guardar=False))
         self.grip.released.connect(lambda h: host.set_note_height(compact, h))
         self.txt.setFixedHeight(host.note_height(compact))
+        self.size_general(host.note_height(compact))
+        general = QVBoxLayout()
+        general.setSpacing(1)
+        general.addWidget(self.lbl_gen)
+        general.addWidget(self.gen)
         if compact:
             # debajo de un visor: todo en una fila, el comentario en dos lineas
             lay = QHBoxLayout(self)
@@ -4572,6 +4592,8 @@ class NoteEditor(QWidget):
             caja.addWidget(self.txt)
             caja.addWidget(self.grip)
             lay.addLayout(caja, 1)
+            lay.addSpacing(4)
+            lay.addLayout(general, 1)
             col = QGridLayout()             # 2 x 2: cuatro en columna harian la fila mas alta
             col.setSpacing(2)
             col.addWidget(self.b_bank, 0, 0)
@@ -4599,6 +4621,7 @@ class NoteEditor(QWidget):
             lay.addLayout(row)
             lay.addWidget(self.txt)
             lay.addWidget(self.grip)
+            lay.addLayout(general)
             fila = FlowLayout(llenar=True)
             fila.addWidget(self.b_bank)
             fila.addWidget(self.b_translate)
@@ -4614,24 +4637,84 @@ class NoteEditor(QWidget):
         self.timer.setSingleShot(True)
         self.timer.setInterval(800)
         self.timer.timeout.connect(self.commit)
+        self.gen_timer = QTimer(self)
+        self.gen_timer.setSingleShot(True)
+        self.gen_timer.setInterval(800)
+        self.gen_timer.timeout.connect(self.commit_general)
         host.note_editors.append(self)
         self.apply_font(host.note_font_pt())
         self.load(None)
 
     def apply_font(self, pt: int):
         if pt > 0:
-            f = QFont(self.txt.font())
-            f.setPointSize(pt)
-            self.txt.setFont(f)
+            for caja in (self.txt, self.gen):
+                f = QFont(caja.font())
+                f.setPointSize(pt)
+                caja.setFont(f)
+
+    def size_general(self, h: int):
+        """La caja general, a la altura de la del archivo (menos su rotulo)."""
+        self.gen.setFixedHeight(max(28, h - self.lbl_gen.sizeHint().height() + 6))
+
+    def active_box(self) -> QPlainTextEdit:
+        """Donde escriben el banco y el boton de parrafo: la caja que tocaste
+        ultimo, o la que se puede usar si la otra esta apagada."""
+        if self._box is self.gen and self.gen.isEnabled():
+            return self.gen
+        if not self.txt.isEnabled() and self.gen.isEnabled():
+            return self.gen
+        return self.txt
+
+    def can_write(self) -> bool:
+        return self.active_box().isEnabled()
 
     def add_paragraph(self):
         """Un parrafo nuevo: un salto de linea donde esta el cursor."""
-        if not self.txt.isEnabled():
+        caja = self.active_box()
+        if not caja.isEnabled():
             return
-        c = self.txt.textCursor()
+        c = caja.textCursor()
         c.insertText("\n")
-        self.txt.setTextCursor(c)
-        self.txt.setFocus()
+        caja.setTextCursor(c)
+        caja.setFocus()
+
+    # --- el comentario general (de la carpeta del alumno) --------------------
+    def load_general(self):
+        """Ensena el comentario general del alumno que toca, sin guardar nada."""
+        self.gen_timer.stop()
+        destino = getattr(self.host, "general_target", lambda p: None)(self.path)
+        self.gen_folder = destino
+        self._gen_loading = True
+        self.gen.setPlainText(self.host.folder_comment_of(destino) if destino else "")
+        self.gen.moveCursor(QTextCursor.MoveOperation.End)
+        self._gen_loading = False
+        self.gen.setEnabled(destino is not None)
+        if destino is None:
+            self.lbl_gen.setText("General comment")
+            self.gen.setPlaceholderText("Choose one student folder…")
+            self.lbl_gen.setToolTip("")
+        else:
+            nombre = "this student" if _blind else os.path.basename(os.path.normpath(destino))
+            self.lbl_gen.setText("General comment \u00b7 %s" % nombre)
+            self.gen.setPlaceholderText("General comment for %s…" % nombre)
+            self.lbl_gen.setToolTip("" if _blind else destino)
+
+    def sync_general(self):
+        """Si el alumno ha cambiado (otra carpeta elegida), guarda y cambia."""
+        destino = getattr(self.host, "general_target", lambda p: None)(self.path)
+        if destino != self.gen_folder:
+            self.commit_general()
+            self.load_general()
+
+    def _gen_typed(self, *_):
+        if not self._gen_loading:
+            self.gen_timer.start()
+
+    def commit_general(self):
+        self.gen_timer.stop()
+        if self.gen_folder:
+            self.host.store_folder_comment(self.gen_folder,
+                                           self.gen.toPlainText().rstrip(), self)
 
     def load(self, path: str | None):
         """Ensena lo guardado de 'path', sin guardar nada."""
@@ -4645,6 +4728,7 @@ class NoteEditor(QWidget):
         self._loading = False
         for wd in (self.spn, self.txt, self.b_clear):
             wd.setEnabled(path is not None)
+        self.load_general()
         self._sync_copy()
         self._sync_translate()
         self.show_file_label()
@@ -4666,7 +4750,9 @@ class NoteEditor(QWidget):
     def detach(self):
         """Se suelta sin guardar (deshacer, importar): lo que ensena ya no vale."""
         self.timer.stop()
+        self.gen_timer.stop()
         self.path = None
+        self.gen_folder = None
 
     def _typed(self, *_):
         if not self._loading:
@@ -4687,6 +4773,7 @@ class NoteEditor(QWidget):
         self.timer.stop()
         if self.path:
             self.host.store_note(self.path, self.value(), self)
+        self.commit_general()
 
     def clear(self):
         self._loading = True
@@ -4832,6 +4919,11 @@ class NoteEditor(QWidget):
         self.spn.selectAll()
 
     def eventFilter(self, obj, e):
+        if e.type() == QEvent.Type.FocusIn:
+            if obj is self.gen:
+                self._box = self.gen
+            elif obj is self.txt:
+                self._box = self.txt
         if e.type() == QEvent.Type.FocusIn and hasattr(self.host, "note_focused"):
             self.host.note_focused(self)
         if (e.type() == QEvent.Type.Wheel and obj is self.txt.viewport()
@@ -4845,10 +4937,11 @@ class NoteEditor(QWidget):
         """Mete una frase donde esta el cursor y salta a la linea siguiente,
         para que la proxima frase empiece debajo."""
         texto = (texto or "").rstrip(" \t\n")
-        if not self.path or not texto:
+        caja = self.active_box()
+        if not caja.isEnabled() or not texto:
             return False
-        c = self.txt.textCursor()
-        doc = self.txt.toPlainText()
+        c = caja.textCursor()
+        doc = caja.toPlainText()
         antes = doc[c.position() - 1] if c.position() > 0 else ""
         despues = doc[c.position()] if c.position() < len(doc) else ""
         if antes and not antes.isspace() and not texto[:1].isspace():
@@ -4856,19 +4949,20 @@ class NoteEditor(QWidget):
         c.insertText(texto if despues == "\n" else texto + "\n")
         if despues == "\n":                    # ya habia un salto: se pasa por encima
             c.movePosition(QTextCursor.MoveOperation.NextCharacter)
-        self.txt.setTextCursor(c)
-        self.txt.ensureCursorVisible()
+        caja.setTextCursor(c)
+        caja.ensureCursorVisible()
         return True
 
     def insert_paragraph(self) -> bool:
-        if not self.path:
+        caja = self.active_box()
+        if not caja.isEnabled():
             return False
-        c = self.txt.textCursor()
-        while c.position() > 0 and self.txt.toPlainText()[c.position() - 1] == " ":
+        c = caja.textCursor()
+        while c.position() > 0 and caja.toPlainText()[c.position() - 1] == " ":
             c.deletePreviousChar()              # sin espacios colgando al final de la linea
         c.insertText("\n")
-        self.txt.setTextCursor(c)
-        self.txt.ensureCursorVisible()
+        caja.setTextCursor(c)
+        caja.ensureCursorVisible()
         return True
 
 
@@ -5461,12 +5555,13 @@ class CommentBank(QWidget):
 
     def refresh_target(self):
         ed = self._editor()
-        if ed is None or not ed.path:
+        if ed is None or not ed.can_write():
             self.lbl_target.setText("Choose a file: the phrases go into its comment.")
             return
-        nombre = shown_name(ed.path) or "this file"
-        n = len(ed.txt.toPlainText())
-        texto = "Writing into the comment of %s  ·  %d character%s" % (
+        caja = ed.active_box()
+        nombre = self._target_name(ed)
+        n = len(caja.toPlainText())
+        texto = "Writing into the %s  ·  %d character%s" % (
             nombre, n, "" if n == 1 else "s")
         if self.lbl_target.text() != texto:
             self.lbl_target.setText(texto)
@@ -5534,9 +5629,17 @@ class CommentBank(QWidget):
             "AB"[col - 1], total if vistas == total else "%d / %d" % (vistas, total)))
 
     # --- usar una frase -----------------------------------------------------
+    @staticmethod
+    def _target_name(ed) -> str:
+        """'comment of e0.png' o 'general comment of Ana', segun la caja."""
+        if ed.active_box() is ed.gen:
+            return "general comment of %s" % (
+                "this student" if _blind else os.path.basename(os.path.normpath(ed.gen_folder)))
+        return "comment of %s" % (shown_name(ed.path) or "this file")
+
     def _target_ready(self):
         ed = self._editor()
-        if ed is None or not ed.path:
+        if ed is None or not ed.can_write():
             self.tell("Choose a file first (click its thumbnail): the phrase goes into its "
                       "comment.")
             return None
@@ -5567,7 +5670,7 @@ class CommentBank(QWidget):
         if texto is None:
             return
         if ed.insert_text(texto):
-            self.tell("\u2713 Added to the comment of %s" % (shown_name(ed.path) or "this file"),
+            self.tell("\u2713 Added to the %s" % self._target_name(ed),
                       ok=True)
         else:
             self.tell("Could not add it: choose a file first.")
@@ -11514,6 +11617,11 @@ one comes out as a PNG of its first frame.</li>
 <li>Under the categories, <b>Grade &amp; comment</b> belongs to the thumbnail
 you have chosen: a grade from 0 to 10 (decimals allowed) and a free comment,
 for images, GIFs and videos alike.</li>
+<li>Next to it, the <b>General comment</b> belongs to the student, not to a file: each
+folder is a student (in a class folder, its subfolders). Click a folder without
+choosing a file and you can only write there. It shows the same under the preview and
+in the large window, it is saved in the library and it can be undone. The comment bank
+writes into whichever of the two boxes you clicked last.</li>
 <li>Select one or more files and press a number from <b>1</b> to <b>9</b>: that becomes
 their grade (one undo step).</li>
 <li><b>Delete</b> (or right-click ▸ <i>Remove from DriloBoard</i>) takes the selected
@@ -12134,6 +12242,7 @@ class MainWindow(QMainWindow):
         self.video_marks: dict[str, list[int]] = {}  # ruta de video -> ms clave
         self.notes: dict[str, dict] = {}             # ruta -> {grade, comment}
         self.folders_done: set[str] = set()          # carpetas marcadas como corregidas
+        self.folder_comments: dict[str, str] = {}    # comentario general de cada alumno
         self.folders_auto: set[str] = set()          # carpetas que ya se marcaron solas una vez
         self.video_reviews: dict[str, list[dict]] = {}   # ruta de video -> anotaciones
         self.note_editors: list = []                 # los editores de notas abiertos
@@ -12713,8 +12822,45 @@ class MainWindow(QMainWindow):
         return idx.data(PATH_ROLE) if idx.isValid() else None
 
     def sync_note_panel(self, *_):
-        """El panel sigue al archivo elegido en la rejilla."""
+        """El panel sigue al archivo elegido en la rejilla; y la caja general de
+        cada editor, a la carpeta elegida cuando no hay archivo."""
         self.note_editor.set_path(self.note_target())
+        for e in self.live_note_editors():
+            e.sync_general()
+
+    # ---------------- comentario general de cada alumno ------------------- #
+    def student_of_folder(self, carpeta: str) -> str:
+        """El alumno de una carpeta: ella misma, o la de la clase de la que cuelga."""
+        return folder_groups([os.path.join(carpeta, "_")], self.folders or [])[0][0]
+
+    def general_target(self, path: str | None) -> str | None:
+        """De quien es el comentario general: el alumno del archivo o, sin
+        archivo, el de la unica carpeta elegida en la columna."""
+        if path:
+            return self.student_of(path)
+        tree = getattr(self, "folder_tree", None)
+        if tree is None:
+            return None
+        sel = [it.data(0, Qt.ItemDataRole.UserRole)
+               for it in tree.all_items() if it.isSelected()]
+        return self.student_of_folder(sel[0]) if len(sel) == 1 else None
+
+    def folder_comment_of(self, carpeta: str | None) -> str:
+        return self.folder_comments.get(carpeta, "") if carpeta else ""
+
+    def store_folder_comment(self, carpeta: str, texto: str, origen=None):
+        if texto == self.folder_comment_of(carpeta):
+            return
+        self.push_undo("general comment" if _blind else
+                       "general comment of %s" % os.path.basename(os.path.normpath(carpeta)))
+        if texto.strip():
+            self.folder_comments[carpeta] = texto
+        else:
+            self.folder_comments.pop(carpeta, None)
+        for e in self.live_note_editors():
+            if e is not origen and e.gen_folder == carpeta:
+                e.load_general()
+        self.touch()
 
     # ---------------- tiempo de correccion -------------------------------- #
     def set_track_time(self, on: bool):
@@ -12841,6 +12987,7 @@ class MainWindow(QMainWindow):
         for e in self.live_note_editors():
             if e.compact == compact:
                 e.txt.setFixedHeight(h)
+                e.size_general(h)
         if guardar:
             self.touch()
 
@@ -13932,6 +14079,10 @@ class MainWindow(QMainWindow):
                          and (p not in self.removed or self.chk_removed.isChecked())]
             paths = [p for p in paths if matches_search(p, terms)]
         self.model.set_paths(paths)
+        if self.preview.path and self.preview.path not in self.model._row:
+            # otra carpeta: lo que ensenaba ya no esta en la rejilla, y su barra
+            # de nota escribiria en el alumno de antes
+            self.preview.show_path(None)
         self.sync_note_panel()
         videos = sum(1 for p in paths if is_video(p))
         texto = "%d images" % (len(paths) - videos)
@@ -14451,6 +14602,7 @@ class MainWindow(QMainWindow):
             "video_marks": copy.deepcopy(self.video_marks),
             "video_reviews": copy.deepcopy(self.video_reviews),
             "notes": copy.deepcopy(self.notes),
+            "folder_comments": dict(self.folder_comments),
             "removed": set(self.removed),
             "folder_order": self.cmb_folder_order.currentData(),
             "category_order": self.cmb_cat_order.currentData(),
@@ -14478,6 +14630,7 @@ class MainWindow(QMainWindow):
         self.video_marks = snap.get("video_marks", {})
         self.video_reviews = snap.get("video_reviews", {})
         self.notes = snap.get("notes", {})
+        self.folder_comments = dict(snap.get("folder_comments", {}))
         self.removed = set(snap.get("removed", set()))
         self._set_mode(self.cmb_folder_order, snap["folder_order"])
         self._set_mode(self.cmb_cat_order, snap["category_order"])
@@ -15263,6 +15416,7 @@ class MainWindow(QMainWindow):
             "video_marks": self.video_marks,
             "video_reviews": self.video_reviews,
             "notes": self.notes,
+            "folder_comments": self.folder_comments,
             "show_notes": self.show_notes,
             "preview_notes": self.preview_notes,
             "viewer_notes": self.viewer_notes,
@@ -15326,6 +15480,10 @@ class MainWindow(QMainWindow):
         self.video_reviews = canon_keys(clean_reviews(data.get("video_reviews")),
                                         merge_reviews)
         self.notes = canon_keys(clean_notes(data.get("notes")))
+        crudo = data.get("folder_comments")
+        self.folder_comments = {canon_path(f): t for f, t in crudo.items()
+                                if isinstance(f, str) and isinstance(t, str) and t.strip()} \
+            if isinstance(crudo, dict) else {}
         for clave, destino in (("folders_done", self.folders_done),
                                ("folders_auto", self.folders_auto)):
             crudo = data.get(clave)

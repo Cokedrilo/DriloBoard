@@ -307,6 +307,11 @@ lo que ya ves. `Intro` salta al primer resultado. En modo ciego se apaga.
 - Es del archivo que tengas elegido en la rejilla (el del foco): una **nota de
   0 a 10**, con decimales, y un **comentario** libre. Vale igual para imágenes,
   GIF y vídeos.
+- Al lado, la caja **General comment** es del alumno, no de un archivo: cada
+  carpeta es un alumno (en una carpeta de clase, sus subcarpetas). Si pinchas
+  una carpeta sin elegir ningún archivo, solo se puede escribir ahí. Sale igual
+  bajo la vista previa y en la ventana grande, se guarda en la biblioteca y se
+  puede deshacer. El banco de frases escribe en la caja que tocaste la última.
 - Elige uno o varios archivos y pulsa un número del **1** al **9**: esa es su
   nota (un solo paso de deshacer).
 - `N` (o clic derecho ▸ *Grade / comment…*) te lleva a la casilla de la nota;

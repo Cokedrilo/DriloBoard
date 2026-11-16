@@ -132,6 +132,11 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   - Al elegir una carpeta entran también sus subcarpetas. Elige una
     subcarpeta para ver únicamente ese tema.
   - *Remove* solo funciona sobre las carpetas principales.
+- Las filas alternan de color para seguir bien una lista larga.
+- Debajo de la lista, un contador dice cuánto llevas corregido de las carpetas
+  seleccionadas (de todas si no hay ninguna): archivos con nota sobre el total,
+  y alumnos terminados. Cada carpeta es un alumno, terminado cuando todos sus
+  archivos tienen nota; en una carpeta de clase, sus subcarpetas son los alumnos.
 - *Refresh* (o `F5`) relee el disco, por si añades imágenes con el visor
   abierto.
 - **Sort**: *Manual* (arrastra las carpetas principales para colocarlas donde
@@ -184,6 +189,8 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
 - **Vídeos** (casilla *Videos*, **apagada por defecto**): al marcarla se buscan
   también mp4, mov, webm, mkv, avi… y entran en la rejilla con un distintivo
   ▶ y su duración. La casilla se recuerda al cerrar.
+  - Con la casilla **Autoplay** puesta, el vídeo empieza a reproducirse en
+    cuanto lo pinchas, en vez de abrir en pausa. También se recuerda.
   - En la vista previa y en el visor grande el vídeo **abre en pausa**, para
     que no suene nada al pasar por las miniaturas. Debajo, play/pausa, barra
     para moverse (también en pausa, se ve el fotograma), tiempo y volumen. En
@@ -310,14 +317,14 @@ lo que ya ves. `Intro` salta al primer resultado. En modo ciego se apaga.
   se recuerda y vale para todas las cajas del mismo sitio.
 - Los botones **A+ / A−** (o `Ctrl` + rueda del ratón sobre la caja) agrandan o
   achican la letra del comentario en todas las cajas a la vez, y se recuerda.
-  **¶ Paragraph** añade un párrafo: una línea en blanco donde esté el cursor.
+  **¶ Paragraph** añade un salto de línea donde esté el cursor.
 - **Banco de frases** (como Feedback 3000): botón *Phrases* bajo el comentario,
   `Ctrl+Shift+F` o *View ▸ Comment bank*. Tus frases hechas en dos columnas de
   tarjetas de color, con título y categoría. **Un clic en una tarjeta** y su
   texto va al comentario, donde esté el cursor (con doble clic, una sola vez; el
   banco te dice abajo dónde la ha puesto, o por qué no); si la frase lleva `{}`, te pide
-  el dato (un número de plano, una fecha) al usarla. *Paragraph* hace punto y
-  aparte.
+  el dato (un número de plano, una fecha) al usarla. *Paragraph* añade un
+  salto de línea.
   - Cada columna se filtra por categoría o con el buscador. Las tarjetas se
     arrastran para ordenarlas o pasarlas a la otra columna; el lápiz la edita,
     la papelera la borra. Marcando varias, se les cambia el color, la

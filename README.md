@@ -84,7 +84,11 @@ average grade.
 Drag folders in from the file manager. Tick *Include subfolders* and each one
 becomes a tree at any depth, with per-branch image counts; empty and hidden
 subfolders are left out. Order them by hand or A→Z / Z→A. Files are sorted
-naturally, so `plate2` comes before `plate10`.
+naturally, so `plate2` comes before `plate10`. Rows alternate in colour so a long
+list is easy to follow. Under the list, a counter shows how far you are in the
+selected folders (all of them if none is selected): files graded out of the
+total, and students done — each folder is a student, done when every file in it
+has a grade (a class folder's subfolders count as its students).
 
 **Thumbnails and preview (centre)**
 Adjustable size (64–420 px) that fits the width: the thumbnails grow or shrink a
@@ -105,7 +109,7 @@ shows on the thumbnail, coloured red / amber / green; a speech bubble means
 there is a comment, which you can read by hovering; *Copy comment* puts it on
 the clipboard. Press `N` to jump to the grade box. **A+ / A−** (or `Ctrl` + mouse wheel over the box)
 make the comment text bigger or smaller in every comment box, and **¶ Paragraph**
-adds a blank line where the cursor is. Saved as you type, undoable, and carried by *Export library…*.
+starts a new line where the cursor is. Saved as you type, undoable, and carried by *Export library…*.
 The same grade and comment bar sits under the preview and the large window,
 so you can grade while you watch. *Library ▸ Export grades and comments…*
 writes the files in view to a **PDF with thumbnails**, a **spreadsheet (CSV)**
@@ -176,7 +180,8 @@ flips every selected image at once.
 **Videos too, if you want them**
 Tick *Videos* above the thumbnails (off by default) and video files — mp4, mov,
 webm, mkv, avi… — join the grid with a ▶ badge and their duration. They play
-in the preview and the large window, opening paused so browsing stays silent,
+in the preview and the large window, opening paused so browsing stays silent
+(tick *Autoplay* to have them start playing as soon as you click them),
 and they go into categories and export like images. The editor and the A/B
 comparison stay image-only.
 **Click the video** to play or pause it; in the large window that also makes it the

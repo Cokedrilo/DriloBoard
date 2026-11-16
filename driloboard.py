@@ -75,7 +75,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "2.1.1"
+VERSION = "2.2.0"
 
 
 def app_dir() -> Path:
@@ -367,14 +367,14 @@ THEMES = {
              "bg": "#202124", "panel": "#18191b", "raised": "#2b2c30",
              "hover": "#35373c", "border": "#383a40", "text": "#e8e9ec",
              "accent": "#f2a93b", "accent_hover": "#f7b95a",
-             "on_accent": "#1b1b1d", "accent_soft": "#4a3a1c"},
+             "on_accent": "#1b1b1d", "accent_soft": "#4a3a1c", "row_alt": "#212226"},
     "light": {"grid": "#ffffff", "grid_text": "#1f1f1f", "canvas": "#dfe0e3",
               "caption": "#4a4c52", "dim": "#6b6e76", "ink": "#3a3c42",
               "select": "#d98a0b",
               "bg": "#f1f2f4", "panel": "#ffffff", "raised": "#ffffff",
               "hover": "#eceef1", "border": "#d3d5da", "text": "#1d1e21",
               "accent": "#e59a1f", "accent_hover": "#d98a0b",
-              "on_accent": "#1b1b1d", "accent_soft": "#fbe7c3"},
+              "on_accent": "#1b1b1d", "accent_soft": "#fbe7c3", "row_alt": "#f3f4f6"},
 }
 _theme = "dark"
 
@@ -4519,7 +4519,7 @@ class NoteEditor(QWidget):
         self.b_para = QPushButton("\u00b6" if compact else "\u00b6  Paragraph")
         self.b_font_up.setToolTip("Bigger text in the comment boxes (Ctrl + mouse wheel too)")
         self.b_font_down.setToolTip("Smaller text in the comment boxes")
-        self.b_para.setToolTip("Add a paragraph: a blank line where the cursor is")
+        self.b_para.setToolTip("Start a new line where the cursor is")
         self.b_font_up.clicked.connect(lambda: host.bump_note_font(1))
         self.b_font_down.clicked.connect(lambda: host.bump_note_font(-1))
         self.b_para.clicked.connect(self.add_paragraph)
@@ -4613,19 +4613,11 @@ class NoteEditor(QWidget):
             self.txt.setFont(f)
 
     def add_paragraph(self):
-        """Un parrafo nuevo: una linea en blanco donde esta el cursor."""
+        """Un parrafo nuevo: un salto de linea donde esta el cursor."""
         if not self.txt.isEnabled():
             return
         c = self.txt.textCursor()
-        antes = self.txt.toPlainText()[:c.position()]
-        if not antes:
-            pass
-        elif antes.endswith("\n\n"):
-            pass
-        elif antes.endswith("\n"):
-            c.insertText("\n")
-        else:
-            c.insertText("\n\n")
+        c.insertText("\n")
         self.txt.setTextCursor(c)
         self.txt.setFocus()
 
@@ -4860,7 +4852,7 @@ class NoteEditor(QWidget):
         c = self.txt.textCursor()
         while c.position() > 0 and self.txt.toPlainText()[c.position() - 1] == " ":
             c.deletePreviousChar()              # sin espacios colgando al final de la linea
-        c.insertText("\n\n")
+        c.insertText("\n")
         self.txt.setTextCursor(c)
         self.txt.ensureCursorVisible()
         return True
@@ -6483,6 +6475,7 @@ class PreviewPane(QWidget):
     un valor mayor que 0 decodifica reducido (mas rapido, menos detalle).
     """
     openBig = Signal()
+    autoplay = False            # casilla Autoplay: los videos arrancan solos al abrirlos
 
     def __init__(self, parent=None, max_side: int = 0, with_button: bool = True):
         super().__init__(parent)
@@ -7122,7 +7115,8 @@ class PreviewPane(QWidget):
         self._on_volume(self.sld_vol.value())
 
     def _load_video(self, path: str):
-        """Abre en pausa: se ve el primer fotograma y no suena nada al pasar."""
+        """Abre en pausa (se ve el primer fotograma y no suena nada al pasar),
+        o reproduciendo si la casilla Autoplay esta puesta."""
         self.stop_gif()
         self._ensure_player()
         self.flush_review()
@@ -7147,7 +7141,10 @@ class PreviewPane(QWidget):
         self.loop_in = self.loop_out = None
         self.player.setSource(QUrl.fromLocalFile(path))
         self._apply_loop()
-        self.player.pause()
+        if PreviewPane.autoplay:
+            self.player.play()
+        else:
+            self.player.pause()
         self._apply_review_ui()
         self._caption_video()
 
@@ -8204,6 +8201,7 @@ QLineEdit { background:%(panel)s; color:%(text)s; border:1px solid %(border)s;
 QLineEdit:focus { border:1px solid %(accent)s; }
 
 QTreeView, QTableView { background:%(panel)s; color:%(text)s;
+            alternate-background-color:%(row_alt)s;
             border:1px solid %(border)s; border-radius:8px; outline:0; }
 QTreeView::item { padding:3px 2px; border-radius:4px; }
 QTreeView::item:hover { background:%(hover)s; }
@@ -8651,6 +8649,61 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
         for i in range(2):
             y = (M - 3 - i * 3.5) if sube else (m + 3 + i * 3.5)
             p.drawLine(QPointF(m + 1, y), QPointF(M - 1, y))
+    elif kind == "subfolders":                  # una carpeta y otra colgando debajo
+        p.drawPolyline([QPointF(m, m + 7), QPointF(m, m), QPointF(m + 4, m),
+                        QPointF(m + 5.5, m + 1.8), QPointF(M - 3, m + 1.8),
+                        QPointF(M - 3, m + 7), QPointF(m, m + 7)])
+        p.drawPolyline([QPointF(m + 2, m + 7), QPointF(m + 2, M - 2.5),
+                        QPointF(m + 5, M - 2.5)])
+        p.drawRect(QRectF(m + 5, M - 5, M - m - 5, 5))
+    elif kind == "preview":                     # una ventana con un paisaje
+        p.drawRoundedRect(QRectF(m, m + 1, M - m, M - m - 2), 2, 2)
+        p.drawPolyline([QPointF(m + 1.5, M - 3), QPointF(m + 5.5, size / 2),
+                        QPointF(m + 8.5, M - 5), QPointF(m + 10.5, M - 7),
+                        QPointF(M - 1.5, M - 3)])
+        p.setBrush(tinta)
+        p.drawEllipse(QPointF(M - 4, m + 4.5), 1.3, 1.3)
+    elif kind == "untagged":                    # una etiqueta vacia
+        et = QPainterPath()
+        et.moveTo(m, m + 6)
+        et.lineTo(m + 6, m)
+        et.lineTo(M, m)
+        et.lineTo(M, m + 6)
+        et.lineTo(m + 6, M)
+        et.closeSubpath()
+        p.drawPath(et)
+        p.drawEllipse(QPointF(M - 4, m + 4), 1.4, 1.4)
+    elif kind == "removed":                     # un circulo con una X
+        p.drawEllipse(QRectF(m, m, M - m, M - m))
+        p.drawLine(QPointF(m + 4, m + 4), QPointF(M - 4, M - 4))
+        p.drawLine(QPointF(M - 4, m + 4), QPointF(m + 4, M - 4))
+    elif kind == "film":                        # un fotograma de pelicula
+        p.drawRoundedRect(QRectF(m, m + 1, M - m, M - m - 2), 1.5, 1.5)
+        p.drawLine(QPointF(m + 3.5, m + 1), QPointF(m + 3.5, M - 1))
+        p.drawLine(QPointF(M - 3.5, m + 1), QPointF(M - 3.5, M - 1))
+        p.setPen(QPen(tinta, 1.2))
+        for y in (m + 3.5, size / 2, M - 3.5):
+            p.drawLine(QPointF(m + 0.8, y), QPointF(m + 2.4, y))
+            p.drawLine(QPointF(M - 2.4, y), QPointF(M - 0.8, y))
+    elif kind == "grade":                       # una estrella
+        estrella = []
+        for i in range(10):
+            a = -math.pi / 2 + i * math.pi / 5
+            r = (M - m) / 2 * (1 if i % 2 == 0 else 0.45)
+            estrella.append(QPointF(size / 2 + math.cos(a) * r,
+                                    size / 2 + 0.6 + math.sin(a) * r))
+        p.drawPolygon(estrella)
+    elif kind == "clock":
+        c = size / 2
+        p.drawEllipse(QPointF(c, c), (M - m) / 2, (M - m) / 2)
+        p.drawPolyline([QPointF(c, m + 3), QPointF(c, c), QPointF(c + 3.5, c + 2)])
+    elif kind == "autoplay":                    # un play dentro de un circulo
+        c = size / 2
+        p.drawEllipse(QPointF(c, c), (M - m) / 2, (M - m) / 2)
+        p.setBrush(tinta)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawPolygon([QPointF(c - 2.2, c - 3.8), QPointF(c - 2.2, c + 3.8),
+                       QPointF(c + 4, c)])
     elif kind in ("eye", "eye_off"):
         c = size / 2
         ojo = QPainterPath()
@@ -11407,6 +11460,10 @@ includes everything below it; choose a subfolder to see only that topic.
 Empty and hidden subfolders are left out.</li>
 <li><b>Sort</b>: drag the top-level folders to order them by hand, or pick
 A → Z / Z → A. This order decides the order of the thumbnails too.</li>
+<li>Under the list, a counter shows how far you are in the selected folders (all
+of them if none is selected): <b>files graded</b> out of the total, and
+<b>students done</b>. Each folder is a student, done when every file in it has a
+grade; in a class folder, its subfolders are the students.</li>
 <li><i>Refresh</i> (<b>[[refresh]]</b>) re-reads the disk if you add images while working.</li>
 </ul>
 
@@ -11456,7 +11513,7 @@ the comment box to make it taller or shorter (double-click it for the usual size
 <i>View ▸ Comment bank</i>): your ready-made phrases, as in Feedback 3000, in two
 columns of coloured cards with a title and a category. <b>Click a card</b> and its text
 goes into the comment where the cursor is (a double click puts it in once; the bank says where it went); a <b>{}</b> in a phrase asks you for that piece
-of data (a shot number, a date) when you use it. <i>Paragraph</i> starts a new paragraph.
+of data (a shot number, a date) when you use it. <i>Paragraph</i> starts a new line.
 Filter each column by category or search it; drag cards to reorder them or to move them
 to the other column; the pencil edits a card, the bin deletes it, and ticking several
 lets you recolour, recategorise, move or delete them at once. Keep several banks (one per
@@ -11690,7 +11747,8 @@ larger than your screen.</p>
 mov, webm, mkv, avi…). It is off by default, and remembered.</li>
 <li>Video thumbnails show a ▶ badge with the duration.</li>
 <li>In the preview and the large window a video opens <b>paused</b>, so
-browsing stays silent. Use the play button and the bar under it; in the large
+browsing stays silent; tick <b>Autoplay</b> to have a video start playing as soon
+as you click it. Use the play button and the bar under it; in the large
 window <b>Space</b> plays and pauses. <b>Click the video</b> to play or
 pause it too: the window becomes the active one and <b>Space</b> keeps working
 right after the click. Click <b>anywhere on the time bar</b> (not only on its
@@ -12204,6 +12262,7 @@ class MainWindow(QMainWindow):
         lay.addLayout(orden)
 
         self.chk_recursive = QCheckBox("Include subfolders")
+        themed(self.chk_recursive, icon="subfolders")
         self.chk_recursive.toggled.connect(self.on_recursive)
         lay.addWidget(self.chk_recursive)
 
@@ -12213,7 +12272,14 @@ class MainWindow(QMainWindow):
         self.folder_tree.reorderRequested.connect(self.reorder_folders)
         self.folder_tree.itemSelectionChanged.connect(self.refresh_images)
         self.folder_tree.itemChanged.connect(self.on_folder_checked)
+        self.folder_tree.setAlternatingRowColors(True)
         lay.addWidget(self.folder_tree, 1)
+
+        # lo corregido de la carpeta elegida: archivos con nota y alumnos completos
+        self.lbl_progress = QLabel()
+        self.lbl_progress.setWordWrap(True)
+        self.lbl_progress.setTextFormat(Qt.TextFormat.RichText)
+        lay.addWidget(self.lbl_progress)
 
         self.folder_tree.placeholder = ("Drop folders here",
             "With none selected you see them all. Picking a folder includes its "
@@ -12233,21 +12299,25 @@ class MainWindow(QMainWindow):
         top.addLayout(bar, 1)
 
         self.chk_preview = QCheckBox("Preview below")
+        themed(self.chk_preview, icon="preview")
         self.chk_preview.setToolTip("Show the selected image under the thumbnails (V)")
         self.chk_preview.toggled.connect(self.on_preview_toggled)
         bar.addWidget(self.chk_preview)
 
         self.chk_unassigned = QCheckBox("Uncategorised only")
+        themed(self.chk_unassigned, icon="untagged")
         self.chk_unassigned.toggled.connect(self.refresh_images)
         bar.addWidget(self.chk_unassigned)
 
         self.chk_removed = QCheckBox("Show removed")
+        themed(self.chk_removed, icon="removed")
         self.chk_removed.setToolTip("Also show the files you removed from DriloBoard, marked "
                                     "with a red X. Right-click one to recover it")
         self.chk_removed.toggled.connect(self.refresh_images)
         bar.addWidget(self.chk_removed)
 
         self.chk_videos = QCheckBox("Videos")
+        themed(self.chk_videos, icon="film")
         if HAS_VIDEO:
             self.chk_videos.setToolTip("Also look for video files (mp4, mov, webm, mkv, "
                                        "avi…) and play them in the preview")
@@ -12258,21 +12328,32 @@ class MainWindow(QMainWindow):
         self.chk_videos.toggled.connect(self.on_videos)
         bar.addWidget(self.chk_videos)
 
+        self.chk_autoplay = QCheckBox("Autoplay")
+        themed(self.chk_autoplay, icon="autoplay")
+        self.chk_autoplay.setToolTip("Play a video as soon as you click it")
+        self.chk_autoplay.setEnabled(HAS_VIDEO)
+        self.chk_autoplay.toggled.connect(self.set_autoplay)
+        bar.addWidget(self.chk_autoplay)
+
         self.chk_names = QCheckBox("Names")
+        themed(self.chk_names, icon="text")
         self.chk_names.setChecked(True)
         self.chk_names.toggled.connect(self.on_names)
         bar.addWidget(self.chk_names)
 
         self.chk_blind = QCheckBox("Blind")
+        themed(self.chk_blind, icon="eye_off")
         self.chk_blind.toggled.connect(self.set_blind)
         bar.addWidget(self.chk_blind)
 
         self.chk_notes = QCheckBox("Grades")
+        themed(self.chk_notes, icon="grade")
         self.chk_notes.setChecked(True)
         self.chk_notes.toggled.connect(self.set_show_notes)
         bar.addWidget(self.chk_notes)
 
         self.chk_time = QCheckBox("Time")
+        themed(self.chk_time, icon="clock")
         self.chk_time.setToolTip("Count the marking time of each file and student: it starts "
                                  "when you click a file and stops after %d minutes without "
                                  "touching anything. Library \u25b8 Marking time\u2026 shows the "
@@ -12438,6 +12519,7 @@ class MainWindow(QMainWindow):
         self.search_box.returnPressed.connect(self.search_enter)
         lay.addWidget(self.search_box)
         self.chk_search_all = QCheckBox("In all the folders")
+        themed(self.chk_search_all, icon="folder")
         self.chk_search_all.setChecked(True)
         self.chk_search_all.setToolTip(
             "On: looks in every folder you added, whatever is selected.\n"
@@ -12482,6 +12564,7 @@ class MainWindow(QMainWindow):
         lay.addLayout(orden)
 
         self.chk_only_cat = QCheckBox("Show this category only")
+        themed(self.chk_only_cat, icon="category")
         self.chk_only_cat.toggled.connect(self.refresh_images)
         lay.addWidget(self.chk_only_cat)
 
@@ -13261,6 +13344,7 @@ class MainWindow(QMainWindow):
         else:
             self.update_folder_labels()
         self.update_average()
+        self.update_progress()
         self.view.viewport().update()
         self.preview.refresh_note()
         self.touch()
@@ -13418,6 +13502,53 @@ class MainWindow(QMainWindow):
             node = build_tree(folder, self.exts)
             self._tree_cache[folder] = node
         return node
+
+    def students_of(self, folder: str) -> list[str]:
+        """Cada carpeta es un alumno. Una carpeta sin archivos propios y con
+        subcarpetas es la de la clase: sus subcarpetas son los alumnos."""
+        if self.recursive:
+            node = self.tree_of(folder)
+            if not node.get("own") and node.get("children"):
+                return [k["path"] for k in node["children"]]
+        return [folder]
+
+    def marking_progress(self) -> dict:
+        """Cuanto llevas corregido de lo elegido en la columna de carpetas."""
+        archivos, con_nota, alumnos, hechos = set(), 0, [], 0
+        for f in self.selected_folders():
+            for al in self.students_of(f):
+                if al in alumnos:
+                    continue
+                alumnos.append(al)
+                suyos = [p for p in self.files_of(al) if p not in self.removed]
+                notas = [p for p in suyos
+                         if (self.notes.get(p) or {}).get("grade") is not None]
+                if suyos and len(notas) == len(suyos):
+                    hechos += 1
+                for p in suyos:
+                    if p not in archivos:
+                        archivos.add(p)
+                        con_nota += p in notas
+        return {"files": len(archivos), "graded": con_nota,
+                "students": len(alumnos), "done": hechos}
+
+    def update_progress(self):
+        if not hasattr(self, "lbl_progress"):
+            return
+        if not self.folders:
+            self.lbl_progress.hide()
+            return
+        st = self.marking_progress()
+        dim = theme_color("dim")
+        self.lbl_progress.setText(
+            "<span style='color:%s'>Graded</span> <b>%d</b><span style='color:%s'> of %d "
+            "files</span><br><span style='color:%s'>Students done</span> <b>%d</b>"
+            "<span style='color:%s'> of %d</span>"
+            % (dim, st["graded"], dim, st["files"], dim, st["done"], dim, st["students"]))
+        self.lbl_progress.setToolTip(
+            "In the selected folders (all of them if none is selected). Each folder is a "
+            "student, done when every file in it has a grade; removed files do not count.")
+        self.lbl_progress.show()
 
     def folder_fully_graded(self, folder: str) -> bool:
         """Todos los archivos de la carpeta (los quitados no cuentan) tienen nota."""
@@ -13796,6 +13927,7 @@ class MainWindow(QMainWindow):
         if terms:
             texto += "  ·  search"
         self.lbl_count.setText(texto)
+        self.update_progress()
         if hasattr(self, "_panel_timer"):
             self._panel_timer.start()
 
@@ -13861,6 +13993,10 @@ class MainWindow(QMainWindow):
                 self.model.index(0, 0),
                 self.view.selectionModel().SelectionFlag.ClearAndSelect)
             self.view.setFocus()
+
+    def set_autoplay(self, on: bool):
+        PreviewPane.autoplay = bool(on) and HAS_VIDEO
+        self.touch()
 
     def on_videos(self, on: bool):
         self.set_show_videos(on)
@@ -14099,6 +14235,7 @@ class MainWindow(QMainWindow):
         self.b_theme.setText("  Light  " if oscuro else "  Dark  ")
         self.b_theme.setToolTip("Switch to the %s theme (%s)"
                                 % ("light" if oscuro else "dark", SK.text("theme")))
+        self.update_progress()              # sus colores son los del tema
 
     def show_shortcuts(self):
         ShortcutsDialog(self).exec()
@@ -15106,6 +15243,7 @@ class MainWindow(QMainWindow):
             "geometry": [self.x(), self.y(), self.width(), self.height()],
             "theme": _theme,
             "videos": self.show_videos,
+            "autoplay": PreviewPane.autoplay,
             "video_marks": self.video_marks,
             "video_reviews": self.video_reviews,
             "notes": self.notes,
@@ -15186,6 +15324,7 @@ class MainWindow(QMainWindow):
         self.chk_videos.setChecked(bool(data.get("videos", False)) and HAS_VIDEO)
         self.chk_videos.blockSignals(False)
         self.set_show_videos(self.chk_videos.isChecked())
+        self.chk_autoplay.setChecked(bool(data.get("autoplay", False)) and HAS_VIDEO)
         self.chk_names.setChecked(bool(data.get("show_names", True)))
         self.set_blind(bool(data.get("blind", False)))
         self.viewer_notes = bool(data.get("viewer_notes", True))

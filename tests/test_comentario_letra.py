@@ -52,10 +52,8 @@ print("2. PARRAFO")
 ed.txt.setPlainText("Primera idea")
 ed.txt.moveCursor(visor.QTextCursor.MoveOperation.End)
 ed.b_para.click()
-assert ed.txt.toPlainText() == "Primera idea\n\n", repr(ed.txt.toPlainText())
-ed.b_para.click()
-assert ed.txt.toPlainText() == "Primera idea\n\n", "no apila lineas en blanco"
+assert ed.txt.toPlainText() == "Primera idea\n", "un solo salto de linea: " + repr(ed.txt.toPlainText())
 ed.txt.insertPlainText("Segunda")
-assert ed.txt.toPlainText() == "Primera idea\n\nSegunda"
+assert ed.txt.toPlainText() == "Primera idea\nSegunda"
 w.close()
 print("\nCOMENTARIO LETRA OK")

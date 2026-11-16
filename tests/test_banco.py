@@ -123,9 +123,9 @@ assert win.note_editor.txt.toPlainText().endswith("tarde. ")
 bank.insert_paragraph()
 bank.insert_phrase(0)                                   # "0010: " ya acaba en espacio
 assert win.note_editor.txt.toPlainText() == \
-    "Muy buen ejercicio :) Entregado 3 dias tarde.\n\n0010: ", repr(win.note_editor.txt.toPlainText())
+    "Muy buen ejercicio :) Entregado 3 dias tarde.\n0010: ", repr(win.note_editor.txt.toPlainText())
 win.note_editor.commit()
-assert win.notes[ana]["comment"] == "Muy buen ejercicio :) Entregado 3 dias tarde.\n\n0010:"
+assert win.notes[ana]["comment"] == "Muy buen ejercicio :) Entregado 3 dias tarde.\n0010:"
 # en mitad del texto, donde esta el cursor
 c = win.note_editor.txt.textCursor()
 c.setPosition(len("Muy buen ejercicio :)"))

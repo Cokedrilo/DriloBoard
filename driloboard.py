@@ -3454,8 +3454,11 @@ class ZoomView(QGraphicsView):
     """QGraphicsView con zoom de rueda; el boton central arrastra."""
     zoomed = Signal()
     resized = Signal()
+    clicked = Signal()          # clic izquierdo suelto (sin arrastrar)
 
     def mousePressEvent(self, e):
+        self._click_pos = (e.position().toPoint()
+                           if e.button() == Qt.MouseButton.LeftButton else None)
         if not _pan_press(self, e):
             super().mousePressEvent(e)
 
@@ -3466,6 +3469,11 @@ class ZoomView(QGraphicsView):
     def mouseReleaseEvent(self, e):
         if not _pan_release(self, e):
             super().mouseReleaseEvent(e)
+            ini = getattr(self, "_click_pos", None)
+            self._click_pos = None
+            if (ini is not None and e.button() == Qt.MouseButton.LeftButton
+                    and (e.position().toPoint() - ini).manhattanLength() <= 4):
+                self.clicked.emit()
 
     def wheelEvent(self, e):
         f = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
@@ -6413,6 +6421,7 @@ class PreviewPane(QWidget):
         self.view.setFrameShape(QFrame.Shape.NoFrame)
         self.view.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # las flechas son de la rejilla
         self.view.zoomed.connect(self._on_zoom)
+        self.view.clicked.connect(self._on_view_clicked)
         # al salir o irse la barra del GIF la vista cambia de alto sin que
         # cambie el panel: se reencaja igual. Con un video no: reencajar en
         # mitad de un salto de fotograma llegaba a colgar el reproductor
@@ -7590,6 +7599,23 @@ class PreviewPane(QWidget):
     def is_playing(self) -> bool:
         return (self.player is not None and self.player.playbackState()
                 == QMediaPlayer.PlaybackState.PlayingState)
+
+    def _on_view_clicked(self):
+        """Clic en el video: la ventana pasa a ser la activa, el foco sale de
+        cualquier caja de texto (para que Espacio llegue al atajo) y se
+        reproduce / pausa. Con una herramienta de anotar puesta, el clic es
+        de la herramienta (el overlay lo recoge antes)."""
+        if not (self.showing_video or self.showing_gif):
+            return
+        if self.showing_video and self.overlay is not None and self.overlay.tool:
+            return
+        w = self.window()
+        w.activateWindow()
+        w.raise_()
+        f = w.focusWidget()
+        if isinstance(f, (QLineEdit, QPlainTextEdit, QAbstractSpinBox)):
+            f.clearFocus()              # la rejilla conserva el foco: son sus flechas
+        self.toggle_play()
 
     def toggle_play(self):
         if self.showing_gif:

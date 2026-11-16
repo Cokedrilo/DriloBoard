@@ -75,7 +75,7 @@ except ImportError as _e:                               # pragma: no cover
     VIDEO_IMPORT_ERROR = str(_e)
 
 APP_NAME = "DriloBoard"
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 
 def app_dir() -> Path:
@@ -11636,7 +11636,9 @@ mov, webm, mkv, avi…). It is off by default, and remembered.</li>
 <li>Video thumbnails show a ▶ badge with the duration.</li>
 <li>In the preview and the large window a video opens <b>paused</b>, so
 browsing stays silent. Use the play button and the bar under it; in the large
-window <b>Space</b> plays and pauses.</li>
+window <b>Space</b> plays and pauses. <b>Click the video</b> to play or
+pause it too: the window becomes the active one and <b>Space</b> keeps working
+right after the click.</li>
 <li>Videos go into categories like images, and <i>Export…</i> copies them as
 they are. The editor and the A/B comparison are for images only.</li>
 <li><b>Frame by frame</b>: the buttons either side of play, or <b>[[frame_prev]]</b> and

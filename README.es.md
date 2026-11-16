@@ -187,7 +187,9 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   - En la vista previa y en el visor grande el vídeo **abre en pausa**, para
     que no suene nada al pasar por las miniaturas. Debajo, play/pausa, barra
     para moverse (también en pausa, se ve el fotograma), tiempo y volumen. En
-    el visor grande, `Espacio` reproduce y pausa.
+    el visor grande, `Espacio` reproduce y pausa. También **un clic sobre el
+    vídeo** lo reproduce o lo pausa, y en el visor grande deja esa ventana como
+    la activa, así que `Espacio` funciona justo después de pinchar.
   - Se clasifican en categorías igual que las imágenes, y *Export…* los copia
     tal cual. El editor y la comparación A/B son solo para imágenes: con un
     vídeo avisan en la barra de estado.
@@ -304,6 +306,9 @@ lo que ya ves. `Intro` salta al primer resultado. En modo ciego se apaga.
 - La caja del comentario se agranda o achica arrastrando el **tirador** de
   cuatro puntitos que tiene debajo; doble clic la deja como siempre. El alto
   se recuerda y vale para todas las cajas del mismo sitio.
+- Los botones **A+ / A−** (o `Ctrl` + rueda del ratón sobre la caja) agrandan o
+  achican la letra del comentario en todas las cajas a la vez, y se recuerda.
+  **¶ Paragraph** añade un párrafo: una línea en blanco donde esté el cursor.
 - **Banco de frases** (como Feedback 3000): botón *Phrases* bajo el comentario,
   `Ctrl+Shift+F` o *View ▸ Comment bank*. Tus frases hechas en dos columnas de
   tarjetas de color, con título y categoría. **Un clic en una tarjeta** y su

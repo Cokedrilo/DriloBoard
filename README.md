@@ -103,7 +103,9 @@ Under the categories, give the chosen file a **grade from 0 to 10** (decimals
 allowed) and a free **comment** — images, GIFs and videos alike. The grade
 shows on the thumbnail, coloured red / amber / green; a speech bubble means
 there is a comment, which you can read by hovering; *Copy comment* puts it on
-the clipboard. Press `N` to jump to the grade box. Saved as you type, undoable, and carried by *Export library…*.
+the clipboard. Press `N` to jump to the grade box. **A+ / A−** (or `Ctrl` + mouse wheel over the box)
+make the comment text bigger or smaller in every comment box, and **¶ Paragraph**
+adds a blank line where the cursor is. Saved as you type, undoable, and carried by *Export library…*.
 The same grade and comment bar sits under the preview and the large window,
 so you can grade while you watch. *Library ▸ Export grades and comments…*
 writes the files in view to a **PDF with thumbnails**, a **spreadsheet (CSV)**
@@ -177,6 +179,8 @@ webm, mkv, avi… — join the grid with a ▶ badge and their duration. They pl
 in the preview and the large window, opening paused so browsing stays silent,
 and they go into categories and export like images. The editor and the A/B
 comparison stay image-only.
+**Click the video** to play or pause it; in the large window that also makes it the
+active window, so `Space` works right after the click.
 **Loop** the whole video, or just a fragment marked with `I` and `O`.
 Step **frame by frame** and set **keyframes** on the frames that matter: they
 show as amber diamonds on the time bar, jump from one to the next, are saved

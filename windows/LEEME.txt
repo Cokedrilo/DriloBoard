@@ -7,7 +7,24 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
-Novedades de la 2.0:
+Novedades de la 2.5:
+
+  - La barra de tiempo de los videos es una regla de fotogramas: al arrastrar
+    siempre cae en un fotograma entero. Con Mayus el arrastre es fino (un
+    fotograma cada pocos pixeles) y la rueda pasa de uno en uno.
+  - Los fotogramas del video se guardan en memoria a los pocos segundos de
+    abrirlo (linea verde bajo la barra): arrastrar y pasar fotogramas es
+    inmediato, hacia delante y hacia atras.
+  - Papel cebolla (onion skin), tecla S: en pausa, los fotogramas de antes
+    se ven en rojo y los de despues en verde, solo donde algo se mueve.
+    Tambien en los GIF.
+  - Velocidad de reproduccion de 0.25x a 2x (teclas J y K).
+  - Estabilizacion del trazo: Smooth al anotar un video y Smoothing en el
+    editor de imagenes (lapiz, rotulador y goma).
+  - La barra de anotar cabe en una fila y, al editar en la vista previa, los
+    controles de debajo del lienzo ya no quedan cortados.
+
+De la 2.0:
 
   - Anotar un video, como en SyncSketch: boton Annotate junto al volumen.
     Dibujo y comentario sobre un fotograma, con su marca de tiempo; un globito

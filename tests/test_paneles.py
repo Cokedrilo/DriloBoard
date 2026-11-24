@@ -87,8 +87,11 @@ win2.close()
 win = visor.MainWindow()
 win.show()
 mini = win.minimumSizeHint()
-assert mini.width() < 900, mini
-assert mini.height() < 500, mini
+# El tope va con la letra: sin pantalla, Windows no tiene fuentes del sistema y
+# la de relleno es el doble de ancha, asi que alli todo mide el doble
+letra = max(1.0, app.fontMetrics().horizontalAdvance("Assign to selected category") / 170.0)
+assert mini.width() < 900 * letra, (mini, letra)
+assert mini.height() < 500 * letra, (mini, letra)
 win.resize(mini)
 app.processEvents()
 assert win.width() <= mini.width() + 2

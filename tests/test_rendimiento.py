@@ -48,6 +48,12 @@ w.resize(1200, 800)
 w.show()
 w.add_folders([str(TMP)])
 app.processEvents()
+# Las miniaturas se ajustan al ancho de la rejilla con un pequeno retraso, y al
+# cambiar de tamano se vacia la cola de peticiones. En Windows la ventana tarda
+# mas en tener su ancho: pedirlas antes de que se asiente dejaba solo las que
+# se ven en pantalla
+asentado = reloj() + 0.5
+esperar(lambda: reloj() > asentado and not w._fit_timer.isActive(), 10)
 modelo = w.model
 assert modelo.rowCount() == N, modelo.rowCount()
 

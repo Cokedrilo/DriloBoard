@@ -28,8 +28,11 @@ d = visor.EditorDialog(str(ruta), None)
 d.show()
 app.processEvents()
 
-# antes el minimo pasaba de 1700 px: no cabia ni en una pantalla de iPad
-assert d.minimumSizeHint().width() < 520, d.minimumSizeHint()
+# antes el minimo pasaba de 1700 px: no cabia ni en una pantalla de iPad.
+# El tope va con la letra: sin pantalla, Windows no tiene fuentes del sistema y
+# la de relleno es el doble de ancha
+letra = max(1.0, app.fontMetrics().horizontalAdvance("Assign to selected category") / 170.0)
+assert d.minimumSizeHint().width() < 520 * letra, (d.minimumSizeHint(), letra)
 assert d.isSizeGripEnabled()
 
 for w, h in ((1200, 780), (900, 600), (620, 700), (480, 500), (300, 300)):

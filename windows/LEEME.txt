@@ -18,6 +18,9 @@ Novedades de la 2.6:
   - Exportar el video con las anotaciones: el boton Video de la barra de
     anotar escribe un MP4 con los dibujos y comentarios encima, y con su
     sonido. El original no se toca.
+  - Espacio reproduce y pausa tambien mientras anotas, en el visor grande y
+    en la vista previa. Escribiendo un comentario es un espacio; con Intro o
+    un clic sobre el video vuelve a ser del reproductor.
   - Arreglado: el programa podia quedarse congelado, pocas veces, al mover la
     barra de tiempo, pasar fotogramas o tocar el volumen de un video.
 

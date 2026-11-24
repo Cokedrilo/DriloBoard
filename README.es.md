@@ -257,6 +257,10 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
     al parar en uno, el dibujo y el comentario se ven sobre el vídeo, así que
     un alumno puede seguirlos sin anotar. `Intro` guarda el comentario
     (`Mayús+Intro` es otra línea) y cambiar de fotograma también lo guarda.
+    `Espacio` sigue reproduciendo y pausando mientras anotas, en el visor
+    grande y en la vista previa: mientras escribes un comentario es un
+    espacio, y con `Intro` o un clic sobre el vídeo vuelve a ser del
+    reproductor.
     Va todo en la biblioteca (se exporta e importa con ella) y se deshace con
     `Ctrl+Z`. **Export PDF** escribe una página por fotograma comentado: la
     captura de ese fotograma con tu dibujo encima, el nombre del vídeo y el

@@ -225,7 +225,9 @@ to go to its frame and drag its right edge to set how many frames it lasts. The 
 the comment, `[0:03.3 · frame 50] Check the arc`. A pink bubble on the time bar
 marks every commented frame and the ◀ ▶ buttons jump between them; when you stop
 on one, the drawing and the comment appear over the video, so a student can follow
-them without annotating. Enter saves the comment (Shift+Enter is a new line),
+them without annotating. `Space` keeps playing and pausing while you annotate
+(while you type a comment it is a space; Enter or a click on the video hands it
+back to the player). Enter saves the comment (Shift+Enter is a new line),
 changing frame saves it too, and it all lives in the library: it exports and
 imports with it and undoes with `Ctrl+Z`. **Export PDF** writes one page per
 commented frame: a picture of that frame with your drawing on top, the video name

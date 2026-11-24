@@ -5069,6 +5069,7 @@ class ReviewOverlay(QGraphicsItem):
         self._stab: StrokeStabilizer | None = None
         self._cursor: QPointF | None = None  # el raton, por delante del lapiz estabilizado
         self.can_draw = lambda: True         # False: solo se pausa (el video suena)
+        self.on_press = lambda: None         # se pincho sobre el video con una herramienta
         self.on_shape = lambda forma: None
         self.on_text = lambda punto: None
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
@@ -5106,6 +5107,7 @@ class ReviewOverlay(QGraphicsItem):
             e.ignore()
             return
         e.accept()
+        self.on_press()
         if not self.can_draw():
             return
         p = self._clamp(e.pos())
@@ -5208,6 +5210,9 @@ class ReviewText(QPlainTextEdit):
         if (e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
                 and not e.modifiers() & Qt.KeyboardModifier.ShiftModifier):
             self.submitted.emit()
+            # el comentario esta dicho: fuera de la caja, Espacio vuelve a ser
+            # reproducir / pausar y no una letra mas
+            self.clearFocus()
             return
         super().keyPressEvent(e)
 
@@ -8310,6 +8315,12 @@ class PreviewPane(QWidget):
         self._onion_timer.timeout.connect(self._build_onion)
         self.on_prefs_changed = lambda: None        # la ventana principal las guarda
         PreviewPane._panes.add(self)
+        # Espacio reproduce y pausa mientras se anota. La ventana grande ya
+        # tiene su Espacio (dos atajos con la misma tecla se anulan): alli
+        # own_space va a False y este se queda apagado
+        self.own_space = True
+        self.space_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self, self.toggle_play)
+        self.space_shortcut.setEnabled(False)
 
         self._video_tips = []                       # (accion, boton)
         SK.listeners.append(lambda: [b.setToolTip(shortcut_tip(a))
@@ -8855,6 +8866,7 @@ class PreviewPane(QWidget):
         self.overlay = ReviewOverlay()
         self.overlay.hide()
         self.overlay.smooth = PreviewPane.review_smooth
+        self.overlay.on_press = self._leave_text
         self.overlay.can_draw = self._review_can_draw
         self.overlay.on_shape = self._on_review_shape
         self.overlay.on_text = self._on_review_text
@@ -9275,6 +9287,7 @@ class PreviewPane(QWidget):
 
     def _apply_review_ui(self):
         activo = self.showing_video and self.review_on
+        self.space_shortcut.setEnabled(bool(activo and self.own_space))
         self.review_bar.setVisible(activo)
         if self.overlay is not None:
             self.overlay.setVisible(self.showing_video)
@@ -9867,21 +9880,25 @@ class PreviewPane(QWidget):
         return (self.player is not None and self.player.playbackState()
                 == QMediaPlayer.PlaybackState.PlayingState)
 
-    def _on_view_clicked(self):
-        """Clic en el video: la ventana pasa a ser la activa, el foco sale de
-        cualquier caja de texto (para que Espacio llegue al atajo) y se
-        reproduce / pausa. Con una herramienta de anotar puesta, el clic es
-        de la herramienta (el overlay lo recoge antes)."""
-        if not (self.showing_video or self.showing_gif):
-            return
-        if self.showing_video and self.overlay is not None and self.overlay.tool:
-            return
+    def _leave_text(self):
+        """La ventana pasa a ser la activa y el foco sale de cualquier caja de
+        texto, para que Espacio llegue al atajo de reproducir y no a la caja."""
         w = self.window()
         w.activateWindow()
         w.raise_()
         f = w.focusWidget()
         if isinstance(f, (QLineEdit, QPlainTextEdit, QAbstractSpinBox)):
             f.clearFocus()              # la rejilla conserva el foco: son sus flechas
+
+    def _on_view_clicked(self):
+        """Clic en el video: el foco sale de las cajas de texto y se reproduce
+        / pausa. Con una herramienta de anotar puesta, el clic es de la
+        herramienta (el overlay lo recoge antes, y tambien suelta el foco)."""
+        if not (self.showing_video or self.showing_gif):
+            return
+        if self.showing_video and self.overlay is not None and self.overlay.tool:
+            return
+        self._leave_text()
         self.toggle_play()
 
     def toggle_play(self):
@@ -14110,7 +14127,9 @@ right edge to choose how many frames it lasts (all the way to the next one means
 commented frame; the &#9664; and &#9654; buttons jump between them, and when you stop on
 one the drawing and the comment show up over the video, so a student can follow them
 without annotating. <b>Enter</b> saves the comment (<b>Shift+Enter</b> is a new line); it
-is also saved when you change frame. Everything lives in the library and
+is also saved when you change frame. <b>Space</b> plays and pauses while you annotate, in
+the large window and in the preview: while you are typing a comment it is a space, and
+Enter or a click on the video gives it back to the player. Everything lives in the library and
 <b>Ctrl+Z</b> undoes it. <b>PDF</b> writes one page per commented frame, with a
 picture of the frame, your drawing on top and the comment below; a video with no
 annotations gives its first and last frame. <b>Video</b> writes an MP4 copy of the video
@@ -14246,6 +14265,7 @@ class ImageViewer(QDialog):
         self.resize(1100, 780)
 
         self.pane = PreviewPane(self, max_side=0, with_button=False)
+        self.pane.own_space = False             # el Espacio de esta ventana ya reproduce
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         # el banco de frases va dentro: esta ventana no deja usar las demas

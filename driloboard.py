@@ -106,7 +106,7 @@ except ImportError:                                     # pragma: no cover
     HAS_VIDEO_EXPORT = False
 
 APP_NAME = "DriloBoard"
-VERSION = "2.5.0"
+VERSION = "2.6.0"
 
 
 def app_dir() -> Path:
@@ -17979,6 +17979,16 @@ def selftest() -> int:
                     QMediaFormat.ConversionMode.Decode)
                 if QMediaFormat.FileFormat.MPEG4 not in formatos:
                     fallos.append("el video no decodifica mp4 (falta el plugin FFmpeg)")
+                # exportar un video con sus anotaciones: las entradas de grabacion
+                # de Qt y algun codificador de video para MP4
+                if not HAS_VIDEO_EXPORT:
+                    fallos.append("no se puede exportar video (faltan las entradas de grabacion)")
+                else:
+                    mp4 = QMediaFormat(QMediaFormat.FileFormat.MPEG4)
+                    modo = QMediaFormat.ConversionMode.Encode
+                    if QMediaFormat.FileFormat.MPEG4 not in QMediaFormat().supportedFileFormats(modo) \
+                            or not mp4.supportedVideoCodecs(modo):
+                        fallos.append("el video no se puede codificar en mp4")
         # el boton de traducir habla HTTPS: sin el plugin de TLS de Qt no puede
         if getattr(sys, "frozen", False) and not QSslSocket.supportsSsl():
             fallos.append("falta el plugin de TLS de Qt (el boton de traducir no funcionaria)")

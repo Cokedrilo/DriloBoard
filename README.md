@@ -1,6 +1,6 @@
 # DriloBoard - Image viewer and reviewer
 
-[![Download](https://img.shields.io/badge/Download-Windows%20portable%20·%2058%20MB-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-2.5.0-portable-win64.zip)
+[![Download](https://img.shields.io/badge/Download-Windows%20portable%20·%2060%20MB-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-2.5.0-portable-win64.zip)
 [![Download](https://img.shields.io/badge/Download-macOS%20portable%20·%2036%20MB-2ea44f?style=for-the-badge&logo=apple)](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-2.5.0-portable-macos.zip)
 [![Release](https://img.shields.io/github/v/release/Cokedrilo/DriloBoard)](https://github.com/Cokedrilo/DriloBoard/releases/latest)
 [![Licence](https://img.shields.io/github/license/Cokedrilo/DriloBoard)](LICENSE)
@@ -261,7 +261,7 @@ overwrites your own edits.
 ### Prebuilt Windows package
 
 [**Download the ZIP**](https://github.com/Cokedrilo/DriloBoard/releases/latest/download/DriloBoard-2.5.0-portable-win64.zip)
-(58 MB) — or browse every version under
+(60 MB) — or browse every version under
 [Releases](https://github.com/Cokedrilo/DriloBoard/releases). Unpack it
 anywhere: hard disk, USB stick, network share.
 

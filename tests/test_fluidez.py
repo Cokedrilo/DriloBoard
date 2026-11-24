@@ -330,10 +330,16 @@ print("   de %s a %s, y el boton dice la que hay"
 print("\n10. ANOTAR: UNA FILA, Y EL LAPIZ ESTABILIZADO")
 p.b_annotate.click()
 rb = p.review_bar
-assert espera(lambda: rb.isVisible() and rb.width() > 1300)
+v.resize(1500, 860)                             # ancho de sobra para una fila
+assert espera(lambda: rb.isVisible() and rb.width() > 1450)
 assert rb.one_row(), "con sitio, herramientas y comentario en una sola fila"
 assert espera(lambda: rb.height() < 50), "una fila: %d px de alto" % rb.height()
 una_fila = rb.height()
+# quieto en un fotograma antes de escribir: recien pausado aun puede llegar uno
+# tardio, y al cambiar de fotograma la caja pasa a ser la del nuevo
+p._go_to_frame_us(24 * p._frame_us)
+assert espera(lambda: p._scrub_us is None and p.frame_index(p._frame_start_us) == 24, 6000)
+espera(lambda: False, 150)
 rb.txt.setPlainText("uno\ndos\ntres")
 assert espera(lambda: rb.txt.height() > 40 and rb.height() > una_fila), \
     "la caja crece con lo escrito"
@@ -342,7 +348,7 @@ p.flush_review()
 assert espera(lambda: rb.height() == una_fila), "y vuelve a una linea"
 v.resize(900, 860)
 assert espera(lambda: not rb.one_row() and rb.height() > una_fila), "estrecha, en dos"
-v.resize(1400, 860)
+v.resize(1500, 860)
 assert espera(lambda: rb.one_row())
 assert isinstance(rb.sld_smooth, visor.BarSlider) and rb.sld_smooth.value() == visor.SMOOTH_DEFAULT
 rb.sld_smooth.setValue(85)

@@ -35,7 +35,7 @@ except ImportError:       # pragma: no cover
     np = None
 
 from PySide6.QtCore import (QAbstractListModel, QBuffer, QByteArray, QEvent, QEventLoop,
-                            QItemSelectionModel, QLocale,
+                            QCoreApplication, QItemSelectionModel, QLocale, QMetaObject, Q_ARG,
                             QMarginsF, QMimeData, QModelIndex,
                             QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, QSizeF,
                             Qt, QThreadPool, QTimer, QUrl, Signal, Slot)
@@ -74,6 +74,36 @@ try:
 except ImportError as _e:                               # pragma: no cover
     HAS_VIDEO = False
     VIDEO_IMPORT_ERROR = str(_e)
+
+def qt_call(obj, metodo: str, *args):
+    """Llama a un slot de un objeto de Qt (reproductor, salida de sonido,
+    grabador) sin tener cogido el cerrojo de Python. args: (tipo, valor).
+
+    Por que: obj.setPosition(x) llamado tal cual se ejecuta con el cerrojo de
+    Python (el GIL) cogido. El reproductor, al saltar, parar o cambiar de
+    archivo, deshace sus hilos y espera por ellos; y esos hilos, al
+    deshacerse, avisan a objetos creados desde Python (el QAudioOutput), para
+    lo que necesitan ese mismo cerrojo. Cada uno espera al otro y la ventana
+    se queda congelada para siempre: pasaba pocas veces, al mover la barra de
+    tiempo, pasar fotogramas o tocar el volumen justo despues de un salto.
+
+    Aqui la llamada se deja en la cola de eventos del objeto y se despacha en
+    el acto con sendPostedEvents, que suelta el cerrojo mientras Qt trabaja:
+    hace lo mismo y en el mismo momento, pero sin el abrazo mortal."""
+    QMetaObject.invokeMethod(obj, metodo, Qt.ConnectionType.QueuedConnection,
+                             *[Q_ARG(tipo, valor) for tipo, valor in args])
+    QCoreApplication.sendPostedEvents(obj, QEvent.Type.MetaCall.value)
+
+
+# Grabar video (exportar un video con sus anotaciones) pide las entradas de
+# fotogramas y de sonido de Qt 6.8; con un Qt mas viejo el boton se apaga.
+try:
+    from PySide6.QtMultimedia import (QAudioBufferInput, QAudioBuffer, QAudioDecoder,
+                                      QMediaCaptureSession, QMediaFormat, QMediaRecorder,
+                                      QVideoFrame, QVideoFrameInput)
+    HAS_VIDEO_EXPORT = HAS_VIDEO
+except ImportError:                                     # pragma: no cover
+    HAS_VIDEO_EXPORT = False
 
 APP_NAME = "DriloBoard"
 VERSION = "2.5.0"
@@ -2003,12 +2033,12 @@ class FrameGrabber(QObject):
         self._progress = progress
         if not self._queue:
             return []
-        self._player.setSource(QUrl.fromLocalFile(self.path))
+        qt_call(self._player, "setSource", ("QUrl", QUrl.fromLocalFile(self.path)))
         self._timer.start()                  # tambien vale para que abra el archivo
         self._loop.exec()
         self._timer.stop()
-        self._player.stop()
-        self._player.setSource(QUrl())       # suelta el archivo: en Windows lo bloquea
+        qt_call(self._player, "stop")
+        qt_call(self._player, "setSource", ("QUrl", QUrl()))       # suelta el archivo: en Windows lo bloquea
         self._images += [QImage()] * (len(mss) - len(self._images))
         self.times_ms += [max(0, int(m)) for m in mss[len(self.times_ms):]]
         return self._images
@@ -2027,7 +2057,7 @@ class FrameGrabber(QObject):
             self._fps_known = fps > 0
             if fps > 0:
                 self._frame_us = 1_000_000 / fps
-            self._player.pause()
+            qt_call(self._player, "pause")
             self._next()
         elif estado == QMediaPlayer.MediaStatus.InvalidMedia:
             self._finish()
@@ -2045,7 +2075,7 @@ class FrameGrabber(QObject):
         self._tries = 0
         self._last = QImage()
         self._timer.start()
-        self._player.setPosition(int(round((self._want_us + self._frame_us / 4) / 1000)))
+        qt_call(self._player, "setPosition", ("qint64", (int(round((self._want_us + self._frame_us / 4) / 1000)))))
 
     def _on_frame(self, frame):
         if self._want_us is None or not frame.isValid() or frame.startTime() < 0:
@@ -2058,7 +2088,7 @@ class FrameGrabber(QObject):
             self._tries += 1
             destino = self._want_us + (1000 if error > 0 else self._frame_us * 0.6)
             self._last = frame.toImage()
-            self._player.setPosition(int(math.ceil(destino / 1000)))
+            qt_call(self._player, "setPosition", ("qint64", (int(math.ceil(destino / 1000)))))
             return
         self._accept(frame.toImage())
 
@@ -2080,6 +2110,250 @@ class FrameGrabber(QObject):
         self._want_us = None
         if self._loop.isRunning():
             self._loop.quit()
+
+
+# --------------------------------------------------------------------------- #
+#  Exportar un video con sus anotaciones
+#
+#  Un reproductor sin sonido recorre el video a toda velocidad; a cada
+#  fotograma se le pinta encima la anotacion que le toca (review_shown) y se
+#  le pasa a un QMediaRecorder, que lo codifica en H.264 dentro de un MP4. El
+#  sonido se decodifica aparte y se le pasa tal cual. Todo con lo que trae Qt:
+#  la version portable no puede contar con un ffmpeg instalado.
+# --------------------------------------------------------------------------- #
+class AnnotatedVideoWriter(QObject):
+    """Escribe en 'destino' una copia de 'path' con las anotaciones de 'lista'
+    encima, cada una mientras aguanta. run() espera dentro de un bucle de
+    eventos (la ventana sigue viva) y devuelve (bien, por que no)."""
+    progressed = Signal(int, int)           # ms hechos, ms totales
+    finished = Signal(bool, str)
+
+    QUEUE = 8                               # fotogramas pintados que esperan al codificador
+    AUDIO_QUEUE = 64
+    STALL_MS = 20000                        # sin avanzar este tiempo, se da por colgado
+    RATE = 8.0
+
+    def __init__(self, path: str, lista: list[dict], destino: str, parent=None,
+                 captions: bool = True, audio: bool = True):
+        super().__init__(parent)
+        self.path, self.destino = path, destino
+        self.lista = sorted((dict(a) for a in lista), key=lambda a: a["ms"])
+        self.captions, self.audio = captions, audio
+        self.frames = 0                     # fotogramas escritos
+        self.has_audio = False
+        self._vq: deque = deque()
+        self._aq: deque = deque()
+        self._started = self._loaded = self._ended = False
+        self._v_eos = self._v_done = False
+        self._a_eos = self._a_done = True   # sin sonido, ya esta
+        self._cancelled = False
+        self._result = None
+        self._frame_ms = 40.0
+        self._total_ms = 0
+        self._loop = QEventLoop(self)
+        self._on_progress = None
+        self._player = QMediaPlayer(self)
+        self._sink = QVideoSink(self)
+        self._player.setVideoSink(self._sink)       # sin salida de sonido: tan rapido como pueda
+        self._player.mediaStatusChanged.connect(self._on_status)
+        self._player.errorOccurred.connect(lambda _e, texto: self._fail(texto or "cannot read the video"))
+        self._sink.videoFrameChanged.connect(self._on_frame)
+        self._session = QMediaCaptureSession(self)
+        self._vin = QVideoFrameInput(self)
+        self._session.setVideoFrameInput(self._vin)
+        self._vin.readyToSendVideoFrame.connect(self._pump_video)
+        self._rec = QMediaRecorder(self)
+        self._session.setRecorder(self._rec)
+        self._rec.recorderStateChanged.connect(self._on_recorder_state)
+        self._rec.errorOccurred.connect(lambda _e, texto: self._fail(texto or "the video encoder failed"))
+        self._ain = None
+        self._dec = None
+        self._watch = QTimer(self)
+        self._watch.setSingleShot(True)
+        self._watch.setInterval(self.STALL_MS)
+        self._watch.timeout.connect(lambda: self._fail("the video encoder stopped responding"))
+
+    # --- lo que se usa desde fuera ---------------------------------------------
+    def run(self, progress=None) -> tuple[bool, str]:
+        """progress(ms, total) -> False cancela."""
+        self._on_progress = progress
+        self.start()
+        if self._result is None:
+            self._loop.exec()
+        return self._result or (False, "cancelled")
+
+    def start(self):
+        try:
+            if os.path.exists(self.destino):
+                os.remove(self.destino)
+        except OSError as e:
+            self._fail(str(e))
+            return
+        self._watch.start()
+        qt_call(self._player, "setSource", ("QUrl", QUrl.fromLocalFile(self.path)))
+
+    def cancel(self):
+        if self._result is None:
+            self._cancelled = True
+            self._finish(False, "cancelled")
+
+    # --- por dentro ---------------------------------------------------------------
+    def _on_status(self, estado):
+        S = QMediaPlayer.MediaStatus
+        if estado in (S.LoadedMedia, S.BufferedMedia) and not self._loaded:
+            self._loaded = True
+            self._configure()
+            qt_call(self._player, "setPlaybackRate", ("qreal", float(self.RATE)))
+            qt_call(self._player, "play")
+        elif estado == S.EndOfMedia and self._loaded:
+            if not self._started:
+                self._fail("the video has no frames")
+                return
+            self._v_eos = True
+            self._pump_video()
+        elif estado == S.InvalidMedia:
+            self._fail("cannot read the video")
+
+    def _configure(self):
+        try:
+            fps = float(self._player.metaData().value(QMediaMetaData.Key.VideoFrameRate))
+        except (TypeError, ValueError):
+            fps = 0.0
+        if fps > 0:
+            self._frame_ms = 1000.0 / fps
+        self._total_ms = self._player.duration()
+        fmt = QMediaFormat(QMediaFormat.FileFormat.MPEG4)
+        modo = QMediaFormat.ConversionMode.Encode
+        if QMediaFormat.VideoCodec.H264 in fmt.supportedVideoCodecs(modo):
+            fmt.setVideoCodec(QMediaFormat.VideoCodec.H264)
+        self.has_audio = bool(self.audio and self._player.audioTracks())
+        if self.has_audio:
+            if QMediaFormat.AudioCodec.AAC in fmt.supportedAudioCodecs(modo):
+                fmt.setAudioCodec(QMediaFormat.AudioCodec.AAC)
+            self._ain = QAudioBufferInput(self)
+            self._session.setAudioBufferInput(self._ain)
+            self._ain.readyToSendAudioBuffer.connect(self._pump_audio)
+            self._dec = QAudioDecoder(self)
+            self._dec.setSource(QUrl.fromLocalFile(self.path))
+            self._dec.bufferReady.connect(self._read_audio)
+            self._dec.finished.connect(self._on_audio_end)
+            self._dec.error.connect(lambda *_: self._on_audio_end())   # sin sonido, pero con video
+            self._a_eos = self._a_done = False
+        self._rec.setMediaFormat(fmt)
+        self._rec.setQuality(QMediaRecorder.Quality.VeryHighQuality)
+        if fps > 0:
+            self._rec.setVideoFrameRate(fps)
+        self._rec.setOutputLocation(QUrl.fromLocalFile(self.destino))
+        self._rec.setAutoStop(True)             # se para solo cuando acaban video y sonido
+
+    def _on_frame(self, frame):
+        if self._result is not None or not self._loaded or not frame.isValid() \
+                or frame.startTime() < 0:
+            return
+        img = frame.toImage()
+        if img.isNull():
+            return
+        ms = frame.startTime() / 1000.0
+        i = review_shown(self.lista, ms, self._frame_ms, self._total_ms)
+        img = review_frame_image(img, self.lista[i] if i is not None else None, self.captions)
+        if img.width() % 2 or img.height() % 2:     # H.264 quiere medidas pares
+            img = img.copy(0, 0, img.width() - img.width() % 2, img.height() - img.height() % 2)
+        nuevo = QVideoFrame(img)
+        fin = frame.endTime() if frame.endTime() > frame.startTime() \
+            else frame.startTime() + int(self._frame_ms * 1000)
+        nuevo.setStartTime(frame.startTime())
+        nuevo.setEndTime(fin)
+        self._vq.append((nuevo, ms))
+        if not self._started:
+            self._started = True
+            self._rec.setVideoResolution(img.size())
+            qt_call(self._rec, "record")
+            if self._dec is not None:
+                qt_call(self._dec, "start")
+        self._pump_video()
+        if len(self._vq) > self.QUEUE:
+            qt_call(self._player, "pause")                # el codificador va mas despacio: se le espera
+
+    def _pump_video(self):
+        if self._result is not None:
+            return
+        while self._vq:
+            if not self._vin.sendVideoFrame(self._vq[0][0]):
+                return
+            _f, ms = self._vq.popleft()
+            self.frames += 1
+            self._watch.start()
+            self.progressed.emit(int(ms), int(self._total_ms))
+            if self._on_progress is not None and \
+                    self._on_progress(int(ms), int(self._total_ms)) is False:
+                self.cancel()
+                return
+        if self._v_eos:
+            if not self._v_done and self._vin.sendVideoFrame(QVideoFrame()):
+                self._v_done = True             # un fotograma vacio: no hay mas
+        elif self._started and self._player.playbackState() == \
+                QMediaPlayer.PlaybackState.PausedState:
+            qt_call(self._player, "play")
+
+    def _read_audio(self):
+        while self._dec is not None and self._dec.bufferAvailable() \
+                and len(self._aq) < self.AUDIO_QUEUE:
+            self._aq.append(self._dec.read())
+        self._pump_audio()
+
+    def _on_audio_end(self):
+        self._a_eos = True
+        self._pump_audio()
+
+    def _pump_audio(self):
+        if self._result is not None or self._ain is None:
+            return
+        while self._aq:
+            if not self._ain.sendAudioBuffer(self._aq[0]):
+                return
+            self._aq.popleft()
+            self._watch.start()
+        if self._dec is not None and self._dec.bufferAvailable():
+            QTimer.singleShot(0, self._read_audio)
+        elif self._a_eos and not self._a_done and self._ain.sendAudioBuffer(QAudioBuffer()):
+            self._a_done = True
+
+    def _on_recorder_state(self, estado):
+        if estado == QMediaRecorder.RecorderState.StoppedState and self._started \
+                and self._result is None:
+            if self._v_done:
+                self._finish(True, "")
+            else:
+                self._fail("the recording stopped before the end")
+
+    def _fail(self, texto: str):
+        if self._result is None:
+            self._finish(False, texto)
+
+    def _finish(self, bien: bool, texto: str):
+        self._result = (bien, texto)
+        self._watch.stop()
+        self._vq.clear()
+        self._aq.clear()
+        if self._dec is not None:
+            qt_call(self._dec, "stop")
+        qt_call(self._player, "stop")
+        qt_call(self._player, "setSource", ("QUrl", QUrl()))          # suelta el archivo: en Windows lo bloquea
+        if not bien:
+            if self._rec.recorderState() != QMediaRecorder.RecorderState.StoppedState:
+                qt_call(self._rec, "stop")
+            QTimer.singleShot(300, self._drop_partial)
+        self.finished.emit(bien, texto)
+        if self._loop.isRunning():
+            # un respiro para que el grabador cierre el archivo antes de volver
+            QTimer.singleShot(350 if not bien else 0, self._loop.quit)
+
+    def _drop_partial(self):
+        try:
+            if os.path.exists(self.destino):
+                os.remove(self.destino)
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -2211,8 +2485,8 @@ class FrameCache(QObject):
         self._token += 1
         self._running = self._loaded = self._choked = False
         if self._player is not None:
-            self._player.stop()
-            self._player.setSource(QUrl())
+            qt_call(self._player, "stop")
+            qt_call(self._player, "setSource", ("QUrl", QUrl()))
         vacio = not self._data
         self.path = None
         self.count = 0
@@ -2278,9 +2552,9 @@ class FrameCache(QObject):
         if on:
             self._watch.stop()
             if self._running:
-                self._player.pause()
+                qt_call(self._player, "pause")
         elif self._running and not self._choked:
-            self._player.play()
+            qt_call(self._player, "play")
             self._watch.start()
         elif not self._running:
             self._plan()
@@ -2301,7 +2575,7 @@ class FrameCache(QObject):
             return
         self._ensure_player()
         self._loaded = False
-        self._player.setSource(QUrl.fromLocalFile(self.path))
+        qt_call(self._player, "setSource", ("QUrl", QUrl.fromLocalFile(self.path)))
         self._watch.start()
 
     def _on_status(self, estado):
@@ -2328,8 +2602,8 @@ class FrameCache(QObject):
         self._watch.stop()
         self._running = False
         if self._player is not None:
-            self._player.stop()
-            self._player.setSource(QUrl())
+            qt_call(self._player, "stop")
+            qt_call(self._player, "setSource", ("QUrl", QUrl()))
         self._loaded = False
         self.path = None if not self._data else self.path
 
@@ -2385,7 +2659,7 @@ class FrameCache(QObject):
         if i is None:
             self._watch.stop()
             self._running = False
-            self._player.stop()
+            qt_call(self._player, "stop")
             self._release_if_done()
             return
         self._goal = i
@@ -2393,15 +2667,15 @@ class FrameCache(QObject):
         self._idle = 0
         self._running = True
         self._choked = False
-        self._player.setPlaybackRate(self._rate())
-        self._player.setPosition(int(round((i * self.frame_us + self.frame_us / 4) / 1000)))
-        self._player.play()
+        qt_call(self._player, "setPlaybackRate", ("qreal", float(self._rate())))
+        qt_call(self._player, "setPosition", ("qint64", (int(round((i * self.frame_us + self.frame_us / 4) / 1000)))))
+        qt_call(self._player, "play")
         self._watch.start()
 
     def _release_if_done(self):
         """Leido entero: se suelta el archivo (en Windows, abierto no se puede mover)."""
         if self._loaded and not self._running and not self._flying and self.complete():
-            self._player.setSource(QUrl())
+            qt_call(self._player, "setSource", ("QUrl", QUrl()))
             self._loaded = False
 
     def _on_refocus(self):
@@ -2445,11 +2719,11 @@ class FrameCache(QObject):
         if i >= b or self._idle >= 12:
             # fuera de lo que cabe, o un rato largo por lo que ya estaba: al siguiente hueco
             self._running = False
-            self._player.pause()
+            qt_call(self._player, "pause")
             QTimer.singleShot(0, self._plan)
         elif len(self._flying) > 16 and not self._choked:
             self._choked = True             # se comprime mas despacio de lo que se lee
-            self._player.pause()
+            qt_call(self._player, "pause")
 
     @Slot(int, int, QByteArray)
     def _on_proxy(self, token: int, i: int, datos: QByteArray):
@@ -2468,7 +2742,7 @@ class FrameCache(QObject):
         if self._choked and len(self._flying) < 4:
             self._choked = False
             if self._running and not self._hold:
-                self._player.play()
+                qt_call(self._player, "play")
         self._release_if_done()
 
     def _trim(self):
@@ -2681,6 +2955,98 @@ def clean_review_shape(d) -> dict | None:
     return f
 
 
+# Cuanto aguanta en pantalla una anotacion: su fotograma nada mas (1, lo de
+# siempre, y entonces no se guarda la clave), un numero de fotogramas, o
+# HOLD_NEXT: hasta la siguiente anotacion (o hasta el final del video). En
+# cualquier caso deja de verse cuando empieza la siguiente.
+HOLD_NEXT = "next"
+HOLD_MAX = 100000
+HOLD_BAR_MAX = 240                   # hasta donde llega la barra Hold (mas, tecleando)
+
+
+def clean_hold(v) -> int | str:
+    """El aguante leido de un json o de la barra: 1, un numero de fotogramas o HOLD_NEXT."""
+    if v == HOLD_NEXT:
+        return HOLD_NEXT
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+        return int(max(1, min(HOLD_MAX, v)))
+    return 1
+
+
+def review_hold(a: dict) -> int | str:
+    return clean_hold(a.get("hold"))
+
+
+def hold_text(h) -> str:
+    return "until the next one" if h == HOLD_NEXT else "%d frame%s" % (h, "" if h == 1 else "s")
+
+
+def review_spans(lista: list[dict], frame_ms: float, total_ms: float) -> list[tuple[float, float]]:
+    """Desde cuando y hasta cuando (sin incluirlo) se ve cada anotacion de una
+    lista ordenada: lo que aguante, y nunca mas alla de donde empieza la siguiente."""
+    frame_ms = frame_ms if frame_ms > 0 else 40.0
+    tramos = []
+    for i, a in enumerate(lista):
+        ini = float(a["ms"])
+        tope = float(lista[i + 1]["ms"]) if i + 1 < len(lista) else max(float(total_ms),
+                                                                        ini + frame_ms)
+        h = review_hold(a)
+        fin = tope if h == HOLD_NEXT else min(ini + h * frame_ms, tope)
+        tramos.append((ini, max(fin, min(ini + frame_ms, tope))))
+    return tramos
+
+
+def review_shown(lista: list[dict], ms: float, frame_ms: float, total_ms: float) -> int | None:
+    """La anotacion que se ve en ese tiempo: la suya o una anterior que aun aguanta."""
+    margen = (frame_ms if frame_ms > 0 else 40.0) / 2
+    visto = None
+    for i, (ini, fin) in enumerate(review_spans(lista, frame_ms, total_ms)):
+        if ini - margen <= ms < fin - margen:
+            visto = i
+    return visto
+
+
+def paint_review_caption(p: QPainter, W: float, H: float, texto: str):
+    """El comentario en una franja oscura abajo, de un tamano que depende del
+    video (no de lo que se haya reducido en pantalla)."""
+    f = QFont()
+    f.setPixelSize(max(10, int(H / 24)))
+    p.setFont(f)
+    margen = H / 60
+    ancho = W - 2 * margen
+    flags = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+                | Qt.TextFlag.TextWordWrap)
+    alto = p.boundingRect(QRectF(0, 0, ancho, H), flags, texto).height()
+    alto = min(alto, H * 0.4)
+    franja = QRectF(0, H - alto - 2 * margen, W, alto + 2 * margen)
+    p.fillRect(franja, QColor(0, 0, 0, 170))
+    p.setPen(QColor("white"))
+    p.drawText(franja.adjusted(margen, margen, -margen, -margen), flags, texto)
+
+
+def review_frame_image(frame: QImage, a: dict | None, caption: bool = True) -> QImage:
+    """Un fotograma del video con la anotacion que le toca encima (dibujo y,
+    si caption, el comentario abajo), tal como se ve en el visor. Sin
+    anotacion, el fotograma tal cual. Lo dibujado va en las medidas en que se
+    dibujo (a['w'] x a['h']) y se lleva a las del fotograma."""
+    img = frame.convertToFormat(QImage.Format.Format_RGB32)
+    if a is None or img.isNull():
+        return img
+    texto = review_text(a) if caption and (a.get("comment") or "").strip() else ""
+    if not a.get("draw") and not texto:
+        return img
+    w, h = a.get("w") or img.width(), a.get("h") or img.height()
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.scale(img.width() / w, img.height() / h)
+    for f in a.get("draw") or []:
+        paint_shape(p, f)
+    if texto:
+        paint_review_caption(p, w, h, texto)
+    p.end()
+    return img
+
+
 def clean_reviews(crudo) -> dict[str, list[dict]]:
     """Las anotaciones de los videos leidas de un json: {ruta: [anotacion]},
     ordenadas por tiempo y con una sola por fotograma. Sin comentario ni
@@ -2708,6 +3074,8 @@ def clean_reviews(crudo) -> dict[str, list[dict]]:
                 v = a.get(k)
                 item[k] = int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) \
                     and 0 <= v < 10 ** 7 else 0
+            if clean_hold(a.get("hold")) != 1:
+                item["hold"] = clean_hold(a.get("hold"))
             por_ms[item["ms"]] = item
         if por_ms:
             limpio[p] = [por_ms[k] for k in sorted(por_ms)]
@@ -3088,7 +3456,7 @@ class VideoThumbnailer(QObject):
         sink.videoFrameChanged.connect(
             lambda fr, sk=sink: self._on_frame(fr) if sk is self._sink else None)
         self._timeout.start()
-        player.setSource(QUrl.fromLocalFile(self._actual[0]))
+        qt_call(player, "setSource", ("QUrl", QUrl.fromLocalFile(self._actual[0])))
 
     def _on_status(self, estado):
         if self._player is None:
@@ -3097,8 +3465,8 @@ class VideoThumbnailer(QObject):
             dur = self._player.duration()
             self._objetivo = min(2000, dur // 10) if dur > 1000 else 0
             if self._objetivo:
-                self._player.setPosition(self._objetivo)
-            self._player.play()
+                qt_call(self._player, "setPosition", ("qint64", int(self._objetivo)))
+            qt_call(self._player, "play")
         elif estado == QMediaPlayer.MediaStatus.InvalidMedia:
             self._terminar(QImage())
 
@@ -3127,8 +3495,8 @@ class VideoThumbnailer(QObject):
         self._player = self._sink = None
         self._actual = None
         if player is not None:
-            player.stop()
-            player.setSource(QUrl())        # suelta el archivo: en Windows lo bloquea
+            qt_call(player, "stop")
+            qt_call(player, "setSource", ("QUrl", QUrl()))        # suelta el archivo: en Windows lo bloquea
             player.deleteLater()
             sink.deleteLater()
         if not img.isNull():
@@ -4265,6 +4633,161 @@ class MarkSlider(QSlider):
             p.drawText(caja, int(Qt.AlignmentFlag.AlignCenter), rotulo)
 
 
+TRACK_H = 14                         # alto de la pista de anotaciones
+
+
+class ReviewTrack(QWidget):
+    """La pista de anotaciones, encima de la barra de tiempo: una franja por
+    anotacion, tan larga como lo que aguanta en pantalla. Un clic en una va a
+    su fotograma; arrastrando su borde derecho se elige cuantos fotogramas
+    dura (llevarlo hasta la siguiente, o hasta el final, es "hasta la
+    siguiente"). Mide lo mismo que la barra de tiempo y usa sus cuentas."""
+    jumpTo = Signal(int)                    # ms de la anotacion pinchada
+    holdEdited = Signal(int, object)        # ms de la anotacion y su aguante nuevo
+
+    EDGE = 5                                # cuanto se puede fallar al coger el borde
+
+    def __init__(self, slider, parent=None):
+        super().__init__(parent)
+        self.slider = slider
+        self.lista: list[dict] = []
+        self.spans: list[tuple[float, float]] = []
+        self.shown = None                   # la que se ve en el fotograma actual
+        self._frame_ms = 40.0
+        self._total = 0.0
+        self._drag = None                   # (cual, aguante provisional)
+        self._press = None                  # cual se pincho sin coger el borde
+        self.setFixedHeight(TRACK_H)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setToolTip("Drawings and comments of this video, each as long as it stays on "
+                        "screen. Click one to go to its frame; drag its right edge to choose "
+                        "how many frames it lasts (all the way to the next one: until then).")
+
+    def set_items(self, lista: list[dict], frame_ms: float, total_ms: float, shown):
+        clave = ([(a["ms"], review_hold(a)) for a in lista], frame_ms, total_ms, shown)
+        if clave == getattr(self, "_clave", None):
+            return
+        self._clave = clave
+        self.lista = list(lista)
+        self._frame_ms, self._total, self.shown = frame_ms, total_ms, shown
+        if self._drag is not None and self._drag[0] >= len(self.lista):
+            self._drag = None
+        self._respan()
+
+    def _respan(self):
+        lista = self.lista
+        if self._drag is not None:
+            i, h = self._drag
+            lista = list(lista)
+            lista[i] = dict(lista[i], hold=h)
+        self.spans = review_spans(lista, self._frame_ms, self._total)
+        self.update()
+
+    def _box(self, i: int) -> QRectF:
+        ini, fin = self.spans[i]
+        x0, x1 = self.slider.mark_x(ini), self.slider.mark_x(fin)
+        return QRectF(x0, 2.0, max(5.0, x1 - x0), self.height() - 4.0)
+
+    def _edge_at(self, x: float):
+        """La anotacion cuyo borde derecho esta bajo el puntero (la de mas a la derecha)."""
+        for i in range(len(self.spans) - 1, -1, -1):
+            if abs(x - self._box(i).right()) <= self.EDGE:
+                return i
+        return None
+
+    def _bar_at(self, x: float):
+        for i in range(len(self.spans) - 1, -1, -1):
+            caja = self._box(i)
+            if caja.left() - 1 <= x <= caja.right() + 1:
+                return i
+        return None
+
+    def _hold_for(self, i: int, x: float):
+        """El aguante que deja el borde derecho de la anotacion i en x."""
+        sl = self.slider
+        f_ini = sl.frame_of(self.lista[i]["ms"])
+        f_x = sl.frame_of(sl._value_at(x))
+        tope = sl.frame_of(self.lista[i + 1]["ms"]) if i + 1 < len(self.lista) \
+            else sl.frame_count()
+        if f_x + 1 >= tope and tope - f_ini > 1:
+            return HOLD_NEXT
+        return max(1, min(HOLD_MAX, f_x - f_ini + 1))
+
+    def mousePressEvent(self, e):
+        if e.button() != Qt.MouseButton.LeftButton or not self.spans:
+            e.ignore()
+            return
+        x = e.position().x()
+        i = self._edge_at(x)
+        if i is not None:
+            self._drag = (i, review_hold(self.lista[i]))
+        else:
+            self._press = self._bar_at(x)
+        e.accept()
+
+    def mouseMoveEvent(self, e):
+        x = e.position().x()
+        if self._drag is not None:
+            i = self._drag[0]
+            h = self._hold_for(i, x)
+            if h != self._drag[1]:
+                self._drag = (i, h)
+                self._respan()
+            e.accept()
+            return
+        self.setCursor(Qt.CursorShape.SizeHorCursor if self._edge_at(x) is not None
+                       else Qt.CursorShape.PointingHandCursor if self._bar_at(x) is not None
+                       else Qt.CursorShape.ArrowCursor)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._drag is not None:
+            i, h = self._drag
+            self._drag = None
+            ms = self.lista[i]["ms"]
+            cambia = h != review_hold(self.lista[i])
+            self._respan()
+            if cambia:
+                self.holdEdited.emit(ms, h)
+        elif self._press is not None:
+            i, self._press = self._press, None
+            if i < len(self.lista) and self._bar_at(e.position().x()) == i:
+                self.jumpTo.emit(self.lista[i]["ms"])
+        e.accept()
+
+    def paintEvent(self, e):
+        if not self.spans:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rosa = QColor(REVIEW_MARK_COLOR)
+        fuente = QFont(self.font())
+        fuente.setPixelSize(9)
+        fuente.setBold(True)
+        p.setFont(fuente)
+        for i, a in enumerate(self.lista):
+            caja = self._box(i)
+            fondo = QColor(rosa)
+            fondo.setAlpha(215 if i == self.shown else 120)
+            p.setPen(QPen(rosa.darker(130), 1))
+            p.setBrush(fondo)
+            p.drawRoundedRect(caja, 2.5, 2.5)
+            h = self._drag[1] if self._drag is not None and self._drag[0] == i else review_hold(a)
+            if caja.width() >= 12:
+                # el borde que se arrastra
+                p.setPen(QPen(QColor(255, 255, 255, 220), 1.4))
+                x = caja.right() - 3
+                p.drawLine(QPointF(x, caja.top() + 2.5), QPointF(x, caja.bottom() - 2.5))
+            rotulo = "\u2192" if h == HOLD_NEXT else (str(h) if h > 1 else "")
+            if rotulo and caja.width() >= 26:
+                p.setPen(QColor("white"))
+                p.drawText(caja.adjusted(4, 0, -7, 0),
+                           int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), rotulo)
+        p.end()
+
+
 SMOOTH_DEFAULT = 35                  # estabilizacion del trazo al empezar (0 a 100)
 
 
@@ -4649,22 +5172,7 @@ class ReviewOverlay(QGraphicsItem):
             self._paint_caption(p)
 
     def _paint_caption(self, p: QPainter):
-        """El comentario en una franja oscura abajo, de un tamano que depende
-        del video (no de lo que se haya reducido en pantalla)."""
-        W, H = self.box.width(), self.box.height()
-        f = QFont()
-        f.setPixelSize(max(10, int(H / 24)))
-        p.setFont(f)
-        margen = H / 60
-        ancho = W - 2 * margen
-        flags = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
-                    | Qt.TextFlag.TextWordWrap)
-        alto = p.boundingRect(QRectF(0, 0, ancho, H), flags, self.caption).height()
-        alto = min(alto, H * 0.4)
-        franja = QRectF(0, H - alto - 2 * margen, W, alto + 2 * margen)
-        p.fillRect(franja, QColor(0, 0, 0, 170))
-        p.setPen(QColor("white"))
-        p.drawText(franja.adjusted(margen, margen, -margen, -margen), flags, self.caption)
+        paint_review_caption(p, self.box.width(), self.box.height(), self.caption)
 
 
 class ReviewText(QPlainTextEdit):
@@ -4718,6 +5226,8 @@ class ReviewBar(QWidget):
     colorChanged = Signal(str)
     levelChanged = Signal(int)
     smoothChanged = Signal(int)             # estabilizacion del lapiz, de 0 a 100
+    holdChanged = Signal(object)            # cuanto aguanta: fotogramas, o HOLD_NEXT
+    exportVideo = Signal()
     undoShape = Signal()
     clearDrawing = Signal()
     commentTyped = Signal()                 # cada tecla; PreviewPane lo guarda con calma
@@ -4733,7 +5243,7 @@ class ReviewBar(QWidget):
              ("rect", "rect", "Rectangle"),
              ("ellipse", "elipse", "Ellipse"),
              ("text", "texto", "Text on the frame"))
-    COMMENT_MIN = 560                       # lo que necesita el comentario para ir en la misma fila
+    COMMENT_MIN = 680                       # lo que necesita el comentario para ir en la misma fila
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -4789,7 +5299,26 @@ class ReviewBar(QWidget):
                                    "a string, so a shaky hand still draws a clean line")
         self.sld_smooth.valueChanged.connect(self.smoothChanged.emit)
         fila.addWidget(self.sld_smooth)
-        for s in (self.sld_level, self.sld_smooth):
+        # cuanto aguanta en pantalla lo anotado en un fotograma
+        self.sld_hold = BarSlider("Hold", "%d f", curva=2.0, ancho=84)
+        self.sld_hold.setRange(1, HOLD_BAR_MAX)
+        self.sld_hold.setValue(1)
+        self.sld_hold.setToolTip("How many frames the drawing and comment of this frame stay on "
+                                 "screen (1: only its own frame). Drag, or double-click to type "
+                                 "a number. New drawings start with what you leave here. The "
+                                 "strip above the time bar shows it: drag its right edge too")
+        self.sld_hold.valueChanged.connect(lambda _v: self.holdChanged.emit(self.hold()))
+        fila.addWidget(self.sld_hold)
+        self.b_hold_next = QToolButton()
+        self.b_hold_next.setCheckable(True)
+        self.b_hold_next.setAutoRaise(True)
+        themed(self.b_hold_next, icon="hold_next")
+        self.b_hold_next.setToolTip("Hold until the next drawing or comment (or the end of the "
+                                    "video), however far it is")
+        self.b_hold_next.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.b_hold_next.toggled.connect(self._on_hold_next)
+        fila.addWidget(self.b_hold_next)
+        for s in (self.sld_level, self.sld_smooth, self.sld_hold):
             s.setFixedHeight(24)
             s.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         fila.addSpacing(6)
@@ -4818,7 +5347,8 @@ class ReviewBar(QWidget):
         self.lbl_stamp.setMinimumWidth(110)
         fila2.addWidget(self.lbl_stamp)
         self.txt = ReviewText()
-        self.txt.setPlaceholderText("Comment on this frame…  (Enter saves, Shift+Enter: new line)")
+        self.txt.setPlaceholderText("Comment on this frame…")
+        self.txt.setToolTip("The comment of this frame. Enter saves it; Shift+Enter is a new line")
         self.txt.setTabChangesFocus(True)
         self.txt.textChanged.connect(self.commentTyped.emit)
         self.txt.submitted.connect(self.commentSubmitted.emit)
@@ -4837,6 +5367,16 @@ class ReviewBar(QWidget):
         self.b_pdf.clicked.connect(self.exportPdf.emit)
         self.b_pdf.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         fila2.addWidget(self.b_pdf)
+        self.b_video = QPushButton("  Video")
+        themed(self.b_video, icon="film")
+        self.b_video.setToolTip("Export video: a copy of the video with your drawings and "
+                                "comments on it, each for as long as it is held, with its sound")
+        self.b_video.clicked.connect(self.exportVideo.emit)
+        self.b_video.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        if not HAS_VIDEO_EXPORT:
+            self.b_video.setEnabled(False)
+            self.b_video.setToolTip("Exporting video needs Qt 6.8 or later")
+        fila2.addWidget(self.b_video)
         self.b_list = QToolButton()
         self.b_list.setText("Comments")
         self.b_list.setToolTip("Every comment of this video: pick one to go to its frame")
@@ -4851,6 +5391,28 @@ class ReviewBar(QWidget):
 
     def one_row(self) -> bool:
         return self.caja.direction() == QBoxLayout.Direction.LeftToRight
+
+    def hold(self):
+        return HOLD_NEXT if self.b_hold_next.isChecked() else self.sld_hold.value()
+
+    def _on_hold_next(self, on: bool):
+        self.sld_hold.setEnabled(not on)
+        self.holdChanged.emit(self.hold())
+
+    def set_hold(self, h):
+        """Sin avisar: lo que se ve cambia porque cambia el fotograma."""
+        h = clean_hold(h)
+        for w in (self.sld_hold, self.b_hold_next):
+            w.blockSignals(True)
+        self.b_hold_next.setChecked(h == HOLD_NEXT)
+        self.sld_hold.setEnabled(h != HOLD_NEXT)
+        if h != HOLD_NEXT:
+            if h > self.sld_hold.maximum():
+                self.sld_hold.setRange(1, h)        # uno tecleado, mas largo que la barra
+            self.sld_hold.setValue(h)
+        for w in (self.sld_hold, self.b_hold_next):
+            w.blockSignals(False)
+        self.sld_hold.update()
 
     def _ajustar(self):
         """Una fila si cabe todo; si no, las herramientas arriba y el comentario debajo."""
@@ -4890,6 +5452,7 @@ class ReviewBar(QWidget):
         self.b_clear.setEnabled(has_drawing)
         self.b_delete.setEnabled(exists or bool(self.txt.toPlainText().strip()))
         self.b_pdf.setEnabled(True)              # sin anotaciones: primer y ultimo fotograma
+        self.b_video.setEnabled(HAS_VIDEO_EXPORT and n_total > 0)
         self.b_list.setText("Comments (%d)" % n_total if n_total else "Comments")
         self.b_list.setEnabled(n_total > 0)
 
@@ -7554,6 +8117,7 @@ class PreviewPane(QWidget):
     # ventana principal guarda en la biblioteca
     onion_prefs = dict(ONION_DEFAULTS)      # papel cebolla: encendido, fotogramas y opacidad
     review_smooth = SMOOTH_DEFAULT          # estabilizacion del lapiz al anotar
+    review_hold = 1                         # cuanto aguanta una anotacion nueva (o HOLD_NEXT)
     _panes = weakref.WeakSet()              # los visores vivos: lo que cambia uno lo ven todos
 
     def __init__(self, parent=None, max_side: int = 0, with_button: bool = True):
@@ -7695,6 +8259,7 @@ class PreviewPane(QWidget):
         self.reviews_for = lambda path: []
         self.on_reviews_changed = lambda path, items, desc: None
         self.on_export_review = lambda path: None
+        self.on_export_review_video = lambda path: None
         self.overlay = None                         # se crea con el reproductor
         self.review_on = False                      # el modo anotar, que se mantiene de video a video
         self._review_tool = "trazo"
@@ -7781,6 +8346,12 @@ class PreviewPane(QWidget):
         self.sld_pos.sliderPressed.connect(self._on_scrub_start)
         self.sld_pos.sliderReleased.connect(self._on_scrub_end)
         self.sld_pos.stepped.connect(self.step_frame)
+        # encima, la pista de anotaciones: cuanto aguanta cada una en pantalla
+        self.rv_track = ReviewTrack(self.sld_pos)
+        self.rv_track.jumpTo.connect(self._on_review_jump)
+        self.rv_track.holdEdited.connect(self._on_track_hold)
+        self.rv_track.hide()
+        vid_col.addWidget(self.rv_track)
         vid_col.addWidget(self.sld_pos)
         self.lbl_time = QLabel("0:00 / 0:00")
         themed(self.lbl_time, css="color:%(caption)s;")
@@ -7928,6 +8499,8 @@ class PreviewPane(QWidget):
         rb.commentSubmitted.connect(self.flush_review)
         rb.deleteHere.connect(self.delete_review)
         rb.exportPdf.connect(self._on_review_export)
+        rb.exportVideo.connect(self._on_review_export_video)
+        rb.holdChanged.connect(self._on_review_hold)
         rb.jumpTo.connect(self._on_review_jump)
         self.review_bar.hide()
 
@@ -8307,7 +8880,7 @@ class PreviewPane(QWidget):
         self.flush_review()
         self._rv_key = None
         self._rv_list_sig = None
-        self.player.stop()
+        qt_call(self.player, "stop")
         self.item.setPixmap(QPixmap())
         self.item.hide()
         self.video_item.show()
@@ -8329,13 +8902,13 @@ class PreviewPane(QWidget):
         self._enable_shortcuts()
         self.refresh_marks()
         self.loop_in = self.loop_out = None
-        self.player.setSource(QUrl.fromLocalFile(path))
-        self.player.setPlaybackRate(self.rate)
+        qt_call(self.player, "setSource", ("QUrl", QUrl.fromLocalFile(path)))
+        qt_call(self.player, "setPlaybackRate", ("qreal", float(self.rate)))
         self._apply_loop()
         if PreviewPane.autoplay:
-            self.player.play()
+            qt_call(self.player, "play")
         else:
-            self.player.pause()
+            qt_call(self.player, "pause")
         self._apply_review_ui()
         self._caption_video()
 
@@ -8346,8 +8919,8 @@ class PreviewPane(QWidget):
         self._cache_key = None
         self._reset_scrub()
         if self.player is not None:
-            self.player.stop()
-            self.player.setSource(QUrl())
+            qt_call(self.player, "stop")
+            qt_call(self.player, "setSource", ("QUrl", QUrl()))
         if self.showing_video:
             self.showing_video = False
             self._want_us = None
@@ -8355,6 +8928,7 @@ class PreviewPane(QWidget):
             self.video_item.hide()
             self.item.show()
             self.video_bar.hide()
+            self.rv_track.hide()
             self._rv_key = None
             self._apply_review_ui()
         self._enable_shortcuts()
@@ -8394,7 +8968,7 @@ class PreviewPane(QWidget):
                 self._tries += 1
                 # se paso: justo al empezar el fotograma; se quedo corto: mas adentro
                 destino = self._want_us + (1000 if error > 0 else self._frame_us * 0.6)
-                self.player.setPosition(int(math.ceil(destino / 1000)))
+                self._seek_ms(int(math.ceil(destino / 1000)))
                 self._seek_guard.start()
         if self._want_us is None:
             self._seek_done()
@@ -8481,7 +9055,7 @@ class PreviewPane(QWidget):
             return
         self._scrub_resume = self.is_playing()
         if self._scrub_resume:
-            self.player.pause()
+            qt_call(self.player, "pause")
 
     def _on_scrub_end(self):
         if not self.showing_video or self.player is None:
@@ -8492,11 +9066,12 @@ class PreviewPane(QWidget):
             self._play_from_here()
 
     def _play_from_here(self):
+        salto = self._scrub_us is not None or self._seek_busy     # hay un salto en cola
         if self._scrub_us is not None:
             self._settle_now()                  # el reproductor, a donde se estaba viendo
         self._want_us = None
         self._seek_next = None
-        self.player.play()
+        self._play_after_seek() if salto else qt_call(self.player, "play")
 
     def frame_index(self, us: float | None = None) -> int:
         us = self.current_frame_us() if us is None else us
@@ -8510,7 +9085,7 @@ class PreviewPane(QWidget):
         if self.player is None:
             return
         if self.is_playing():
-            self.player.pause()
+            qt_call(self.player, "pause")
         ultimo = max(0.0, self.player.duration() * 1000 - self._frame_us)
         inicio_us = max(0.0, min(inicio_us, ultimo))
         # redondeado a un fotograma entero: los tiempos guardados son en ms
@@ -8541,7 +9116,14 @@ class PreviewPane(QWidget):
         self._tries = 0
         self._seek_busy = True
         self._seek_guard.start()
-        self.player.setPosition(int(round((inicio_us + self._frame_us / 4) / 1000)))
+        self._seek_ms(int(round((inicio_us + self._frame_us / 4) / 1000)))
+
+    def _seek_ms(self, ms: int):
+        """El salto de verdad (ver qt_call: nunca player.setPosition a pelo)."""
+        qt_call(self.player, "setPosition", ("qint64", int(ms)))
+
+    def _play_after_seek(self):
+        qt_call(self.player, "play")
 
     def step_frame(self, delta: int):
         if self.showing_gif:
@@ -8574,7 +9156,7 @@ class PreviewPane(QWidget):
         if not self.showing_video:
             return
         if self.is_playing():
-            self.player.pause()
+            qt_call(self.player, "pause")
         if self._mark_here() is not None:
             self.flash("This frame is already a keyframe")
             return
@@ -8683,7 +9265,7 @@ class PreviewPane(QWidget):
             self.b_annotate.setChecked(self.review_on)
             self.b_annotate.blockSignals(False)
         if self.review_on and self.is_playing():
-            self.player.pause()                 # se anota sobre un fotograma quieto
+            qt_call(self.player, "pause")                 # se anota sobre un fotograma quieto
         if not self.review_on:
             self.flush_review()
         self._apply_review_ui()
@@ -8716,9 +9298,16 @@ class PreviewPane(QWidget):
         self._rv_key = (self.loaded_path, ms)
         lista = self.reviews()
         self.sld_pos.set_review_marks([x["ms"] for x in lista])
-        tiene_texto = bool(a and a["comment"].strip())
-        self.overlay.set_content(list(a["draw"]) if a else [],
-                                 review_text(a) if tiene_texto and not self.review_on else "")
+        # lo que se ve: la anotacion de este fotograma o una anterior que aun aguanta
+        f_ms = self._frame_us / 1000.0
+        total = self.player.duration() if self.player is not None else 0
+        visto = review_shown(lista, self.current_frame_us() / 1000.0, f_ms, total)
+        s = lista[visto] if visto is not None else None
+        self.rv_track.set_items(lista, f_ms, total, visto)
+        self._show_track(bool(lista) or self.review_on)
+        tiene_texto = bool(s and s["comment"].strip())
+        self.overlay.set_content(list(s["draw"]) if s else [],
+                                 review_text(s) if tiene_texto and not self.review_on else "")
         margen = self._frame_us / 2
         antes = any(x["ms"] * 1000 < self.current_frame_us() - margen for x in lista)
         despues = any(x["ms"] * 1000 > self.current_frame_us() + margen for x in lista)
@@ -8730,18 +9319,27 @@ class PreviewPane(QWidget):
             if not self._rv_dirty:
                 self.review_bar.set_comment(a["comment"] if a else "")
             dur = self.player.duration() if self.player is not None else 0
-            self.review_bar.set_state(review_stamp(ms, self.frame_index(ms * 1000)),
-                                      bool(a and a["draw"]), a is not None, len(lista),
-                                      review_stamp(dur, self.frame_index(dur * 1000) or 1))
+            n_total = self.frame_index(dur * 1000) or 1
+            marca = review_stamp(ms, self.frame_index(ms * 1000))
+            if s is not None and a is None:
+                # el dibujo que se ve viene de antes: de que fotograma
+                marca += "  \u21e4%d" % self.frame_index(s["ms"] * 1000)
+            self.review_bar.set_state(marca, bool(a and a["draw"]), a is not None, len(lista),
+                                      review_stamp(dur, n_total) + "  \u21e4%d" % n_total)
+            self.review_bar.lbl_stamp.setToolTip(
+                "The drawing on screen is held from frame %d. Drawing here starts a new one."
+                % self.frame_index(s["ms"] * 1000) if s is not None and a is None else "")
+            self.review_bar.set_hold(review_hold(a) if a is not None
+                                     else PreviewPane.review_hold)
             sig = [(x["ms"], x["comment"], x.get("frame", 0)) for x in lista]
             if sig != self._rv_list_sig:
                 self._rv_list_sig = sig
                 self.review_bar.set_list(lista)
 
     def _store_review(self, ms: int, comment: str | None = None,
-                      draw: list | None = None, desc: str = ""):
-        """Cambia el comentario y/o el dibujo del fotograma ms. Sin ninguno de
-        los dos, la anotacion se borra."""
+                      draw: list | None = None, desc: str = "", hold=None):
+        """Cambia el comentario, el dibujo y/o el aguante del fotograma ms. Sin
+        comentario ni dibujo, la anotacion se borra."""
         if not self.loaded_path:
             return
         lista = [dict(x) for x in self.reviews()]
@@ -8750,12 +9348,18 @@ class PreviewPane(QWidget):
             tam = self.video_item.size()
             a = {"ms": int(ms), "frame": self.frame_index(ms * 1000),
                  "w": int(tam.width()), "h": int(tam.height()), "comment": "", "draw": []}
+            if PreviewPane.review_hold != 1:
+                a["hold"] = PreviewPane.review_hold     # las nuevas, con lo que diga la barra
         else:
             a = lista.pop(i)
         if comment is not None:
             a["comment"] = comment.rstrip()
         if draw is not None:
             a["draw"] = draw
+        if hold is not None:
+            a.pop("hold", None)
+            if clean_hold(hold) != 1:
+                a["hold"] = clean_hold(hold)
         if a["comment"].strip() or a["draw"]:
             lista.append(a)
             lista.sort(key=lambda x: x["ms"])
@@ -8790,7 +9394,7 @@ class PreviewPane(QWidget):
 
     def _review_can_draw(self) -> bool:
         if self.is_playing():
-            self.player.pause()                 # el clic para; el siguiente dibuja
+            qt_call(self.player, "pause")                 # el clic para; el siguiente dibuja
             return False
         return True
 
@@ -8895,7 +9499,7 @@ class PreviewPane(QWidget):
     def set_rate(self, r: float):
         self.rate = min(PLAY_RATES, key=lambda x: abs(x - r))
         if self.player is not None:
-            self.player.setPlaybackRate(self.rate)
+            qt_call(self.player, "setPlaybackRate", ("qreal", float(self.rate)))
         self._refresh_rate_ui()
         if self.showing_video:
             self.flash("Speed %s" % self._rate_text(self.rate))
@@ -9072,6 +9676,44 @@ class PreviewPane(QWidget):
         if self.loaded_path:
             self.on_export_review(self.loaded_path)
 
+    def _on_review_export_video(self):
+        self.flush_review()
+        if self.loaded_path:
+            if self.is_playing():
+                qt_call(self.player, "pause")
+            self.on_export_review_video(self.loaded_path)
+
+    # --- cuanto aguanta una anotacion en pantalla ------------------------------
+    def _show_track(self, si: bool):
+        """La pista de anotaciones solo ocupa sitio si hay algo que ensenar."""
+        si = bool(si) and self.showing_video
+        if self.rv_track.isVisibleTo(self.video_bar) != si:
+            self.rv_track.setVisible(si)
+            if self.showing_video and self._fitted:
+                QTimer.singleShot(80, self.fit)     # la vista cambia de alto
+
+    def _on_review_hold(self, h):
+        """La barra Hold: cambia el aguante de la anotacion de este fotograma, si
+        la hay, y en todo caso el de las que se hagan a partir de ahora."""
+        h = clean_hold(h)
+        if PreviewPane.review_hold != h:
+            PreviewPane.review_hold = h
+            self.on_prefs_changed()
+        a = self._review_here()
+        if self.showing_video and a is not None and review_hold(a) != h:
+            self.flush_review()
+            self._store_review(a["ms"], hold=h, desc=self._review_desc("hold", a["ms"]))
+            self._sync_review(force=True)
+
+    def _on_track_hold(self, ms: int, h):
+        """Se arrastro el borde de una anotacion en la pista."""
+        if not self.showing_video:
+            return
+        self.flush_review()
+        self._store_review(ms, hold=h, desc=self._review_desc("hold", ms))
+        self._sync_review(force=True)
+        self.flash("Held %s" % hold_text(clean_hold(h)))
+
     # --- bucle ---------------------------------------------------------------
     def toggle_loop(self):
         if self.showing_gif:
@@ -9194,7 +9836,7 @@ class PreviewPane(QWidget):
             return False
         desde, hasta = self.loop_bounds()
         if inicio_us + self._frame_us / 2 >= hasta * 1000:
-            self.player.setPosition(desde)
+            self._seek_ms(desde)
             return True
         return False
 
@@ -9202,8 +9844,8 @@ class PreviewPane(QWidget):
         # al final del archivo: el video entero, o un tramo que acaba donde el video
         if (estado == QMediaPlayer.MediaStatus.EndOfMedia and self.loop_on
                 and self.showing_video):
-            self.player.setPosition(self.loop_bounds()[0])
-            self.player.play()
+            self._seek_ms(self.loop_bounds()[0])
+            self._play_after_seek()
 
     def _refresh_loop_ui(self):
         rango = self.has_loop_range()
@@ -9250,9 +9892,10 @@ class PreviewPane(QWidget):
         if not self.showing_video or self.player is None:
             return
         if self.is_playing():
-            self.player.pause()
+            qt_call(self.player, "pause")
             return
         aqui = self.current_frame_us() / 1000       # donde se esta viendo (quiza desde memoria)
+        salto = self._scrub_us is not None or self._seek_busy     # hay un salto en cola
         if self._scrub_us is not None:
             self._settle_now()                  # el reproductor, a ese mismo fotograma
         self._want_us = None
@@ -9261,11 +9904,15 @@ class PreviewPane(QWidget):
             desde, hasta = self.loop_bounds()
             if not desde <= aqui < hasta - self._frame_us / 1000:
                 self._hide_proxy()
-                self.player.setPosition(desde)  # fuera del tramo: a su principio
+                self._seek_ms(desde)            # fuera del tramo: a su principio
+                salto = True
         elif self.player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia \
                 and self._scrub_us is None:
-            self.player.setPosition(0)          # al final, vuelve a empezar
-        self.player.play()
+            self._seek_ms(0)                    # al final, vuelve a empezar
+            salto = True
+        # tras un salto, el play va detras de el en la cola: si no, arrancaria
+        # desde donde estaba el reproductor y luego saltaria
+        self._play_after_seek() if salto else qt_call(self.player, "play")
 
     def _caption_video(self):
         tam = self.video_item.nativeSize() if self.video_item is not None else QSizeF()
@@ -9297,6 +9944,7 @@ class PreviewPane(QWidget):
         self._on_position(self.player.position())
         if self.showing_video:
             self._caption_video()
+            self._sync_review(force=True)       # "hasta el final" depende de la duracion
 
     def _on_position(self, ms: int):
         if self.is_playing() and not self.sld_pos.isSliderDown():
@@ -9314,7 +9962,7 @@ class PreviewPane(QWidget):
         if self.is_playing():
             self._want_us = None
             self._frame_start_us = ms * 1000    # provisional: el fotograma lo afina
-            self.player.setPosition(ms)
+            self._seek_ms(ms)
             return
         self._go_to_frame_us(self.sld_pos.frame_of(ms) * self._frame_us,
                              SCRUB_SETTLE_MS if self.sld_pos.isSliderDown() else STEP_SETTLE_MS)
@@ -9342,12 +9990,12 @@ class PreviewPane(QWidget):
 
     def _on_mute(self, silencio: bool):
         if self.audio is not None:
-            self.audio.setMuted(silencio)
+            qt_call(self.audio, "setMuted", ("bool", bool(silencio)))
         themed(self.b_mute, icon="mute" if silencio else "volume")
 
     def _on_volume(self, v: int):
         if self.audio is not None:
-            self.audio.setVolume(v / 100.0)
+            qt_call(self.audio, "setVolume", ("float", float(v / 100.0)))
 
     def _on_video_error(self, _error, texto: str):
         if self.showing_video:
@@ -9359,7 +10007,7 @@ class PreviewPane(QWidget):
         self.flush_review()
         self.cache.hold(True)                   # oculto no hace falta seguir leyendo
         if self.is_playing():
-            self.player.pause()                 # oculto no deberia seguir sonando
+            qt_call(self.player, "pause")                 # oculto no deberia seguir sonando
         if self.showing_gif and self.gif.playing:
             self.gif.pause()                    # ni gastando en fotogramas que no se ven
             self._gif_resume = True
@@ -10126,6 +10774,12 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
         else:
             p.drawLine(QPointF(M - 6, size / 2 - 3), QPointF(M, size / 2 + 3))
             p.drawLine(QPointF(M, size / 2 - 3), QPointF(M - 6, size / 2 + 3))
+    elif kind == "hold_next":
+        # una flecha hasta un tope: aguanta hasta la siguiente
+        c = size / 2
+        p.drawLine(QPointF(m, c), QPointF(M - 4, c))
+        p.drawPolyline([QPointF(M - 8, c - 3.5), QPointF(M - 4, c), QPointF(M - 8, c + 3.5)])
+        p.drawLine(QPointF(M - 0.5, m + 1), QPointF(M - 0.5, M - 1))
     elif kind == "onion":
         # tres siluetas: la de antes (roja), la de despues (verde) y la actual
         r = (M - m) / 2 - 2.2
@@ -13445,15 +14099,23 @@ draw on it (pencil, straight line — Shift keeps it at 45° steps —, arrow, r
 ellipse, text; five colours and thicknesses) and
 write a comment. <b>Smooth</b> steadies the pencil: at 0 it follows your hand exactly;
 higher, the line trails behind the pointer on a string and a shaky hand still draws a
-clean curve. The time stamp and frame number stay in front of the comment:
+clean curve. <b>Hold</b> says how long the drawing and comment of a frame stay on screen:
+only that frame (1), a number of frames, or &mdash; with the arrow button next to it &mdash;
+<b>until the next drawing</b> (or the end of the video). They also stay while the video
+plays. New drawings start with whatever Hold says. The pink <b>strip above the time bar</b>
+shows each annotation as long as it lasts: click one to go to its frame, and drag its
+right edge to choose how many frames it lasts (all the way to the next one means
+&ldquo;until then&rdquo;). A new drawing always ends the one before it. The time stamp and frame number stay in front of the comment:
 <i>[0:03.3 &middot; frame 50] Check the arc</i>. A pink bubble on the time bar marks each
 commented frame; the &#9664; and &#9654; buttons jump between them, and when you stop on
 one the drawing and the comment show up over the video, so a student can follow them
 without annotating. <b>Enter</b> saves the comment (<b>Shift+Enter</b> is a new line); it
 is also saved when you change frame. Everything lives in the library and
-<b>Ctrl+Z</b> undoes it. <b>Export PDF</b> writes one page per commented frame, with a
+<b>Ctrl+Z</b> undoes it. <b>PDF</b> writes one page per commented frame, with a
 picture of the frame, your drawing on top and the comment below; a video with no
-annotations gives its first and last frame.</li>
+annotations gives its first and last frame. <b>Video</b> writes an MP4 copy of the video
+with your drawings and comments on it, each for as long as it is held, and with its
+sound; the original file is never touched.</li>
 </ul>
 """
 
@@ -13624,6 +14286,8 @@ class ImageViewer(QDialog):
             self.pane.reviews_for = parent.reviews_of
             self.pane.on_reviews_changed = parent.set_video_reviews
             self.pane.on_export_review = parent.export_video_review
+            if hasattr(parent, "export_video_annotated"):
+                self.pane.on_export_review_video = parent.export_video_annotated
             if hasattr(parent, "touch"):
                 self.pane.on_prefs_changed = parent.touch
             QShortcut(QKeySequence.StandardKey.Undo, self, lambda: self._history(parent.undo))
@@ -14111,6 +14775,7 @@ class MainWindow(QMainWindow):
         self.preview.reviews_for = self.reviews_of
         self.preview.on_reviews_changed = self.set_video_reviews
         self.preview.on_export_review = self.export_video_review
+        self.preview.on_export_review_video = self.export_video_annotated
         self.preview.on_prefs_changed = self.touch
         self.preview.openBig.connect(self.open_viewer_current)
         self.preview.on_mode_changed = self._sync_panel
@@ -16372,6 +17037,78 @@ class MainWindow(QMainWindow):
         if caja.clickedButton() is b_abrir:
             QDesktopServices.openUrl(QUrl.fromLocalFile(destino))
 
+    def write_video_annotated(self, path: str, destino: str,
+                              con_progreso: bool = True) -> tuple[bool, str]:
+        """El video con sus anotaciones encima, en 'destino'. (bien, por que no)."""
+        if not HAS_VIDEO_EXPORT:
+            return False, "this build cannot write video"
+        progreso = None
+        if con_progreso:
+            progreso = QProgressDialog("Writing the video with its annotations\u2026", "Cancel",
+                                       0, 1000, self)
+            progreso.setWindowTitle(APP_NAME)
+            progreso.setWindowModality(Qt.WindowModality.WindowModal)
+            progreso.setMinimumDuration(0)
+            progreso.setValue(0)
+
+        def avanza(ms: int, total: int):
+            if progreso is None:
+                return True
+            progreso.setValue(min(999, int(ms * 1000 / total)) if total > 0 else 0)
+            return not progreso.wasCanceled()
+        escritor = AnnotatedVideoWriter(path, self.reviews_of(path), destino, self)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            return escritor.run(avanza)
+        finally:
+            QApplication.restoreOverrideCursor()
+            if progreso is not None:
+                progreso.close()
+            escritor.deleteLater()
+
+    def export_video_annotated(self, path: str):
+        """El boton Video del modo anotar."""
+        self.commit_note()
+        if not HAS_VIDEO_EXPORT:
+            QMessageBox.information(self, APP_NAME, "This build of DriloBoard cannot write "
+                                    "video: it needs Qt 6.8 or later.")
+            return
+        lista = self.reviews_of(path)
+        if not lista:
+            QMessageBox.information(self, APP_NAME, "This video has no drawings or comments "
+                                    "yet: there is nothing to put on it.")
+            return
+        base = os.path.splitext(shown_name(path) or "video")[0]
+        destino, _ = QFileDialog.getSaveFileName(
+            self, "Export the video with its annotations",
+            os.path.join(self.export_dir or str(Path.home()),
+                         safe_file_name("%s - annotated" % base) + ".mp4"),
+            "MP4 video (*.mp4)")
+        if not destino:
+            return
+        if os.path.splitext(destino)[1].lower() != ".mp4":
+            destino += ".mp4"
+        if canon_path(destino) == canon_path(path):
+            QMessageBox.warning(self, APP_NAME, "Choose another name: that is the original "
+                                "video, and DriloBoard never writes over your files.")
+            return
+        bien, error = self.write_video_annotated(path, destino)
+        if not bien:
+            if error != "cancelled":
+                QMessageBox.warning(self, APP_NAME, "Could not write the video:\n%s" % error)
+            return
+        self.export_dir = os.path.dirname(destino)
+        self.touch()
+        caja = QMessageBox(self)
+        caja.setWindowTitle(APP_NAME)
+        caja.setText("Video with %d annotation%s saved to:\n%s" % (
+            len(lista), "" if len(lista) == 1 else "s", destino))
+        b_abrir = caja.addButton("Open", QMessageBox.ButtonRole.AcceptRole)
+        caja.addButton(QMessageBox.StandardButton.Close)
+        caja.exec()
+        if caja.clickedButton() is b_abrir:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(destino))
+
     # ---------------- edicion no destructiva ------------------------------ #
     def edit_of(self, path: str | None) -> dict | None:
         return self.edits.get(path) if path else None
@@ -16991,6 +17728,7 @@ class MainWindow(QMainWindow):
             "edit_zone_widths": self.edit_zone_widths,
             "onion": dict(PreviewPane.onion_prefs),
             "review_smooth": PreviewPane.review_smooth,
+            "review_hold": PreviewPane.review_hold,
             "edit_smooth": EditorDialog.smooth,
         }
         try:
@@ -17076,6 +17814,7 @@ class MainWindow(QMainWindow):
         self.edit_zones = clean_edit_zones(data.get("edit_zones"), data.get("edit_zones_rev"))
         PreviewPane.onion_prefs.update(clean_onion(data.get("onion")))
         PreviewPane.review_smooth = clean_smooth(data.get("review_smooth"))
+        PreviewPane.review_hold = clean_hold(data.get("review_hold"))
         EditorDialog.smooth = clean_smooth(data.get("edit_smooth"))
         self.preview._sync_prefs_ui()
         anchos = data.get("edit_zone_widths")

@@ -216,7 +216,12 @@ pause on a frame and draw on it (pencil, straight line, arrow, rectangle, ellips
 colours and thicknesses) and write a comment. **Smooth** steadies the pencil: the
 line trails behind the pointer on a string, so a shaky hand still draws a clean
 curve (0 turns it off). With room, tools and comment share one row, so the video
-keeps the height. The time stamp stays in front of
+keeps the height.
+**Hold** decides how long a drawing and its comment stay on screen: just that
+frame, a number of frames, or — with the arrow button — until the next drawing
+(or the end of the video); they stay there while the video plays, too. A pink
+strip above the time bar shows every annotation as long as it lasts: click one
+to go to its frame and drag its right edge to set how many frames it lasts. The time stamp stays in front of
 the comment, `[0:03.3 · frame 50] Check the arc`. A pink bubble on the time bar
 marks every commented frame and the ◀ ▶ buttons jump between them; when you stop
 on one, the drawing and the comment appear over the video, so a student can follow
@@ -225,7 +230,9 @@ changing frame saves it too, and it all lives in the library: it exports and
 imports with it and undoes with `Ctrl+Z`. **Export PDF** writes one page per
 commented frame: a picture of that frame with your drawing on top, the video name
 and the comment, time stamp first. A video with no annotations exports its first
-and last frame.
+and last frame. **Video** exports an MP4 copy of the video with the drawings and
+comments burned in, each for as long as it is held, keeping the sound; your
+original file is never modified.
 
 ![A video on a keyframe, with keyframes and a loop fragment on the time bar and its grade below, in the light theme](docs/video.png)
 
@@ -413,6 +420,9 @@ file, so they cannot touch your library. They cover, among other things:
 - Scrubbing: the time bar snaps to whole frames (with Shift for fine steps),
   frames are cached in memory and shown while dragging, the player settles on
   the exact frame, onion skin, playback speed and the stroke stabiliser.
+- Annotation holds (a number of frames, or until the next one), the strip
+  above the time bar, and the exported video: the drawing is on the frames
+  where it is held and nowhere else.
 - That every shortcut the in-app help advertises actually exists.
 
 Rebuilding the Windows package:

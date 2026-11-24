@@ -237,7 +237,21 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
     comentario. **Smooth** estabiliza el lápiz: con 0 sigue a la mano tal
     cual; al subirlo, la línea va detrás del puntero como tirada por un hilo
     y un pulso tembloroso sale limpio. Si hay sitio, herramientas y
-    comentario van en una sola fila, para que el vídeo se quede con el alto. La marca de tiempo queda delante del comentario:
+    comentario van en una sola fila, para que el vídeo se quede con el alto.
+  - **Aguantar una anotación (Hold)**: la barra *Hold* dice cuánto se queda
+    en pantalla el dibujo y el comentario de un fotograma: solo ese fotograma
+    (1), un número de fotogramas o, con el botón de la flecha de al lado,
+    **hasta el siguiente fotograma dibujado** (o hasta el final del vídeo).
+    También se ven mientras el vídeo se reproduce. Los dibujos nuevos nacen
+    con lo que diga la barra. Encima de la barra de tiempo hay una **pista
+    rosa** con cada anotación, tan larga como lo que dura: un clic va a su
+    fotograma y arrastrando su borde derecho eliges cuántos fotogramas
+    aguanta (llevarlo hasta la siguiente es «hasta la siguiente»). Un dibujo
+    nuevo siempre corta al anterior. Se deshace con `Ctrl+Z`.
+  - **Exportar el vídeo con las anotaciones**: el botón **Video** de la
+    barra de anotar escribe una copia en MP4 con tus dibujos y comentarios
+    encima, cada uno mientras aguanta, y con su sonido. El archivo original
+    no se toca nunca. La marca de tiempo queda delante del comentario:
     `[0:03.3 · frame 50] Revisa el arco`. Un globito rosa en la barra de tiempo
     señala cada fotograma comentado y los botones ◀ ▶ saltan de uno a otro;
     al parar en uno, el dibujo y el comentario se ven sobre el vídeo, así que

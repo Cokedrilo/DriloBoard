@@ -198,7 +198,24 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
     vídeo** lo reproduce o lo pausa, y en el visor grande deja esa ventana como
     la activa, así que `Espacio` funciona justo después de pinchar. Un clic en **cualquier punto
     de la barra de tiempo** (no solo en el círculo) salta ahí y reproduce desde ese
-    punto; si arrastras tras el clic, sigues moviéndote.
+    punto.
+  - **La barra de tiempo es una regla de fotogramas.** Al **arrastrar** por
+    ella el vídeo te sigue fotograma a fotograma: siempre cae en un fotograma
+    entero y, al soltar, te quedas en pausa en él (si estaba reproduciendo,
+    sigue desde ahí). Con `Mayús` el arrastre es **fino**: un fotograma cada
+    pocos píxeles, dure lo que dure el vídeo; y la **rueda** sobre la barra
+    avanza o retrocede de uno en uno. A los pocos segundos de abrir un vídeo
+    sus fotogramas están en memoria (la **línea verde** bajo la barra enseña
+    hasta dónde): desde ese momento arrastrar y pasar fotogramas es
+    inmediato, hacia delante y hacia atrás.
+  - **Velocidad**: el botón junto al tiempo (1×) reproduce a 0,25×, 0,5×,
+    1,5× o 2×; `J` y `K` la bajan y la suben.
+  - **Papel cebolla (onion skin)**, con `S` o el botón de los tres círculos:
+    en pausa, los fotogramas de **antes** se transparentan en **rojo** y los
+    de **después** en **verde**, solo donde algo se mueve, para leer el
+    espaciado y los arcos. *Frames* dice cuántos a cada lado y *Ghost* con
+    qué fuerza; lo dibujado en esos fotogramas también se ve, del mismo
+    color. Vale también para los GIF.
   - Se clasifican en categorías igual que las imágenes, y *Export…* los copia
     tal cual. El editor y la comparación A/B son solo para imágenes: con un
     vídeo avisan en la barra de estado.
@@ -217,7 +234,10 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
     abre la barra de anotar. Pausa en un fotograma, dibuja encima (lápiz,
     línea recta —con `Mayús`, en pasos de 45°—, flecha, rectángulo, elipse,
     texto; cinco colores y grosores) y escribe un
-    comentario. La marca de tiempo queda delante del comentario:
+    comentario. **Smooth** estabiliza el lápiz: con 0 sigue a la mano tal
+    cual; al subirlo, la línea va detrás del puntero como tirada por un hilo
+    y un pulso tembloroso sale limpio. Si hay sitio, herramientas y
+    comentario van en una sola fila, para que el vídeo se quede con el alto. La marca de tiempo queda delante del comentario:
     `[0:03.3 · frame 50] Revisa el arco`. Un globito rosa en la barra de tiempo
     señala cada fotograma comentado y los botones ◀ ▶ saltan de uno a otro;
     al parar en uno, el dibujo y el comentario se ven sobre el vídeo, así que
@@ -495,6 +515,13 @@ después.
     dureza. El pincel se ve como un aro sobre la imagen, con otro punteado
     dentro donde empieza la dureza. El **color** es un solo cuadro: al pulsarlo
     se abre la paleta, los últimos usados y *More colours...*.
+  - **Smoothing**, la estabilización del trazo, para el lápiz, el rotulador
+    y la goma: con 0 el trazo sigue a la mano tal cual; al subirlo, el pincel
+    va detrás del puntero como tirado por un hilo (se ve el hilo mientras
+    dibujas) y la línea sale limpia. Se recuerda.
+  - En la vista previa, los controles de debajo del lienzo (girar, voltear,
+    brillo, zoom, espejo…) van en una fila propia a todo el ancho, para que
+    no quede ninguno fuera de la vista.
   - Brillo, contraste y blanco y negro.
   - **Dibujar encima**, estilo Recortes de Windows: *Pen*, *Highlighter*
     (grueso y transparente, deja ver lo de debajo), *Line*, *Arrow*,

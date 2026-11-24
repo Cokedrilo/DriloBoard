@@ -24,6 +24,7 @@ import sys
 import tempfile
 import unicodedata
 import time
+import weakref
 import zipfile
 from collections import OrderedDict, deque
 from pathlib import Path
@@ -207,7 +208,13 @@ VIDEO_KEYS = {
     "loop_in": ("I", "Loop from this frame"),
     "loop_out": ("O", "Loop up to this frame"),
     "loop_clear": ("Shift+L", "Clear the loop range"),
+    "onion": ("S", "Onion skin: ghost the frames before and after"),
+    "speed_down": ("J", "Play slower"),
+    "speed_up": ("K", "Play faster"),
 }
+PLAY_RATES = (0.25, 0.5, 1.0, 1.5, 2.0)      # velocidades de reproduccion
+SCRUB_SETTLE_MS = 130                # parado este rato sobre un fotograma, se pide el de verdad
+STEP_SETTLE_MS = 70
 LOOP_COLOR = "#2d8fd5"               # el tramo en bucle, sobre la barra de tiempo
 REVIEW_MARK_COLOR = "#e0457b"        # comentarios y dibujos de un video, en la barra
 
@@ -2075,6 +2082,405 @@ class FrameGrabber(QObject):
             self._loop.quit()
 
 
+# --------------------------------------------------------------------------- #
+#  Fotogramas en memoria
+#
+#  QMediaPlayer solo sabe saltar a un milisegundo, y cada salto decodifica
+#  desde el fotograma completo anterior: arrastrando la barra de tiempo el
+#  video iba a tirones, y hacia atras peor. Aqui un segundo reproductor, sin
+#  sonido y a varias veces la velocidad normal, recorre el video y guarda cada
+#  fotograma reducido y comprimido (JPEG, unas decenas de KB). Con eso, mover
+#  la barra o pasar fotogramas es ensenar una imagen que ya esta en memoria, y
+#  el papel cebolla tiene a mano los fotogramas vecinos. El reproductor de
+#  verdad solo salta cuando te paras, para dejar el fotograma a su resolucion.
+# --------------------------------------------------------------------------- #
+PROXY_SIDE = 1024                    # lado mayor de los fotogramas guardados
+PROXY_QUALITY = 85
+FRAME_CACHE_MB = 400                 # memoria para ellos, por visor
+FRAME_CACHE_DELAY_MS = 350           # un video que se pasa de largo no se guarda
+FRAME_CACHE_ON = True                # False: sin memoria de fotogramas (pruebas, equipos justos)
+FRAME_CACHE_SHARE = 0.4              # parte del hilo grafico que puede gastar guardando
+FRAME_CACHE_DECODED = 24             # fotogramas ya descomprimidos a mano
+
+
+class _ProxySignals(QObject):
+    done = Signal(int, int, QByteArray)             # ficha, fotograma, JPEG
+
+
+class _ProxyTask(QRunnable):
+    """Reduce y comprime un fotograma fuera del hilo grafico."""
+
+    def __init__(self, token: int, index: int, img: QImage, signals: _ProxySignals):
+        super().__init__()
+        self.token, self.index, self.img, self.signals = token, index, img, signals
+        self.setAutoDelete(True)
+
+    @Slot()
+    def run(self):
+        img = self.img
+        if max(img.width(), img.height()) > PROXY_SIDE:
+            img = img.scaled(PROXY_SIDE, PROXY_SIDE, Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+        datos = QByteArray()
+        buf = QBuffer(datos)
+        buf.open(QBuffer.OpenModeFlag.WriteOnly)
+        img.save(buf, "JPG", PROXY_QUALITY)
+        buf.close()
+        self.signals.done.emit(self.token, self.index, datos)
+
+
+def frame_runs(indices) -> list[tuple[int, int]]:
+    """[1, 2, 3, 7, 8] -> [(1, 3), (7, 8)]: los tramos seguidos."""
+    tramos = []
+    for i in sorted(indices):
+        if tramos and i == tramos[-1][1] + 1:
+            tramos[-1] = (tramos[-1][0], i)
+        else:
+            tramos.append((i, i))
+    return tramos
+
+
+class FrameCache(QObject):
+    """Los fotogramas de un video, guardados en memoria segun se van leyendo.
+
+    open() lo arranca (con un pequeno retraso, por si el video solo se pasa de
+    largo); focus() le dice por donde se anda, para leer primero lo de cerca y,
+    si el video no cabe entero, soltar lo de lejos; hold() lo para mientras el
+    visor reproduce. image(i) da el fotograma i, o None si aun no esta."""
+    changed = Signal()                      # hay fotogramas nuevos
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.path: str | None = None
+        self.frame_us = 40000.0
+        self.count = 0
+        self._token = 0
+        self._data: dict[int, QByteArray] = {}
+        self._bytes = 0
+        self._flying: set[int] = set()      # comprimiendose
+        self._tried: set[int] = set()       # pedidos que no existen (fps variable, final)
+        self._decoded: OrderedDict[int, QImage] = OrderedDict()
+        self._runs = None
+        self._focus = 0
+        self._hold = False
+        self._running = False
+        self._loaded = False
+        self._choked = False
+        self._goal = 0
+        self._expect = None
+        self._idle = 0
+        self._fails = 0
+        self._cost = 0.004                  # segundos de hilo grafico por fotograma
+        self._player = None
+        self._sink = None
+        self._pool = QThreadPool(self)
+        self._pool.setMaxThreadCount(2)
+        self._signals = _ProxySignals()
+        self._signals.done.connect(self._on_proxy, Qt.ConnectionType.QueuedConnection)
+        self._start = QTimer(self)
+        self._start.setSingleShot(True)
+        self._start.setInterval(FRAME_CACHE_DELAY_MS)
+        self._start.timeout.connect(self._begin)
+        self._refocus = QTimer(self)
+        self._refocus.setSingleShot(True)
+        self._refocus.setInterval(250)
+        self._refocus.timeout.connect(self._on_refocus)
+        self._notify = QTimer(self)
+        self._notify.setSingleShot(True)
+        self._notify.setInterval(120)
+        self._notify.timeout.connect(self.changed.emit)
+        self._watch = QTimer(self)          # un salto que no da fotograma no lo para todo
+        self._watch.setSingleShot(True)
+        self._watch.setInterval(3000)
+        self._watch.timeout.connect(self._on_stalled)
+
+    # --- lo que usa el visor --------------------------------------------------
+    def open(self, path: str, frame_us: float, duration_ms: int):
+        self.close()
+        if not (FRAME_CACHE_ON and HAS_VIDEO) or duration_ms <= 0 or frame_us <= 0:
+            return
+        self.path = path
+        self.frame_us = float(frame_us)
+        self.count = max(1, int(round(duration_ms * 1000 / frame_us)))
+        self._start.start()
+
+    def close(self):
+        """Lo suelta todo, tambien el archivo (en Windows, abierto no se puede mover)."""
+        for t in (self._start, self._refocus, self._notify, self._watch):
+            t.stop()
+        self._token += 1
+        self._running = self._loaded = self._choked = False
+        if self._player is not None:
+            self._player.stop()
+            self._player.setSource(QUrl())
+        vacio = not self._data
+        self.path = None
+        self.count = 0
+        self._data.clear()
+        self._decoded.clear()
+        self._flying.clear()
+        self._tried.clear()
+        self._bytes = 0
+        self._runs = None
+        self._focus = 0
+        self._fails = 0
+        if not vacio:
+            self.changed.emit()
+
+    def has(self, i: int) -> bool:
+        return i in self._data
+
+    def image(self, i: int) -> QImage | None:
+        img = self._decoded.get(i)
+        if img is not None:
+            self._decoded.move_to_end(i)
+            return img
+        datos = self._data.get(i)
+        if datos is None:
+            return None
+        img = QImage.fromData(datos)
+        if img.isNull():
+            return None
+        self._decoded[i] = img
+        while len(self._decoded) > FRAME_CACHE_DECODED:
+            self._decoded.popitem(last=False)
+        return img
+
+    def runs(self) -> list[tuple[int, int]]:
+        """Los tramos de fotogramas que ya estan, para pintarlos en la barra."""
+        if self._runs is None:
+            self._runs = frame_runs(self._data)
+        return self._runs
+
+    def complete(self) -> bool:
+        return self.count > 0 and len(self._data) + len(self._tried) >= self.count
+
+    def megabytes(self) -> float:
+        return self._bytes / (1024 * 1024)
+
+    def focus(self, i: int):
+        """Por donde va el visor: lo siguiente que se lea, cerca de aqui."""
+        i = max(0, int(i))
+        if i == self._focus:
+            return
+        self._focus = i
+        if self.path is not None and not self._hold and not self._refocus.isActive():
+            self._refocus.start()
+
+    def hold(self, on: bool):
+        """El visor reproduce: se deja de leer, que el video vaya fino."""
+        on = bool(on)
+        if on == self._hold:
+            return
+        self._hold = on
+        if self.path is None or not self._loaded:
+            return
+        if on:
+            self._watch.stop()
+            if self._running:
+                self._player.pause()
+        elif self._running and not self._choked:
+            self._player.play()
+            self._watch.start()
+        elif not self._running:
+            self._plan()
+
+    # --- por dentro ---------------------------------------------------------
+    def _ensure_player(self):
+        if self._player is not None:
+            return
+        self._player = QMediaPlayer(self)
+        self._sink = QVideoSink(self)
+        self._player.setVideoSink(self._sink)       # sin salida de sonido: va tan rapido como pueda
+        self._sink.videoFrameChanged.connect(self._on_frame)
+        self._player.mediaStatusChanged.connect(self._on_status)
+        self._player.errorOccurred.connect(self._on_error)
+
+    def _begin(self):
+        if self.path is None:
+            return
+        self._ensure_player()
+        self._loaded = False
+        self._player.setSource(QUrl.fromLocalFile(self.path))
+        self._watch.start()
+
+    def _on_status(self, estado):
+        if self.path is None:
+            return
+        S = QMediaPlayer.MediaStatus
+        if estado in (S.LoadedMedia, S.BufferedMedia) and not self._loaded:
+            self._loaded = True
+            self._plan()
+        elif estado == S.EndOfMedia and self._running:
+            # lo que faltaba hasta el final no existe: que no se vuelva a pedir
+            desde = self._expect if self._expect is not None else self._goal
+            self._tried.update(i for i in range(max(0, desde), self.count)
+                               if i not in self._data and i not in self._flying)
+            self._running = False
+            QTimer.singleShot(0, self._plan)
+        elif estado == S.InvalidMedia:
+            self._give_up()
+
+    def _on_error(self, *_):
+        self._give_up()
+
+    def _give_up(self):
+        self._watch.stop()
+        self._running = False
+        if self._player is not None:
+            self._player.stop()
+            self._player.setSource(QUrl())
+        self._loaded = False
+        self.path = None if not self._data else self.path
+
+    def _on_stalled(self):
+        """Ni un fotograma en un rato: ese punto se da por perdido y se sigue."""
+        if self.path is None or self._hold or self._choked:
+            return
+        self._fails += 1
+        if not self._loaded or self._fails > 3:
+            self._give_up()
+            return
+        self._tried.add(self._goal)
+        self._running = False
+        self._plan()
+
+    def _window(self) -> tuple[int, int]:
+        """El tramo de fotogramas que cabe en memoria, alrededor de donde se esta."""
+        medio = self._bytes / len(self._data) if self._data else 150_000
+        caben = max(60, int(0.9 * FRAME_CACHE_MB * 1024 * 1024 / max(1.0, medio)))
+        if caben >= self.count:
+            return 0, self.count - 1
+        a = max(0, self._focus - caben // 4)
+        b = min(self.count - 1, a + caben - 1)
+        return max(0, b - caben + 1), b
+
+    def _missing(self, i: int) -> bool:
+        return i not in self._data and i not in self._flying and i not in self._tried
+
+    def _next_gap(self) -> int | None:
+        """El primer fotograma que falta: de donde se esta en adelante y, si no,
+        el tramo de justo antes (unos segundos cada vez)."""
+        a, b = self._window()
+        foco = max(a, min(b, self._focus))
+        for i in range(foco, b + 1):
+            if self._missing(i):
+                return i
+        for i in range(foco - 1, a - 1, -1):
+            if self._missing(i):
+                tope = max(a, i - int(4_000_000 / self.frame_us))
+                while i > tope and self._missing(i - 1):
+                    i -= 1
+                return i
+        return None
+
+    def _rate(self) -> float:
+        fps = 1_000_000 / self.frame_us
+        return max(1.0, min(16.0, FRAME_CACHE_SHARE / (max(0.0015, self._cost) * fps)))
+
+    def _plan(self):
+        if self.path is None or self._hold or not self._loaded:
+            return
+        i = self._next_gap()
+        if i is None:
+            self._watch.stop()
+            self._running = False
+            self._player.stop()
+            self._release_if_done()
+            return
+        self._goal = i
+        self._expect = i
+        self._idle = 0
+        self._running = True
+        self._choked = False
+        self._player.setPlaybackRate(self._rate())
+        self._player.setPosition(int(round((i * self.frame_us + self.frame_us / 4) / 1000)))
+        self._player.play()
+        self._watch.start()
+
+    def _release_if_done(self):
+        """Leido entero: se suelta el archivo (en Windows, abierto no se puede mover)."""
+        if self._loaded and not self._running and not self._flying and self.complete():
+            self._player.setSource(QUrl())
+            self._loaded = False
+
+    def _on_refocus(self):
+        if self.path is None or self._hold:
+            return
+        if not self._loaded:
+            if self._player is not None and self._player.source().isEmpty() \
+                    and not self.complete() and self._next_gap() is not None:
+                self._begin()               # se habia soltado el archivo y vuelve a hacer falta
+            return
+        a, b = self._window()
+        lejos = self._running and not (a <= self._goal <= b
+                                       and abs((self._expect or self._goal) - self._focus)
+                                       < 20_000_000 / self.frame_us)
+        if not self._running or (lejos and self._missing(self._focus)):
+            self._plan()
+
+    def _on_frame(self, frame):
+        if self.path is None or not self._running or not frame.isValid() \
+                or frame.startTime() < 0:
+            return
+        self._watch.start()
+        self._fails = 0
+        i = int(round(frame.startTime() / self.frame_us))
+        if self._expect is not None and self._expect < i <= self._expect + 600:
+            # se salto alguno: en un video de fps variable no todos existen
+            self._tried.update(k for k in range(self._expect, i)
+                               if k not in self._data and k not in self._flying)
+        self._expect = i + 1
+        if i not in self._data and i not in self._flying:
+            t0 = time.perf_counter()
+            img = frame.toImage()
+            self._cost += (time.perf_counter() - t0 - self._cost) * 0.2
+            if not img.isNull():
+                self._flying.add(i)
+                self._pool.start(_ProxyTask(self._token, i, img, self._signals))
+            self._idle = 0
+        else:
+            self._idle += 1
+        _a, b = self._window()
+        if i >= b or self._idle >= 12:
+            # fuera de lo que cabe, o un rato largo por lo que ya estaba: al siguiente hueco
+            self._running = False
+            self._player.pause()
+            QTimer.singleShot(0, self._plan)
+        elif len(self._flying) > 16 and not self._choked:
+            self._choked = True             # se comprime mas despacio de lo que se lee
+            self._player.pause()
+
+    @Slot(int, int, QByteArray)
+    def _on_proxy(self, token: int, i: int, datos: QByteArray):
+        if token != self._token:
+            return
+        self._flying.discard(i)
+        if datos.isEmpty():
+            self._tried.add(i)
+        elif i not in self._data:
+            self._data[i] = datos
+            self._bytes += datos.size()
+            self._runs = None
+            self._trim()
+            if not self._notify.isActive():
+                self._notify.start()
+        if self._choked and len(self._flying) < 4:
+            self._choked = False
+            if self._running and not self._hold:
+                self._player.play()
+        self._release_if_done()
+
+    def _trim(self):
+        """Por encima del tope de memoria se sueltan los mas lejanos de donde se esta."""
+        tope = FRAME_CACHE_MB * 1024 * 1024
+        while self._bytes > tope and len(self._data) > 60:
+            lo, hi = min(self._data), max(self._data)
+            lejos = lo if self._focus - lo >= hi - self._focus else hi
+            self._bytes -= self._data.pop(lejos).size()
+            self._decoded.pop(lejos, None)
+
+
 def review_page_image(frame: QImage, a: dict) -> QImage:
     """El fotograma con los dibujos de la anotacion encima, a la medida en que
     se dibujaron (un video con pixeles no cuadrados se ve de otro tamano)."""
@@ -3541,19 +3947,49 @@ class PreviewTask(QRunnable):
         self.signals.done.emit(self.slot, self.token, self.path, img, size, reduced)
 
 
+TIMELINE_H = 30                      # alto de la barra de tiempo
+FINE_SCRUB_PX = 8                    # con Mayus: un fotograma cada tantos pixeles
+CACHE_COLOR = "#3fa34d"              # los fotogramas que ya estan en memoria
+RULER_STEPS = (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 50000, 100000)
+
+
 class MarkSlider(QSlider):
-    """Barra de tiempo que ensena encima los fotogramas clave. Un clic en
-    cualquier punto va alli (no solo sobre el tirador) y se puede seguir
-    arrastrando; al soltar avisa con jumped."""
+    """Barra de tiempo con regla de fotogramas. Ensena encima los fotogramas
+    clave, los comentarios, el tramo en bucle y lo que ya esta en memoria.
+
+    Un clic en cualquier punto va alli y avisa con jumped al soltar; arrastrar
+    recorre el video fotograma a fotograma (el valor siempre cae en el
+    principio de uno). Con Mayus el arrastre es fino: un fotograma cada
+    FINE_SCRUB_PX pixeles, dure lo que dure el video. La rueda avisa con
+    stepped para avanzar o retroceder de uno en uno."""
     jumped = Signal()
+    stepped = Signal(int)
+
+    PAD = 8                                 # margen a cada lado del surco
 
     def __init__(self, parent=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
         self._jump = False
+        self._moved = False
+        self._press_x = 0.0
+        self._fine = None                   # (x, fotograma) donde empezo el arrastre fino
+        self._hover = None                  # x del puntero sobre la barra, o None
+        self._wheel = 0
         self.marks: list[int] = []          # ms
         self.review_marks: list[int] = []   # ms de los comentarios y dibujos
         self.loop_range = None              # (desde, hasta) en ms, o None
-        self.setMinimumHeight(22)
+        self.frame_len = 0.0                # lo que dura un fotograma, en unidades de la barra
+        self.cells = True                   # cada fotograma ocupa un tramo (video); False: un punto (GIF)
+        self.first_label = 0                # el numero del primer fotograma en la regla
+        self.cached: list[tuple[float, float]] = []    # tramos ya en memoria
+        self.setMinimumHeight(TIMELINE_H)
+        self.setMouseTracking(True)
+
+    def sizeHint(self) -> QSize:
+        return QSize(240, TIMELINE_H)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(60, TIMELINE_H)
 
     def set_marks(self, marks: list[int]):
         self.marks = list(marks)
@@ -3568,102 +4004,526 @@ class MarkSlider(QSlider):
         self.loop_range = rango
         self.update()
 
-    def _value_at(self, x: float) -> int:
-        opt = QStyleOptionSlider()
-        self.initStyleOption(opt)
-        estilo = self.style()
-        surco = estilo.subControlRect(QStyle.ComplexControl.CC_Slider, opt,
-                                      QStyle.SubControl.SC_SliderGroove, self)
-        tirador = estilo.subControlRect(QStyle.ComplexControl.CC_Slider, opt,
-                                        QStyle.SubControl.SC_SliderHandle, self)
-        recorrido = max(1, surco.width() - tirador.width())
-        return QStyle.sliderValueFromPosition(
-            self.minimum(), max(self.minimum(), self.maximum()),
-            int(round(x - surco.left() - tirador.width() / 2)), recorrido)
+    def set_frames(self, frame_len: float, cells: bool = True, first_label: int = 0):
+        """Cuanto dura un fotograma: con eso la barra se ajusta a ellos y pinta la regla."""
+        frame_len = max(0.0, float(frame_len))
+        if (frame_len, cells, first_label) != (self.frame_len, self.cells, self.first_label):
+            self.frame_len, self.cells, self.first_label = frame_len, cells, first_label
+            self.update()
 
+    def set_cached(self, tramos):
+        tramos = list(tramos)
+        if tramos != self.cached:
+            self.cached = tramos
+            self.update()
+
+    # --- fotogramas ---------------------------------------------------------
+    def frame_count(self) -> int:
+        if self.frame_len <= 0:
+            return 0
+        n = int(round((self.maximum() - self.minimum()) / self.frame_len))
+        return max(1, n if self.cells else n + 1)
+
+    def frame_of(self, valor: float) -> int:
+        """El fotograma de un valor de la barra (que va redondeado a entero)."""
+        if self.frame_len <= 0:
+            return 0
+        v = valor - self.minimum()
+        i = int(math.floor((v + 0.501) / self.frame_len)) if self.cells \
+            else int(round(v / self.frame_len))
+        return max(0, min(self.frame_count() - 1, i))
+
+    def frame_value(self, i: int) -> int:
+        """El valor de la barra en que empieza el fotograma i."""
+        i = max(0, min(self.frame_count() - 1, int(i)))
+        return int(max(self.minimum(), min(self.maximum(),
+                                           round(self.minimum() + i * self.frame_len))))
+
+    def _span(self) -> float:
+        return max(1.0, self.width() - 2.0 * self.PAD)
+
+    def _value_at(self, x: float) -> int:
+        lo, hi = self.minimum(), max(self.minimum(), self.maximum())
+        crudo = lo + max(0.0, min(1.0, (x - self.PAD) / self._span())) * (hi - lo)
+        if self.frame_len > 0:
+            if self.cells:
+                i = int(math.floor((crudo - lo) / self.frame_len + 1e-6))
+            else:
+                i = int(round((crudo - lo) / self.frame_len))
+            return self.frame_value(i)
+        return int(round(crudo))
+
+    def mark_x(self, ms: float) -> float:
+        """Donde cae un valor, en pixeles."""
+        lo, hi = self.minimum(), max(self.minimum(), self.maximum())
+        if hi <= lo:
+            return float(self.PAD)
+        f = max(0.0, min(1.0, (ms - lo) / (hi - lo)))
+        return self.PAD + f * self._span()
+
+    # --- raton ---------------------------------------------------------------
     def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton and self.maximum() > self.minimum():
-            opt = QStyleOptionSlider()
-            self.initStyleOption(opt)
-            tirador = self.style().subControlRect(
-                QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderHandle, self)
-            if not tirador.contains(e.position().toPoint()):
-                self._jump = True
-                self.setSliderDown(True)
-                self.setSliderPosition(self._value_at(e.position().x()))
-                e.accept()
-                return
-        self._jump = False
-        super().mousePressEvent(e)
+        if e.button() != Qt.MouseButton.LeftButton or self.maximum() <= self.minimum():
+            e.ignore()
+            return
+        x = e.position().x()
+        self._press_x = x
+        self._moved = False
+        self._fine = None
+        self._hover = None
+        # sobre el tirador no salta: solo se agarra
+        self._jump = abs(x - self.mark_x(self.sliderPosition())) > 6
+        self.setSliderDown(True)
+        if e.modifiers() & Qt.KeyboardModifier.ShiftModifier and self.frame_len > 0:
+            self._fine = (x, self.frame_of(self.sliderPosition()))
+        elif self._jump:
+            self.setSliderPosition(self._value_at(x))
+        self.update()
+        e.accept()
 
     def mouseMoveEvent(self, e):
-        if self._jump and self.isSliderDown():
-            self.setSliderPosition(self._value_at(e.position().x()))
-            e.accept()
+        x = e.position().x()
+        if not self.isSliderDown():
+            if e.buttons() == Qt.MouseButton.NoButton and self._hover != x:
+                self._hover = x
+                self.update()
             return
-        super().mouseMoveEvent(e)
+        if abs(x - self._press_x) > 3:
+            self._moved = True
+        if e.modifiers() & Qt.KeyboardModifier.ShiftModifier and self.frame_len > 0:
+            if self._fine is None:
+                self._fine = (x, self.frame_of(self.sliderPosition()))
+            x0, f0 = self._fine
+            self.setSliderPosition(self.frame_value(f0 + int((x - x0) / FINE_SCRUB_PX)))
+        else:
+            self._fine = None
+            if self._moved or self._jump:
+                self.setSliderPosition(self._value_at(x))
+        e.accept()
 
     def mouseReleaseEvent(self, e):
-        if self._jump and e.button() == Qt.MouseButton.LeftButton:
-            self._jump = False
-            self.setSliderDown(False)
-            e.accept()
+        if e.button() != Qt.MouseButton.LeftButton or not self.isSliderDown():
+            e.ignore()
+            return
+        clic = self._jump and not self._moved
+        self._jump = False
+        self._fine = None
+        self.setSliderDown(False)
+        self._hover = e.position().x()
+        self.update()
+        e.accept()
+        if clic:
             self.jumped.emit()
-            return
-        super().mouseReleaseEvent(e)
 
-    def mark_x(self, ms: int) -> float:
-        """Donde cae un tiempo, en pixeles: igual que el tirador del estilo."""
-        opt = QStyleOptionSlider()
-        self.initStyleOption(opt)
-        estilo = self.style()
-        surco = estilo.subControlRect(QStyle.ComplexControl.CC_Slider, opt,
-                                      QStyle.SubControl.SC_SliderGroove, self)
-        tirador = estilo.subControlRect(QStyle.ComplexControl.CC_Slider, opt,
-                                        QStyle.SubControl.SC_SliderHandle, self)
-        recorrido = max(1, surco.width() - tirador.width())
-        return (surco.left() + tirador.width() / 2
-                + QStyle.sliderPositionFromValue(self.minimum(), max(self.minimum(),
-                                                 self.maximum()), int(ms), recorrido))
+    def leaveEvent(self, e):
+        if self._hover is not None:
+            self._hover = None
+            self.update()
+        super().leaveEvent(e)
 
+    def wheelEvent(self, e):
+        d = e.angleDelta()
+        paso = d.y() if abs(d.y()) >= abs(d.x()) else d.x()
+        umbral = 40 if not e.pixelDelta().isNull() else 120    # un trackpad manda poco a poco
+        self._wheel += paso
+        n = int(self._wheel / umbral)
+        if n:
+            self._wheel -= n * umbral
+            self.stepped.emit(-n)               # rueda hacia abajo: adelante
+        e.accept()
+
+    # --- pintar --------------------------------------------------------------
     def paintEvent(self, e):
-        super().paintEvent(e)
-        if ((not self.marks and not self.review_marks and not self.loop_range)
-                or self.maximum() <= self.minimum()):
-            return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        H = self.height()
+        lo, hi = self.minimum(), self.maximum()
+        x0, x1 = float(self.PAD), float(self.width() - self.PAD)
+        arriba, abajo = 9.0, H - 7.0            # el surco: encima las claves, debajo los comentarios
+        surco = QRectF(x0, arriba, max(1.0, x1 - x0), abajo - arriba)
+        p.setPen(QPen(QColor(theme_color("border")), 1))
+        p.setBrush(QColor(theme_color("raised")))
+        p.drawRoundedRect(surco, 3, 3)
+        if hi <= lo:
+            p.end()
+            return
+        acento = QColor(theme_color("accent"))
+        if not self.isEnabled():
+            acento.setAlpha(110)
+        xv = self.mark_x(self.sliderPosition())
+        px = self._span() * self.frame_len / (hi - lo) if self.frame_len > 0 else 0.0
+        if self.cells and px > 0:
+            xv = self.mark_x(self.frame_value(self.frame_of(self.sliderPosition()))) \
+                if not self._playing_smooth() else xv
+        hecho = QColor(acento)
+        hecho.setAlpha(40)
+        p.fillRect(QRectF(x0 + 1, arriba + 1, max(0.0, xv - x0 - 1), abajo - arriba - 2), hecho)
+        if self.cached:
+            # lo que ya esta en memoria: por ahi el arrastre es inmediato
+            verde = QColor(CACHE_COLOR)
+            verde.setAlpha(200)
+            for a, b in self.cached:
+                xa, xb = self.mark_x(a), self.mark_x(b)
+                p.fillRect(QRectF(xa, abajo - 2.5, max(1.0, xb - xa), 2.0), verde)
+        if px > 0:
+            self._paint_ruler(p, x0, x1, arriba, abajo, px)
         if self.loop_range:
             # el tramo en bucle: una banda azul con sus corchetes
-            x0, x1 = (self.mark_x(ms) for ms in self.loop_range)
+            xa, xb = (self.mark_x(ms) for ms in self.loop_range)
             azul = QColor(LOOP_COLOR)
             banda = QColor(azul)
             banda.setAlpha(70)
-            p.fillRect(QRectF(x0, 3, max(1.0, x1 - x0), self.height() - 6), banda)
+            p.fillRect(QRectF(xa, 3, max(1.0, xb - xa), H - 6), banda)
             p.setPen(QPen(azul, 2))
-            for x, d in ((x0, 3), (x1, -3)):
+            for x, d in ((xa, 3), (xb, -3)):
                 p.drawPolyline([QPointF(x + d, 3), QPointF(x, 3),
-                                QPointF(x, self.height() - 3), QPointF(x + d, self.height() - 3)])
+                                QPointF(x, H - 3), QPointF(x + d, H - 3)])
         ambar = QColor(KEYFRAME_COLOR)
         p.setPen(QPen(ambar.darker(140), 1))
         p.setBrush(ambar)
-        arriba = 1.5
+        tope = 1.5
         for ms in self.marks:
             x = self.mark_x(ms)
-            p.drawPolygon([QPointF(x, arriba + 7), QPointF(x - 4, arriba + 3),
-                           QPointF(x, arriba - 1), QPointF(x + 4, arriba + 3)])
-            p.drawLine(QPointF(x, arriba + 7), QPointF(x, self.height() - 3))
+            p.drawPolygon([QPointF(x, tope + 7), QPointF(x - 4, tope + 3),
+                           QPointF(x, tope - 1), QPointF(x + 4, tope + 3)])
+            p.drawLine(QPointF(x, tope + 7), QPointF(x, H - 3))
         # los comentarios: un globito rosa abajo, para no pisar los fotogramas clave
         rosa = QColor(REVIEW_MARK_COLOR)
         p.setPen(QPen(rosa.darker(140), 1))
         p.setBrush(rosa)
-        suelo = self.height() - 2.5
+        suelo = H - 2.5
         for ms in self.review_marks:
             x = self.mark_x(ms)
             p.drawRoundedRect(QRectF(x - 4, suelo - 7, 8, 7), 2, 2)
             p.drawPolygon([QPointF(x - 2, suelo - 0.5), QPointF(x - 2, suelo + 2.5),
                            QPointF(x + 1.5, suelo - 0.5)])
+        if self._hover is not None and not self.isSliderDown() and self.isEnabled():
+            self._paint_hover(p, arriba, abajo)
+        # donde se esta: con sitio, el fotograma entero; siempre, la aguja
+        if self.cells and px >= 5:
+            celda = QColor(acento)
+            celda.setAlpha(95)
+            p.fillRect(QRectF(xv, arriba + 1, px, abajo - arriba - 2), celda)
+        p.setPen(QPen(acento, 2))
+        p.drawLine(QPointF(xv, 2), QPointF(xv, H - 2))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(acento)
+        p.drawPolygon([QPointF(xv - 5, 0), QPointF(xv + 5, 0), QPointF(xv, 7)])
         p.end()
+
+    def _playing_smooth(self) -> bool:
+        """Reproduciendo, la aguja corre con el tiempo; en pausa, se clava en su fotograma."""
+        return bool(self.property("playing"))
+
+    def _paint_ruler(self, p: QPainter, x0: float, x1: float, arriba: float, abajo: float,
+                     px: float):
+        n = self.frame_count()
+        tinta = QColor(theme_color("dim"))
+        fuente = QFont(self.font())
+        fuente.setPixelSize(9)
+        p.setFont(fuente)
+        fm = QFontMetricsF(fuente)
+        paso = next((k for k in RULER_STEPS if k * px >= 46), RULER_STEPS[-1])
+        ultimo = n if self.cells else n - 1
+        if px >= 4:
+            tenue = QColor(tinta)
+            tenue.setAlpha(120)
+            p.setPen(QPen(tenue, 1))
+            for i in range(ultimo + 1):
+                x = round(x0 + i * px) + 0.5
+                p.drawLine(QPointF(x, abajo - 4), QPointF(x, abajo - 1))
+        p.setPen(QPen(tinta, 1))
+        i = 0
+        while i <= ultimo:
+            x = round(x0 + i * px) + 0.5
+            p.drawLine(QPointF(x, abajo - 7), QPointF(x, abajo - 1))
+            rotulo = str(i + self.first_label)
+            if x + 3 + fm.horizontalAdvance(rotulo) < x1:
+                p.drawText(QPointF(x + 3, arriba + 9), rotulo)
+            i += paso
+
+    def _paint_hover(self, p: QPainter, arriba: float, abajo: float):
+        """Bajo el puntero: a que fotograma se iria con un clic."""
+        v = self._value_at(self._hover)
+        x = self.mark_x(v)
+        tinta = QColor(theme_color("text"))
+        tinta.setAlpha(150)
+        p.setPen(QPen(tinta, 1))
+        p.drawLine(QPointF(x + 0.5, arriba), QPointF(x + 0.5, abajo))
+        if self.frame_len > 0:
+            rotulo = str(self.frame_of(v) + self.first_label)
+            fuente = QFont(self.font())
+            fuente.setPixelSize(9)
+            fuente.setBold(True)
+            p.setFont(fuente)
+            ancho = QFontMetricsF(fuente).horizontalAdvance(rotulo) + 6
+            caja = QRectF(min(max(x - ancho / 2, 0.0), self.width() - ancho), 0, ancho, 9.5)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(theme_color("text")))
+            p.drawRoundedRect(caja, 2, 2)
+            p.setPen(QColor(theme_color("bg")))
+            p.drawText(caja, int(Qt.AlignmentFlag.AlignCenter), rotulo)
+
+
+SMOOTH_DEFAULT = 35                  # estabilizacion del trazo al empezar (0 a 100)
+
+
+class StrokeStabilizer:
+    """Estabiliza un trazo a mano alzada: el pincel no va donde el raton sino
+    detras de el, como tirado por un hilo, y asi el temblor de la mano no llega
+    a la linea. Con nivel 0 no hace nada; con 100 el pincel va muy por detras y
+    la linea sale muy lisa. Al soltar, la linea llega hasta donde se solto."""
+
+    def __init__(self, nivel: int = 0):
+        self.nivel = max(0, min(100, int(nivel or 0)))
+        self._pos = None                    # donde va el pincel
+        self._raw = None                    # donde va el raton
+
+    def pull(self) -> float:
+        """La parte del camino hasta el raton que el pincel recorre en cada paso."""
+        return 1.0 - 0.94 * (self.nivel / 100.0) ** 0.75
+
+    def start(self, x: float, y: float) -> tuple[float, float]:
+        self._pos = self._raw = (float(x), float(y))
+        return self._pos
+
+    def move(self, x: float, y: float) -> tuple[float, float]:
+        if self._pos is None:
+            return self.start(x, y)
+        self._raw = (float(x), float(y))
+        k = self.pull()
+        self._pos = (self._pos[0] + (x - self._pos[0]) * k,
+                     self._pos[1] + (y - self._pos[1]) * k)
+        return self._pos
+
+    def finish(self) -> list[tuple[float, float]]:
+        """Lo que falta hasta donde se solto el raton (nada, si ya estaba alli)."""
+        if self._pos is None or self._raw is None:
+            return []
+        (px, py), (rx, ry) = self._pos, self._raw
+        self._pos = self._raw
+        return [] if math.hypot(rx - px, ry - py) < 0.05 else [(rx, ry)]
+
+    def lag(self) -> float:
+        """Lo que le falta al pincel para alcanzar al raton, en las mismas unidades."""
+        if self._pos is None or self._raw is None:
+            return 0.0
+        return math.hypot(self._raw[0] - self._pos[0], self._raw[1] - self._pos[1])
+
+
+# --------------------------------------------------------------------------- #
+#  Papel cebolla
+# --------------------------------------------------------------------------- #
+ONION_BEFORE = "#ff4b33"             # los fotogramas de antes, en rojo
+ONION_AFTER = "#1fbf6b"              # los de despues, en verde
+ONION_MAX = 5                        # fotogramas a cada lado, como mucho
+ONION_SIDE = 640                     # lado mayor de los fantasmas: van difuminados igualmente
+ONION_DEFAULTS = {"on": False, "n": 2, "opacity": 55}
+
+
+def clean_onion(crudo) -> dict:
+    """Los ajustes del papel cebolla leidos de un json."""
+    d = dict(ONION_DEFAULTS)
+    if isinstance(crudo, dict):
+        d["on"] = bool(crudo.get("on", False))
+        for clave, lo, hi in (("n", 1, ONION_MAX), ("opacity", 5, 100)):
+            v = crudo.get(clave)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                d[clave] = int(max(lo, min(hi, v)))
+    return d
+
+
+def onion_offsets(n: int) -> list[int]:
+    """Que fotogramas vecinos se ensenan, los mas lejanos primero (quedan debajo)."""
+    n = max(1, min(ONION_MAX, int(n)))
+    fuera = []
+    for k in range(n, 0, -1):
+        fuera += [-k, k]
+    return fuera
+
+
+def onion_strength(k: int, n: int, opacity: int) -> float:
+    """La fuerza del fantasma a k fotogramas: el de al lado, la opacidad puesta;
+    los demas, cada vez menos."""
+    n = max(1, n)
+    return max(0.0, min(1.0, opacity / 100.0)) * (1.0 - 0.65 * (abs(k) - 1) / n)
+
+
+def _onion_fit(img: QImage, w: int = 0, h: int = 0) -> QImage:
+    """La imagen a la medida de los fantasmas (o a w x h), en RGB32."""
+    if w and h:
+        if (img.width(), img.height()) != (w, h):
+            img = img.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+    elif max(img.width(), img.height()) > ONION_SIDE:
+        img = img.scaled(ONION_SIDE, ONION_SIDE, Qt.AspectRatioMode.KeepAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+    return img.convertToFormat(QImage.Format.Format_RGB32)
+
+
+def _onion_array(img: QImage):
+    """Los pixeles de una imagen RGB32 como alto x ancho x 3 (B, G, R), con signo."""
+    w, h = img.width(), img.height()
+    return np.frombuffer(bytes(img.constBits()), np.uint8).reshape(h, -1, 4)[:, :w, :3] \
+        .astype(np.int16)
+
+
+def _onion_mask(a, b):
+    """De 0 a 255, cuanto se aparta a de b en cada pixel: por debajo de 12 es
+    ruido de la compresion; desde 48, del todo."""
+    return np.clip((np.abs(a - b).max(axis=2) - 12) * (255.0 / 36.0), 0, 255)
+
+
+def _onion_paint(vecino, fondo, color: str, fuerza: float, hueco=None) -> QImage:
+    """El fantasma: el vecino tenido de color, opaco solo donde se aparta del
+    fondo. hueco (0 a 1 por pixel) lo aclara donde esta el personaje de ahora."""
+    tinte = QColor(color)
+    h, w = vecino.shape[:2]
+    alfa = _onion_mask(vecino, fondo) * max(0.0, min(1.0, fuerza))
+    if hueco is not None:
+        alfa = alfa * hueco
+    luz = vecino[..., 2] * 0.299 + vecino[..., 1] * 0.587 + vecino[..., 0] * 0.114
+    out = np.empty((h, w, 4), np.uint8)
+    for canal, valor in ((0, tinte.blue()), (1, tinte.green()), (2, tinte.red())):
+        out[..., canal] = np.clip(luz * 0.4 + valor * 0.6, 0, 255)
+    out[..., 3] = alfa
+    return QImage(out.tobytes(), w, h, w * 4, QImage.Format.Format_ARGB32).copy()
+
+
+def _onion_veil(vecino: QImage, color: str, fuerza: float) -> QImage:
+    """Sin numpy, o sin nada con que comparar: el vecino entero, tenue y tenido."""
+    out = QImage(vecino.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    out.fill(Qt.GlobalColor.transparent)
+    q = QPainter(out)
+    q.setOpacity(max(0.0, min(1.0, fuerza)) * 0.45)
+    q.drawImage(0, 0, vecino)
+    velo = QColor(color)
+    velo.setAlpha(110)
+    q.fillRect(out.rect(), velo)
+    q.end()
+    return out
+
+
+def onion_ghost(actual: QImage | None, vecino: QImage, color: str, fuerza: float) -> QImage:
+    """Un fotograma vecino listo para pintarse encima del actual: tenido de
+    color y, con numpy y el actual a mano, transparente alli donde los dos son
+    iguales. Asi el fondo no se ensucia y solo se ve, en rojo o en verde, lo
+    que se mueve. Sin numpy (o sin el actual) va entero, mas tenue."""
+    v = _onion_fit(vecino)
+    if np is None or actual is None or actual.isNull() or v.width() < 1 or v.height() < 1:
+        return _onion_veil(v, color, fuerza)
+    return _onion_paint(_onion_array(v), _onion_array(_onion_fit(actual, v.width(), v.height())),
+                        color, fuerza)
+
+
+def _median3(a, b, c):
+    return a + b + c - np.maximum(np.maximum(a, b), c) - np.minimum(np.minimum(a, b), c)
+
+
+def onion_background(frames: list):
+    """El fondo de un plano, sacado de 3 o 5 fotogramas separados en el tiempo:
+    en cada pixel, el valor de en medio. Lo que se mueve esta en un sitio
+    distinto en cada uno y no llega a ser el de en medio; lo quieto (el
+    decorado, o un personaje que aguanta la pose) si. Devuelve los pixeles (a
+    la medida de los fantasmas), o None sin numpy o con menos de 3."""
+    frames = [f for f in frames if f is not None and not f.isNull()]
+    if np is None or len(frames) < 3:
+        return None
+    if len(frames) == 4:
+        frames = frames[:2] + frames[3:]
+    base = _onion_fit(frames[0])
+    w, h = base.width(), base.height()
+    arrs = [_onion_array(base)] + [_onion_array(_onion_fit(f, w, h)) for f in frames[1:5]]
+    if len(arrs) == 3:
+        return _median3(*arrs)
+    a, b, c, d, e = arrs
+    # el de en medio de cinco: fuera el menor y el mayor de cuatro, y el de en medio de tres
+    return _median3(e, np.maximum(np.minimum(a, b), np.minimum(c, d)),
+                    np.minimum(np.maximum(a, b), np.maximum(c, d)))
+
+
+def onion_ghosts(actual: QImage | None, vecinos: list, n: int, opacity: int,
+                 fondo=None) -> list[QImage]:
+    """Los fantasmas de varios vecinos [(k, imagen)], en el orden en que vienen.
+
+    Comparar cada vecino con el fotograma actual tiene una pega: donde esta
+    AHORA el personaje, el vecino ensena el fondo, que tambien es distinto, y
+    el fantasma le pasaria por encima. Por eso cada vecino se compara con el
+    fondo del plano (onion_background; si no se da, el valor de en medio del
+    actual y los dos vecinos mas lejanos): su fantasma solo sale donde estaba
+    (o estara) el personaje, y el de ahora se ve limpio."""
+    def color(k):
+        return ONION_BEFORE if k < 0 else ONION_AFTER
+    vecinos = [(k, img) for k, img in vecinos if img is not None and not img.isNull()]
+    if not vecinos:
+        return []
+    if np is None or actual is None or actual.isNull():
+        return [_onion_veil(_onion_fit(img), color(k), onion_strength(k, n, opacity))
+                for k, img in vecinos]
+    ref_img = _onion_fit(actual)
+    w, h = ref_img.width(), ref_img.height()
+    ref = _onion_array(ref_img)
+    arrs = {k: _onion_array(_onion_fit(img, w, h)) for k, img in vecinos}
+    antes = [k for k in arrs if k < 0]
+    despues = [k for k in arrs if k > 0]
+    if antes and despues:
+        lejos = (arrs[min(antes)], arrs[max(despues)])
+    elif len(arrs) >= 2:
+        lejos = tuple(arrs[k] for k in sorted(arrs, key=abs)[-2:])
+    else:
+        lejos = None
+    hueco = None
+    if fondo is not None and getattr(fondo, "shape", None) != ref.shape:
+        fondo = None
+    if fondo is None and lejos is not None:
+        fondo = _median3(lejos[0], ref, lejos[1])
+    if fondo is not None:
+        # el personaje de ahora manda: los fantasmas que le caen encima, casi fuera
+        hueco = 1.0 - 0.8 * _onion_mask(ref, fondo) / 255.0
+    else:
+        fondo = ref                         # un solo vecino: lo que cambia respecto al actual
+    return [_onion_paint(arrs[k], fondo, color(k), onion_strength(k, n, opacity), hueco)
+            for k, _img in vecinos]
+
+
+class OnionItem(QGraphicsItem):
+    """El papel cebolla sobre el video: los fotogramas vecinos como fantasmas
+    y, tenido igual, lo dibujado en ellos. No recoge el raton."""
+
+    def __init__(self):
+        super().__init__()
+        self.setZValue(2)
+        self.box = QRectF()
+        self.ghosts: list[QImage] = []
+        self.drawings: list[tuple[list, str, float]] = []    # (formas, color, opacidad)
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+    def boundingRect(self) -> QRectF:
+        return self.box
+
+    def set_box(self, caja: QRectF):
+        self.prepareGeometryChange()
+        self.box = QRectF(caja)
+        self.update()
+
+    def set_content(self, ghosts: list, drawings: list):
+        if not ghosts and not drawings and not self.ghosts and not self.drawings:
+            return
+        self.ghosts, self.drawings = ghosts, drawings
+        self.update()
+
+    def paint(self, p, option, widget=None):
+        if self.box.isEmpty():
+            return
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        for img in self.ghosts:
+            p.drawImage(self.box, img)
+        for formas, color, opacidad in self.drawings:
+            p.setOpacity(opacidad)
+            for f in formas:
+                paint_shape(p, dict(f, color=color))
+        p.setOpacity(1.0)
 
 
 class ReviewOverlay(QGraphicsItem):
@@ -3682,6 +4542,9 @@ class ReviewOverlay(QGraphicsItem):
         self.color = REVIEW_COLORS[0]
         self.level = 2
         self.live: dict | None = None        # el dibujo que se esta haciendo
+        self.smooth = SMOOTH_DEFAULT         # estabilizacion del lapiz, de 0 a 100
+        self._stab: StrokeStabilizer | None = None
+        self._cursor: QPointF | None = None  # el raton, por delante del lapiz estabilizado
         self.can_draw = lambda: True         # False: solo se pausa (el video suena)
         self.on_shape = lambda forma: None
         self.on_text = lambda punto: None
@@ -3728,6 +4591,10 @@ class ReviewOverlay(QGraphicsItem):
             return
         self.live = {"tipo": self.tool, "puntos": [[p.x(), p.y()]],
                      "color": self.color, "grosor": self.pen()}
+        self._stab = StrokeStabilizer(self.smooth) if self.tool == "trazo" else None
+        if self._stab is not None:
+            self._stab.start(p.x(), p.y())
+        self._cursor = None
         self.update()
 
     def mouseMoveEvent(self, e):
@@ -3736,6 +4603,10 @@ class ReviewOverlay(QGraphicsItem):
         p = self._clamp(e.pos())
         pts = self.live["puntos"]
         if self.live["tipo"] == "trazo":
+            if self._stab is not None and self._stab.nivel:
+                # el lapiz va detras del raton: el temblor no llega a la linea
+                self._cursor = p
+                p = QPointF(*self._stab.move(p.x(), p.y()))
             if math.hypot(p.x() - pts[-1][0], p.y() - pts[-1][1]) >= max(1.0, self.pen() / 3):
                 pts.append([p.x(), p.y()])
         else:
@@ -3747,10 +4618,16 @@ class ReviewOverlay(QGraphicsItem):
 
     def mouseReleaseEvent(self, e):
         forma, self.live = self.live, None
+        stab, self._stab, self._cursor = self._stab, None, None
         self.update()
         if forma is None:
             return
         pts = forma["puntos"]
+        if stab is not None and stab.nivel:
+            # al soltar, la linea llega hasta donde se solto
+            for x, y in stab.finish():
+                if math.hypot(x - pts[-1][0], y - pts[-1][1]) >= 0.5:
+                    pts.append([x, y])
         if forma["tipo"] in ("flecha", "rect", "elipse", "linea"):
             if len(pts) < 2 or math.hypot(pts[-1][0] - pts[0][0],
                                           pts[-1][1] - pts[0][1]) < 3:
@@ -3762,6 +4639,12 @@ class ReviewOverlay(QGraphicsItem):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         for f in self.shapes + ([self.live] if self.live else []):
             paint_shape(p, f)
+        if self.live and self._cursor is not None:
+            # el hilo: del lapiz al raton, para ver cuanto va por detras
+            fin = self.live["puntos"][-1]
+            hilo = QPen(QColor(255, 255, 255, 170), 0, Qt.PenStyle.DashLine)
+            p.setPen(hilo)
+            p.drawLine(QPointF(fin[0], fin[1]), self._cursor)
         if self.caption and self.box.height() > 0:
             self._paint_caption(p)
 
@@ -3785,8 +4668,33 @@ class ReviewOverlay(QGraphicsItem):
 
 
 class ReviewText(QPlainTextEdit):
-    """El comentario de un fotograma: Intro lo guarda, Mayus+Intro es otra linea."""
+    """El comentario de un fotograma: Intro lo guarda, Mayus+Intro es otra linea.
+    Ocupa una linea y crece con lo que se escribe, hasta cuatro: asi no le
+    quita sitio al video mientras esta vacio."""
     submitted = Signal()
+    LINES = (1, 4)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.textChanged.connect(self._fit)
+        self._fit()
+
+    def _fit(self):
+        lineas, b = 0, self.document().begin()
+        while b.isValid():
+            lay = b.layout()
+            lineas += max(1, lay.lineCount() if lay is not None else 1)
+            b = b.next()
+        lineas = max(self.LINES[0], min(self.LINES[1], lineas))
+        alto = int(math.ceil(lineas * self.fontMetrics().lineSpacing()
+                             + 2 * self.document().documentMargin()
+                             + 2 * self.frameWidth() + 4))
+        if self.minimumHeight() != alto or self.maximumHeight() != alto:
+            self.setFixedHeight(alto)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit()
 
     def keyPressEvent(self, e):
         if (e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
@@ -3801,12 +4709,15 @@ class ReviewText(QPlainTextEdit):
 
 
 class ReviewBar(QWidget):
-    """La barra del modo anotar: herramientas de dibujo, color y grosor arriba;
-    abajo, la marca de tiempo del fotograma y su comentario. No sabe de videos:
-    avisa de lo que se hace y PreviewPane lo guarda."""
+    """La barra del modo anotar: herramientas de dibujo, color, grosor y
+    estabilizacion; y la marca de tiempo del fotograma con su comentario. Todo
+    en una fila si cabe (asi el video se queda con el alto); si no, las
+    herramientas arriba y el comentario debajo. No sabe de videos: avisa de lo
+    que se hace y PreviewPane lo guarda."""
     toolChanged = Signal(object)            # herramienta, o None para la mano
     colorChanged = Signal(str)
     levelChanged = Signal(int)
+    smoothChanged = Signal(int)             # estabilizacion del lapiz, de 0 a 100
     undoShape = Signal()
     clearDrawing = Signal()
     commentTyped = Signal()                 # cada tecla; PreviewPane lo guarda con calma
@@ -3822,13 +4733,16 @@ class ReviewBar(QWidget):
              ("rect", "rect", "Rectangle"),
              ("ellipse", "elipse", "Ellipse"),
              ("text", "texto", "Text on the frame"))
+    COMMENT_MIN = 560                       # lo que necesita el comentario para ir en la misma fila
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 3, 6, 3)
-        lay.setSpacing(3)
-        fila = QHBoxLayout()
+        self.caja = QBoxLayout(QBoxLayout.Direction.LeftToRight, self)
+        self.caja.setContentsMargins(6, 3, 6, 3)
+        self.caja.setSpacing(4)
+        self.g_tools = QWidget()
+        fila = QHBoxLayout(self.g_tools)
+        fila.setContentsMargins(0, 0, 0, 0)
         fila.setSpacing(2)
         self.tool_group = QButtonGroup(self)
         self.tool_buttons = {}
@@ -3844,7 +4758,7 @@ class ReviewBar(QWidget):
             b.clicked.connect(lambda _=False, t=tool: self.toolChanged.emit(t))
             fila.addWidget(b)
         self.tool_buttons["trazo"].setChecked(True)
-        fila.addSpacing(8)
+        fila.addSpacing(6)
         self.color_group = QButtonGroup(self)
         self.color_buttons = {}
         for c in REVIEW_COLORS:
@@ -3859,16 +4773,26 @@ class ReviewBar(QWidget):
             b.clicked.connect(lambda _=False, col=c: self.colorChanged.emit(col))
             fila.addWidget(b)
         self.color_buttons[REVIEW_COLORS[0]].setChecked(True)
-        fila.addSpacing(8)
-        self.sld_level = QSlider(Qt.Orientation.Horizontal)
+        fila.addSpacing(6)
+        # grosor y estabilizacion: barras con el valor dentro, como en el editor
+        self.sld_level = BarSlider("Size", "%d", ancho=78)
         self.sld_level.setRange(1, REVIEW_PEN_LEVELS)
         self.sld_level.setValue(2)
-        self.sld_level.setFixedWidth(70)
         self.sld_level.setToolTip("Line thickness (and text size)")
-        self.sld_level.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.sld_level.valueChanged.connect(self.levelChanged.emit)
         fila.addWidget(self.sld_level)
-        fila.addSpacing(8)
+        self.sld_smooth = BarSlider("Smooth", "%d", ancho=102)
+        self.sld_smooth.setRange(0, 100)
+        self.sld_smooth.setValue(SMOOTH_DEFAULT)
+        self.sld_smooth.setToolTip("Stroke stabiliser of the pencil. 0 follows your hand exactly; "
+                                   "higher, the pencil trails behind the pointer as if pulled by "
+                                   "a string, so a shaky hand still draws a clean line")
+        self.sld_smooth.valueChanged.connect(self.smoothChanged.emit)
+        fila.addWidget(self.sld_smooth)
+        for s in (self.sld_level, self.sld_smooth):
+            s.setFixedHeight(24)
+            s.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        fila.addSpacing(6)
         self.b_undo = QToolButton()
         self.b_undo.setAutoRaise(True)
         self.b_undo.setToolTip("Remove the last stroke of this frame")
@@ -3881,18 +4805,14 @@ class ReviewBar(QWidget):
         themed(self.b_clear, icon="eraser")
         self.b_clear.clicked.connect(self.clearDrawing.emit)
         fila.addWidget(self.b_clear)
-        fila.addStretch(1)
-        self.b_list = QToolButton()
-        self.b_list.setText("Comments")
-        self.b_list.setToolTip("Every comment of this video: pick one to go to its frame")
-        self.b_list.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.b_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.menu_list = QMenu(self.b_list)
-        self.b_list.setMenu(self.menu_list)
-        fila.addWidget(self.b_list)
-        lay.addLayout(fila)
+        for b in (self.b_undo, self.b_clear):
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.g_tools.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
-        fila2 = QHBoxLayout()
+        self.g_comment = QWidget()
+        fila2 = QHBoxLayout(self.g_comment)
+        fila2.setContentsMargins(0, 0, 0, 0)
+        fila2.setSpacing(4)
         self.lbl_stamp = QLabel("")
         self.lbl_stamp.setStyleSheet("color:%s; font-weight:bold;" % REVIEW_MARK_COLOR)
         self.lbl_stamp.setMinimumWidth(110)
@@ -3900,27 +4820,57 @@ class ReviewBar(QWidget):
         self.txt = ReviewText()
         self.txt.setPlaceholderText("Comment on this frame…  (Enter saves, Shift+Enter: new line)")
         self.txt.setTabChangesFocus(True)
-        self.txt.setFixedHeight(46)
         self.txt.textChanged.connect(self.commentTyped.emit)
         self.txt.submitted.connect(self.commentSubmitted.emit)
         fila2.addWidget(self.txt, 1)
-        col = QVBoxLayout()
-        col.setSpacing(2)
-        self.b_delete = QPushButton("Delete")
-        self.b_delete.setToolTip("Remove the comment and the drawing of this frame")
+        self.b_delete = QPushButton()
+        themed(self.b_delete, icon="trash")
+        self.b_delete.setToolTip("Delete: remove the comment and the drawing of this frame")
         self.b_delete.clicked.connect(self.deleteHere.emit)
         self.b_delete.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        col.addWidget(self.b_delete)
-        self.b_pdf = QPushButton("  Export PDF")
+        fila2.addWidget(self.b_delete)
+        self.b_pdf = QPushButton("  PDF")
         themed(self.b_pdf, icon="save")
-        self.b_pdf.setToolTip("A PDF with a picture of every frame you drew on or commented, "
+        self.b_pdf.setToolTip("Export PDF: a picture of every frame you drew on or commented, "
                               "with its time stamp and comment (with none, the first and "
                               "last frame)")
         self.b_pdf.clicked.connect(self.exportPdf.emit)
         self.b_pdf.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        col.addWidget(self.b_pdf)
-        fila2.addLayout(col)
-        lay.addLayout(fila2)
+        fila2.addWidget(self.b_pdf)
+        self.b_list = QToolButton()
+        self.b_list.setText("Comments")
+        self.b_list.setToolTip("Every comment of this video: pick one to go to its frame")
+        self.b_list.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.b_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.menu_list = QMenu(self.b_list)
+        self.b_list.setMenu(self.menu_list)
+        fila2.addWidget(self.b_list)
+        self.caja.addWidget(self.g_tools, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.caja.addWidget(self.g_comment, 1)
+        self._ajustar()
+
+    def one_row(self) -> bool:
+        return self.caja.direction() == QBoxLayout.Direction.LeftToRight
+
+    def _ajustar(self):
+        """Una fila si cabe todo; si no, las herramientas arriba y el comentario debajo."""
+        herramientas = self.g_tools.sizeHint().width()
+        m = self.caja.contentsMargins()
+        # el minimo es el del grupo mas ancho, no la suma: asi la ventana puede
+        # estrecharse y la barra pasa a dos filas
+        minimo = max(herramientas, 320) + m.left() + m.right()
+        if self.minimumWidth() != minimo:
+            self.setMinimumWidth(minimo)
+        cabe = self.width() >= herramientas + self.COMMENT_MIN + m.left() + m.right()
+        destino = (QBoxLayout.Direction.LeftToRight if cabe
+                   else QBoxLayout.Direction.TopToBottom)
+        if self.caja.direction() != destino:
+            self.caja.setDirection(destino)
+        self.caja.setSpacing(10 if cabe else 3)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._ajustar()
 
     def set_comment(self, texto: str):
         """Sin avisar: lo que se ve cambia porque cambia el fotograma, no porque se escriba."""
@@ -4073,6 +5023,13 @@ class GifPlayer(QObject):
                 if n == i:
                     img = hecho
         return img
+
+    def peek(self, i: int) -> QImage | None:
+        """Un fotograma vecino, para el papel cebolla, sin mover el que se ve."""
+        if not 0 <= i < self.count:
+            return None
+        img = self._frame(i)
+        return None if img.isNull() else img
 
     def delay(self, i: int) -> int:
         # como los navegadores: un retardo de 0 o 10 ms se toma como 100
@@ -6593,6 +7550,11 @@ class PreviewPane(QWidget):
     """
     openBig = Signal()
     autoplay = False            # casilla Autoplay: los videos arrancan solos al abrirlos
+    # preferencias que comparten la vista previa y la ventana grande, y que la
+    # ventana principal guarda en la biblioteca
+    onion_prefs = dict(ONION_DEFAULTS)      # papel cebolla: encendido, fotogramas y opacidad
+    review_smooth = SMOOTH_DEFAULT          # estabilizacion del lapiz al anotar
+    _panes = weakref.WeakSet()              # los visores vivos: lo que cambia uno lo ven todos
 
     def __init__(self, parent=None, max_side: int = 0, with_button: bool = True):
         super().__init__(parent)
@@ -6710,7 +7672,22 @@ class PreviewPane(QWidget):
         vid_col = QVBoxLayout(self.video_bar)
         vid_col.setContentsMargins(6, 2, 6, 2)
         vid_col.setSpacing(0)
-        vid_lay = QHBoxLayout()
+        # los botones se reparten en dos grupos (WrapRow, mas abajo): en una
+        # fila si caben y, si no, uno encima de otro, sin ensanchar la ventana
+        vid_izq, vid_der = [], []
+
+        class _Fila:
+            """Lo justo de un layout para ir apuntando piezas a un grupo."""
+            def __init__(self, piezas):
+                self.piezas = piezas
+
+            def addWidget(self, w):
+                self.piezas.append(w)
+
+            def addSpacing(self, px):
+                self.piezas.append(int(px))
+
+        vid_lay = _Fila(vid_izq)
         # fotograma a fotograma y fotogramas clave: estado del paso en curso
         self.marks_for = lambda path: []            # los rellena la ventana principal
         self.on_marks_changed = lambda path, marks, desc: None
@@ -6729,19 +7706,58 @@ class PreviewPane(QWidget):
         self._want_us = None                        # fotograma al que se va
         self._tries = 0
         self._fps_known = False
+        # moverse sin esperar al decodificador: los fotogramas ya leidos estan
+        # en memoria (FrameCache) y se ensenan encima del video mientras se
+        # arrastra la barra o se pasan fotogramas; al pararse, el reproductor
+        # salta de verdad y deja el fotograma a su resolucion
+        self.cache = FrameCache(self)
+        self.cache.changed.connect(self._on_cache_changed)
+        self._cache_key = None
+        self.scrub_item = QGraphicsPixmapItem()     # el fotograma de memoria, encima del video
+        self.scrub_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        self.scrub_item.setZValue(1)
+        self.scrub_item.hide()
+        self.scene.addItem(self.scrub_item)
+        self._scrub_us = None                       # fotograma que se ensena desde memoria
+        self._settle_tries = 0
+        self._settling_us = None                    # ... y al que ya va el reproductor
+        self._scrub_resume = False                  # se estaba reproduciendo al agarrar la barra
+        self._seek_busy = False                     # un salto pedido y aun sin fotograma
+        self._seek_next = None                      # el siguiente salto (solo el ultimo cuenta)
+        self._settle = QTimer(self)
+        self._settle.setSingleShot(True)
+        self._settle.timeout.connect(self._settle_now)
+        self._seek_guard = QTimer(self)             # un salto sin respuesta no bloquea los demas
+        self._seek_guard.setSingleShot(True)
+        self._seek_guard.setInterval(350)
+        self._seek_guard.timeout.connect(self._seek_done)
+        self.rate = 1.0                             # velocidad, que se mantiene de video a video
+        # papel cebolla: los fotogramas vecinos como fantasmas sobre el que se ve
+        self.onion = OnionItem()
+        self.onion.hide()
+        self.scene.addItem(self.onion)
+        self._onion_key = None
+        self._onion_bg = (None, None)               # (de que fotogramas, el fondo del plano)
+        self._onion_ui = []                         # (boton, barra de fotogramas, barra de opacidad)
+        self._onion_timer = QTimer(self)
+        self._onion_timer.setSingleShot(True)
+        self._onion_timer.setInterval(30)
+        self._onion_timer.timeout.connect(self._build_onion)
+        self.on_prefs_changed = lambda: None        # la ventana principal las guarda
+        PreviewPane._panes.add(self)
 
         self._video_tips = []                       # (accion, boton)
         SK.listeners.append(lambda: [b.setToolTip(shortcut_tip(a))
                                      for a, b in self._video_tips])
 
-        def boton(accion, fn, barra=vid_lay):
+        def boton(accion, fn, barra=None):
             b = QToolButton()
             b.setAutoRaise(True)
             b.setToolTip(shortcut_tip(accion))
             self._video_tips.append((accion, b))
             themed(b, icon=accion)
             b.clicked.connect(fn)
-            barra.addWidget(b)
+            (barra or vid_lay).addWidget(b)     # vid_lay: el grupo que toque en ese momento
             return b
 
         self.b_key_prev = boton("key_prev", lambda: self.jump_keyframe(-1))
@@ -6755,25 +7771,41 @@ class PreviewPane(QWidget):
         self.b_frame_next = boton("frame_next", lambda: self.step_frame(1))
         self.b_key_next = boton("key_next", lambda: self.jump_keyframe(1))
         self.sld_pos = MarkSlider()
-        self.sld_pos.setToolTip("Click anywhere to play from there, or drag to move through the video. "
-                                "Keyframes are marked above the bar.")
+        self.sld_pos.setToolTip("Drag to move through the video frame by frame; hold Shift while "
+                                "dragging for fine steps, or roll the wheel to go one frame at a "
+                                "time. A click plays from there. The green line is what is "
+                                "already in memory; keyframes are marked above the bar.")
         self.sld_pos.sliderMoved.connect(self._on_seek)
         self.sld_pos.valueChanged.connect(self._on_seek_click)
         self.sld_pos.jumped.connect(self._on_seek_jumped)
+        self.sld_pos.sliderPressed.connect(self._on_scrub_start)
+        self.sld_pos.sliderReleased.connect(self._on_scrub_end)
+        self.sld_pos.stepped.connect(self.step_frame)
         vid_col.addWidget(self.sld_pos)
-        vid_col.addLayout(vid_lay)
         self.lbl_time = QLabel("0:00 / 0:00")
         themed(self.lbl_time, css="color:%(caption)s;")
         vid_lay.addSpacing(4)
         vid_lay.addWidget(self.lbl_time)
-        vid_lay.addStretch(1)
+        # velocidad: el boton dice la que hay y, al pulsarlo, deja elegir otra
+        self.b_rate = QToolButton()
+        self.b_rate.setAutoRaise(True)
+        self.b_rate.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.b_rate.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        menu_rate = QMenu(self.b_rate)
+        for r in PLAY_RATES:
+            menu_rate.addAction(self._rate_text(r), lambda r=r: self.set_rate(r))
+        self.b_rate.setMenu(menu_rate)
+        vid_lay.addWidget(self.b_rate)
+        self._refresh_rate_ui()
+        SK.listeners.append(self._refresh_rate_ui)
+        vid_lay = _Fila(vid_der)
         self.lbl_key = QLabel("")
         self.lbl_key.setStyleSheet("color:%s; font-weight:bold;" % KEYFRAME_COLOR)
         steady_width(self.lbl_key, "◆ Keyframe", 78)    # aparece y desaparece al reproducir
         vid_lay.addWidget(self.lbl_key)
         self.b_key_add = boton("key_add", self.set_keyframe)
         self.b_key_del = boton("key_del", self.delete_keyframe)
-        vid_lay.addSpacing(8)
+        vid_lay.addSpacing(4)
         # bucle: el video entero o, con un tramo marcado, solo ese tramo. El
         # boton de bucle se mantiene al pasar de video; el tramo, no
         self.loop_on = False
@@ -6788,7 +7820,9 @@ class PreviewPane(QWidget):
         self.lbl_loop = QLabel("")
         self.lbl_loop.setStyleSheet("color:%s; font-weight:bold;" % LOOP_COLOR)
         vid_lay.addWidget(self.lbl_loop)
-        vid_lay.addSpacing(8)
+        vid_lay.addSpacing(4)
+        self._onion_controls(vid_lay)
+        vid_lay.addSpacing(4)
 
         # los atajos, activos solo mientras hay un video (o un GIF) puesto
         self._video_shortcuts = []
@@ -6802,7 +7836,10 @@ class PreviewPane(QWidget):
                            ("loop", self.toggle_loop),
                            ("loop_in", self.set_loop_in),
                            ("loop_out", self.set_loop_out),
-                           ("loop_clear", self.clear_loop_range)):
+                           ("loop_clear", self.clear_loop_range),
+                           ("onion", self.toggle_onion),
+                           ("speed_down", lambda: self.bump_rate(-1)),
+                           ("speed_up", lambda: self.bump_rate(1))):
             atajo = SK.bind(self, accion, fn)
             atajo.setEnabled(False)
             self._video_shortcuts.append(atajo)
@@ -6838,7 +7875,7 @@ class PreviewPane(QWidget):
         vid_lay.addWidget(self.b_rv_prev)
         vid_lay.addWidget(self.b_annotate)
         vid_lay.addWidget(self.b_rv_next)
-        vid_lay.addSpacing(8)
+        vid_lay.addSpacing(4)
 
         self.b_mute = QToolButton()
         self.b_mute.setAutoRaise(True)
@@ -6850,10 +7887,21 @@ class PreviewPane(QWidget):
         self.sld_vol = QSlider(Qt.Orientation.Horizontal)
         self.sld_vol.setRange(0, 100)
         self.sld_vol.setValue(80)
-        self.sld_vol.setFixedWidth(80)
+        self.sld_vol.setFixedWidth(52)
         self.sld_vol.setToolTip("Volume")
         self.sld_vol.valueChanged.connect(self._on_volume)
-        vid_lay.addWidget(self.sld_vol)
+        # el volumen va pegado a su boton: son una sola pieza al repartir la fila
+        g_vol = QWidget()
+        l_vol = QHBoxLayout(g_vol)
+        l_vol.setContentsMargins(0, 0, 0, 0)
+        l_vol.setSpacing(2)
+        l_vol.addWidget(self.b_mute)
+        l_vol.addWidget(self.sld_vol)
+        vid_der[vid_der.index(self.b_mute)] = g_vol
+        self.video_row = WrapRow(vid_izq, vid_der)
+        for g in self.video_row.grupos:
+            g.layout().hspace = 2
+        vid_col.addWidget(self.video_row)
         # sin foco: las flechas y el espacio siguen siendo de la rejilla y del visor
         for w in (self.b_play, self.sld_pos, self.b_mute, self.sld_vol, self.b_key_prev,
                   self.b_frame_prev, self.b_frame_next, self.b_key_next, self.b_key_add,
@@ -6872,6 +7920,8 @@ class PreviewPane(QWidget):
         rb.toolChanged.connect(self._on_review_tool)
         rb.colorChanged.connect(self._on_review_color)
         rb.levelChanged.connect(self._on_review_level)
+        rb.smoothChanged.connect(self._on_review_smooth)
+        rb.sld_smooth.setValue(PreviewPane.review_smooth)
         rb.undoShape.connect(self.undo_review_shape)
         rb.clearDrawing.connect(self.clear_review_drawing)
         rb.commentTyped.connect(self._on_review_typed)
@@ -6900,8 +7950,10 @@ class PreviewPane(QWidget):
         gif_lay.addWidget(self.b_gif_play)
         self.b_gif_next = boton("frame_next", lambda: self.step_frame(1), gif_lay)
         self.sld_gif = MarkSlider()
-        self.sld_gif.setToolTip("Drag to move through the frames of the GIF")
+        self.sld_gif.setToolTip("Drag to move through the frames of the GIF (hold Shift for fine "
+                                "steps, or roll the wheel to go one frame at a time)")
         self.sld_gif.valueChanged.connect(self._on_gif_seek)
+        self.sld_gif.stepped.connect(self.step_frame)
         gif_lay.addWidget(self.sld_gif, 1)
         self.lbl_gif = QLabel("")
         themed(self.lbl_gif, css="color:%(caption)s;")
@@ -6920,6 +7972,7 @@ class PreviewPane(QWidget):
         self.lbl_gif_loop.setStyleSheet("color:%s; font-weight:bold;" % LOOP_COLOR)
         gif_lay.addWidget(self.lbl_gif_loop)
         gif_lay.addSpacing(8)
+        self._onion_controls(gif_lay)
         self.gif.finished.connect(self._gif_state)
         for w in (self.b_gif_prev, self.b_gif_play, self.b_gif_next, self.sld_gif,
                   self.b_gif_loop, self.b_gif_loop_in, self.b_gif_loop_out,
@@ -6954,11 +8007,14 @@ class PreviewPane(QWidget):
     # --- el editor en el sitio de la imagen ---------------------------------
     def set_editor(self, ed):
         """Se dibuja directamente aqui: el editor ocupa el sitio de la imagen y
-        su zona de abajo va en la barra, entre el pie y los botones."""
+        su zona de abajo va justo debajo, en una fila propia a todo el ancho.
+        (Metida en la barra del pie, entre el nombre y los botones, le quedaba
+        tan poco ancho que se partia en cinco filas y las ultimas no se veian.)"""
         self.clear_editor()
         self.editor = ed
         self.area.addWidget(ed)
-        self.bar.insertWidget(1, ed.zona_abajo, 4)
+        ed.zona_abajo.setContentsMargins(6, 3, 6, 1)
+        self._lay.insertWidget(self._lay.indexOf(self.area) + 1, ed.zona_abajo)
         self.show_editor(True)
 
     def show_editor(self, si: bool):
@@ -6977,7 +8033,7 @@ class PreviewPane(QWidget):
         self.editor = None
         self.area.setCurrentWidget(self.view)
         self.area.removeWidget(ed)
-        self.bar.removeWidget(ed.zona_abajo)
+        self._lay.removeWidget(ed.zona_abajo)
 
     def editing(self) -> bool:
         return self.editor is not None and self.area.currentWidget() is self.editor
@@ -7151,6 +8207,7 @@ class PreviewPane(QWidget):
         self.sld_gif.setRange(0, self.gif.count - 1)
         self.sld_gif.setValue(0)
         self.sld_gif.blockSignals(False)
+        self.sld_gif.set_frames(1, cells=False, first_label=1)
         self.gif_bar.show()
         self.gif.loop = self.gif_loop_on
         self.gif.range = None                       # el tramo es de cada GIF
@@ -7166,6 +8223,7 @@ class PreviewPane(QWidget):
         self.gif.close()
         self.showing_gif = False
         self._gif_resume = False
+        self._hide_onion()
         self.gif_bar.hide()
         self._enable_shortcuts()
 
@@ -7183,6 +8241,7 @@ class PreviewPane(QWidget):
         self.sld_gif.blockSignals(False)
         self.lbl_gif.setText("frame %d / %d" % (i + 1, self.gif.count))
         steady_width(self.lbl_gif, "frame %d / %d" % (self.gif.count, self.gif.count))
+        self._schedule_onion()
 
     def _on_gif_seek(self, i: int):
         if self.showing_gif and i != self.gif.index:
@@ -7192,6 +8251,14 @@ class PreviewPane(QWidget):
 
     def _gif_state(self):
         themed(self.b_gif_play, icon="pause" if self.gif.playing else "play")
+        self._onion_key = None
+        self._build_onion() if self.showing_gif and not self.gif.playing else self._hide_onion()
+
+    def _hide_onion(self):
+        self._onion_key = None
+        if self.onion.isVisible():
+            self.onion.set_content([], [])
+            self.onion.hide()
 
     def _caption_gif(self):
         w, h = self.gif.size.width(), self.gif.size.height()
@@ -7214,6 +8281,7 @@ class PreviewPane(QWidget):
         self.video_item.nativeSizeChanged.connect(self._on_native_size)
         self.overlay = ReviewOverlay()
         self.overlay.hide()
+        self.overlay.smooth = PreviewPane.review_smooth
         self.overlay.can_draw = self._review_can_draw
         self.overlay.on_shape = self._on_review_shape
         self.overlay.on_text = self._on_review_text
@@ -7252,11 +8320,17 @@ class PreviewPane(QWidget):
         self._frame_start_us, self._frame_us = 0, 40000
         self._fps_known = False
         self._want_us = None
+        self._reset_scrub()
+        self.cache.close()
+        self._cache_key = None
+        self.sld_pos.set_cached([])
+        self.sld_pos.set_frames(0)
         self.lbl_time.setText("0:00 / 0:00")
         self._enable_shortcuts()
         self.refresh_marks()
         self.loop_in = self.loop_out = None
         self.player.setSource(QUrl.fromLocalFile(path))
+        self.player.setPlaybackRate(self.rate)
         self._apply_loop()
         if PreviewPane.autoplay:
             self.player.play()
@@ -7268,12 +8342,16 @@ class PreviewPane(QWidget):
     def stop_video(self):
         """Para y suelta el archivo (en Windows, si no, no se podria mover)."""
         self.flush_review()
+        self.cache.close()
+        self._cache_key = None
+        self._reset_scrub()
         if self.player is not None:
             self.player.stop()
             self.player.setSource(QUrl())
         if self.showing_video:
             self.showing_video = False
             self._want_us = None
+            self._build_onion()
             self.video_item.hide()
             self.item.show()
             self.video_bar.hide()
@@ -7296,13 +8374,15 @@ class PreviewPane(QWidget):
         self._fps_known = fps > 0
         if fps > 0:
             self._frame_us = 1_000_000 / fps
+        self._sync_timeline()
 
     def _on_video_frame(self, frame):
         if not self.showing_video or not frame.isValid() or frame.startTime() < 0:
             return
         inicio, fin = frame.startTime(), frame.endTime()
-        if fin > inicio and not self._fps_known:
+        if fin > inicio and not self._fps_known and abs((fin - inicio) - self._frame_us) > 1:
             self._frame_us = fin - inicio        # sin fps en el archivo: el fotograma lo dice
+            self._sync_timeline()
         self._frame_start_us = inicio
         if self._loop_jump(inicio):
             return
@@ -7315,17 +8395,118 @@ class PreviewPane(QWidget):
                 # se paso: justo al empezar el fotograma; se quedo corto: mas adentro
                 destino = self._want_us + (1000 if error > 0 else self._frame_us * 0.6)
                 self.player.setPosition(int(math.ceil(destino / 1000)))
+                self._seek_guard.start()
+        if self._want_us is None:
+            self._seek_done()
         self._refresh_frame_ui()
 
     def current_frame_us(self) -> float:
-        """El fotograma actual; si se esta yendo a uno, ese (pulsaciones seguidas)."""
+        """El fotograma actual: el que se ensena desde memoria; si no, aquel al
+        que se esta yendo (pulsaciones seguidas); si no, el del reproductor."""
+        if self._scrub_us is not None:
+            return self._scrub_us
         return self._want_us if self._want_us is not None else self._frame_start_us
+
+    def _sync_timeline(self):
+        """La barra sabe cuanto dura un fotograma (regla y ajuste) y la memoria
+        de fotogramas se pone a leer en cuanto se conocen los fps y la duracion."""
+        if not self.showing_video or self.player is None:
+            return
+        self.sld_pos.set_frames(self._frame_us / 1000.0)
+        dur = self.player.duration()
+        clave = (self.loaded_path, round(self._frame_us, 1), dur)
+        if dur > 0 and clave != self._cache_key:
+            self._cache_key = clave
+            self.sld_pos.set_cached([])
+            self.cache.open(self.loaded_path, self._frame_us, dur)
+            self.cache.hold(self.is_playing())
+            self.cache.focus(self.frame_index())
+
+    # --- moverse sin esperar: fotogramas de memoria -------------------------
+    def _reset_scrub(self):
+        self._settle.stop()
+        self._seek_guard.stop()
+        self._scrub_us = self._settling_us = self._seek_next = None
+        self._seek_busy = False
+        self._scrub_resume = False
+        self.scrub_item.hide()
+        self.scrub_item.setPixmap(QPixmap())
+
+    def _show_proxy(self, img: QImage):
+        """El fotograma de memoria encima del video, a su mismo tamano."""
+        self.scrub_item.setPixmap(QPixmap.fromImage(img))
+        tam = self.video_item.size() if self.video_item is not None else QSizeF()
+        if not tam.isEmpty() and img.width() > 0 and img.height() > 0:
+            self.scrub_item.setTransform(QTransform.fromScale(tam.width() / img.width(),
+                                                              tam.height() / img.height()))
+        self.scrub_item.show()
+
+    def _hide_proxy(self):
+        self._settle.stop()
+        self._scrub_us = self._settling_us = None
+        if self.scrub_item.isVisible():
+            self.scrub_item.hide()
+
+    def _settle_now(self):
+        """Parado sobre un fotograma de memoria: el reproductor va a ese mismo,
+        y cuando llega el de verdad se quita el de memoria."""
+        self._settle.stop()
+        if self._scrub_us is None or self.player is None or not self.showing_video:
+            return
+        if self._settling_us != self._scrub_us:
+            self._settling_us = self._scrub_us
+            self._seek_frame_us(self._scrub_us)
+
+    def _seek_done(self):
+        """Llego el fotograma del ultimo salto: se quita el de memoria si era ese
+        y, si mientras tanto se pidio otro, se va a el (solo al ultimo)."""
+        self._seek_guard.stop()
+        self._seek_busy = False
+        if self._settling_us is not None:
+            llegado, self._settling_us = self._settling_us, None
+            if self._scrub_us == llegado:
+                if abs(self._frame_start_us - llegado) <= self._frame_us * 0.5:
+                    self._scrub_us = None
+                    self.scrub_item.hide()
+                elif self._settle_tries < 2:
+                    self._settle_tries += 1     # salio otro fotograma: se vuelve a pedir
+                    self._settle.start(120)
+        if self._seek_next is not None:
+            us, self._seek_next = self._seek_next, None
+            self._seek_frame_us(us)
+
+    def _on_scrub_start(self):
+        """Se agarra la barra: en pausa mientras se arrastra."""
+        if not self.showing_video or self.player is None:
+            return
+        self._scrub_resume = self.is_playing()
+        if self._scrub_resume:
+            self.player.pause()
+
+    def _on_scrub_end(self):
+        if not self.showing_video or self.player is None:
+            return
+        self._settle_now()
+        if self._scrub_resume:
+            self._scrub_resume = False
+            self._play_from_here()
+
+    def _play_from_here(self):
+        if self._scrub_us is not None:
+            self._settle_now()                  # el reproductor, a donde se estaba viendo
+        self._want_us = None
+        self._seek_next = None
+        self.player.play()
 
     def frame_index(self, us: float | None = None) -> int:
         us = self.current_frame_us() if us is None else us
         return int(round(us / (self._frame_us or 40000)))
 
-    def _go_to_frame_us(self, inicio_us: float):
+    def _go_to_frame_us(self, inicio_us: float, settle_ms: int = STEP_SETTLE_MS):
+        """Va al fotograma que empieza en inicio_us. Si esta en memoria se ve
+        al momento y el reproductor salta cuando uno se para (settle_ms); si
+        no, salta ya, pero nunca con mas de un salto en curso: de los que se
+        pidan mientras tanto solo se hace el ultimo."""
         if self.player is None:
             return
         if self.is_playing():
@@ -7334,10 +8515,33 @@ class PreviewPane(QWidget):
         inicio_us = max(0.0, min(inicio_us, ultimo))
         # redondeado a un fotograma entero: los tiempos guardados son en ms
         inicio_us = round(inicio_us / self._frame_us) * self._frame_us
+        img = self.cache.image(int(round(inicio_us / self._frame_us)))
+        if img is not None:
+            self._want_us = None
+            self._seek_next = None
+            if self._scrub_us != inicio_us:
+                self._settle_tries = 0
+            self._scrub_us = inicio_us
+            self._show_proxy(img)
+            if self._settling_us != inicio_us:
+                self._settle.start(max(0, int(settle_ms)))
+            self._refresh_frame_ui()
+            return
+        self._hide_proxy()
+        self._want_us = inicio_us               # ya cuenta como el actual (pulsaciones seguidas)
+        if self._seek_busy:
+            self._seek_next = inicio_us
+        else:
+            self._seek_frame_us(inicio_us)
+        self._refresh_frame_ui()
+
+    def _seek_frame_us(self, inicio_us: float):
+        """El salto de verdad del reproductor, con su comprobacion al llegar."""
         self._want_us = inicio_us
         self._tries = 0
+        self._seek_busy = True
+        self._seek_guard.start()
         self.player.setPosition(int(round((inicio_us + self._frame_us / 4) / 1000)))
-        self._refresh_frame_ui()
 
     def step_frame(self, delta: int):
         if self.showing_gif:
@@ -7434,9 +8638,19 @@ class PreviewPane(QWidget):
         despues = any(ms * 1000 > self.current_frame_us() + self._frame_us / 2 for ms in marcas)
         self.b_key_prev.setEnabled(antes)
         self.b_key_next.setEnabled(despues)
+        if not self.is_playing() and not self.sld_pos.isSliderDown():
+            # en pausa la aguja se clava en el principio de su fotograma
+            ms = int(round(self.current_frame_us() / 1000))
+            if self.sld_pos.value() != ms:
+                self.sld_pos.blockSignals(True)
+                self.sld_pos.setValue(ms)
+                self.sld_pos.blockSignals(False)
+        self.cache.focus(self.frame_index())
         self._sync_review()
+        self._schedule_onion()
 
-    GIF_SHORTCUTS = {"frame_prev", "frame_next", "loop", "loop_in", "loop_out", "loop_clear"}
+    GIF_SHORTCUTS = {"frame_prev", "frame_next", "loop", "loop_in", "loop_out", "loop_clear",
+                     "onion"}
 
     def _enable_shortcuts(self):
         """Los atajos del reproductor: todos con un video; con un GIF, los de
@@ -7658,6 +8872,201 @@ class PreviewPane(QWidget):
         if self.overlay is not None:
             self.overlay.level = nivel
 
+    def _on_review_smooth(self, nivel: int):
+        nivel = max(0, min(100, int(nivel)))
+        if self.overlay is not None:
+            self.overlay.smooth = nivel
+        if PreviewPane.review_smooth != nivel:
+            PreviewPane.review_smooth = nivel
+            self._share_prefs()
+            self.on_prefs_changed()
+
+    # --- velocidad -----------------------------------------------------------
+    @staticmethod
+    def _rate_text(r: float) -> str:
+        return ("%g" % r) + "\u00d7"
+
+    def _refresh_rate_ui(self):
+        self.b_rate.setText(self._rate_text(self.rate))
+        self.b_rate.setToolTip("<nobr>Playback speed&nbsp;&nbsp;<b>%s / %s</b></nobr>"
+                               % (SK.text("speed_down"), SK.text("speed_up")))
+        steady_width(self.b_rate, "0.25\u00d7", 44)
+
+    def set_rate(self, r: float):
+        self.rate = min(PLAY_RATES, key=lambda x: abs(x - r))
+        if self.player is not None:
+            self.player.setPlaybackRate(self.rate)
+        self._refresh_rate_ui()
+        if self.showing_video:
+            self.flash("Speed %s" % self._rate_text(self.rate))
+
+    def bump_rate(self, sentido: int):
+        i = PLAY_RATES.index(min(PLAY_RATES, key=lambda x: abs(x - self.rate)))
+        self.set_rate(PLAY_RATES[max(0, min(len(PLAY_RATES) - 1, i + sentido))])
+
+    # --- papel cebolla ---------------------------------------------------------
+    def _onion_controls(self, barra):
+        """El boton del papel cebolla y, a su lado, cuantos fotogramas y con que
+        fuerza. Hay un juego en la barra del video y otro en la del GIF."""
+        b = QToolButton()
+        b.setAutoRaise(True)
+        b.setCheckable(True)
+        themed(b, icon="onion")
+        b.setToolTip(shortcut_tip("onion"))
+        self._video_tips.append(("onion", b))
+        b.setChecked(bool(PreviewPane.onion_prefs["on"]))
+        b.toggled.connect(self.set_onion)
+        n = BarSlider("Frames", "%d", ancho=74)
+        n.setRange(1, ONION_MAX)
+        n.setValue(PreviewPane.onion_prefs["n"])
+        n.setToolTip("Onion skin: how many frames before (red) and after (green) are ghosted")
+        n.valueChanged.connect(lambda v: self._set_onion_pref("n", v))
+        op = BarSlider("Ghost", "%d %%", ancho=92)
+        op.setRange(5, 100)
+        op.setValue(PreviewPane.onion_prefs["opacity"])
+        op.setToolTip("Onion skin: how strong the ghost frames are")
+        op.valueChanged.connect(lambda v: self._set_onion_pref("opacity", v))
+        for w in (b, n, op):
+            w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        for w in (n, op):
+            w.setFixedHeight(24)
+            w.setVisible(b.isChecked())
+        g = QWidget()                       # una sola pieza: no se parte al repartir la fila
+        lay = QHBoxLayout(g)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        for w in (b, n, op):
+            lay.addWidget(w)
+        barra.addWidget(g)
+        self._onion_ui.append((b, n, op))
+
+    def _share_prefs(self):
+        """Una preferencia cambio aqui: los demas visores se ponen al dia."""
+        for pane in list(PreviewPane._panes):
+            try:
+                pane._sync_prefs_ui()
+                if pane is not self:
+                    pane._onion_key = None
+                    pane._build_onion()
+            except RuntimeError:                # su ventana ya se cerro
+                PreviewPane._panes.discard(pane)
+
+    def _sync_prefs_ui(self):
+        """Lo que se cambio en el otro visor (son preferencias compartidas)."""
+        pr = PreviewPane.onion_prefs
+        for b, n, op in self._onion_ui:
+            for w, v in ((n, pr["n"]), (op, pr["opacity"])):
+                w.blockSignals(True)
+                w.setValue(v)
+                w.blockSignals(False)
+                w.setVisible(bool(pr["on"]))
+            b.blockSignals(True)
+            b.setChecked(bool(pr["on"]))
+            b.blockSignals(False)
+        s = self.review_bar.sld_smooth
+        s.blockSignals(True)
+        s.setValue(PreviewPane.review_smooth)
+        s.blockSignals(False)
+        if self.overlay is not None:
+            self.overlay.smooth = PreviewPane.review_smooth
+
+    def toggle_onion(self):
+        self.set_onion(not PreviewPane.onion_prefs["on"])
+
+    def set_onion(self, on: bool):
+        on = bool(on)
+        cambia = PreviewPane.onion_prefs["on"] != on
+        PreviewPane.onion_prefs["on"] = on
+        self._share_prefs()
+        self._onion_key = None
+        self._build_onion()
+        if cambia:
+            self.on_prefs_changed()
+            if self.showing_video or self.showing_gif:
+                self.flash("Onion skin on: red is before, green is after" if on
+                           else "Onion skin off")
+
+    def _set_onion_pref(self, clave: str, v: int):
+        if PreviewPane.onion_prefs[clave] == int(v):
+            return
+        PreviewPane.onion_prefs[clave] = int(v)
+        self._share_prefs()
+        self._onion_key = None
+        self._build_onion()
+        self.on_prefs_changed()
+
+    def _schedule_onion(self):
+        if PreviewPane.onion_prefs["on"] or self.onion.isVisible():
+            if not self._onion_timer.isActive():
+                self._onion_timer.start()
+
+    def _build_onion(self):
+        """Rehace los fantasmas del fotograma que se ve (solo en pausa: en
+        marcha no se distinguiria nada). Barato si no ha cambiado nada."""
+        self._onion_timer.stop()
+        pr = PreviewPane.onion_prefs
+        n, op = pr["n"], pr["opacity"]
+        fuera = [k for k in onion_offsets(n)]
+        if pr["on"] and self.showing_gif and not self.gif.playing and self.gif.count > 1:
+            i = self.gif.index
+            vecinos = [(k, i + k) for k in fuera if 0 <= i + k < self.gif.count]
+            clave = ("gif", self.gif.path, i, n, op)
+            if clave == self._onion_key:
+                return
+            self._onion_key = clave
+            ghosts = onion_ghosts(self.gif.image, [(k, self.gif.peek(j)) for k, j in vecinos],
+                                  n, op)
+            self.onion.set_box(self.item.boundingRect())
+            self.onion.set_content(ghosts, [])
+            self.onion.setVisible(bool(ghosts))
+            return
+        if not (pr["on"] and self.showing_video and self.player is not None
+                and not self.is_playing()):
+            self._onion_key = None
+            if self.onion.isVisible():
+                self.onion.set_content([], [])
+                self.onion.hide()
+            return
+        i = self.frame_index()
+        vecinos = [(k, i + k) for k in fuera if i + k >= 0]
+        lista = self.reviews()
+        dibujos = [(self.frame_index(a["ms"] * 1000) - i, a) for a in lista if a["draw"]]
+        dibujos = [(d, a) for d, a in dibujos if d != 0 and abs(d) <= n]
+        # el fondo del plano sale de cinco fotogramas repartidos en algo mas de
+        # un segundo alrededor: solo se rehace cada tercio de segundo de video
+        paso = max(3, int(round(1_000_000 / self._frame_us / 3)))
+        ancla = (i // paso) * paso
+        muestras = tuple(j for j in (ancla + d * paso for d in (-2, -1, 0, 1, 2))
+                         if j >= 0 and self.cache.has(j))
+        clave = ("video", self.loaded_path, i, n, op, self.cache.has(i),
+                 tuple(self.cache.has(j) for _k, j in vecinos), muestras,
+                 tuple((d, len(a["draw"]), id(a["draw"])) for d, a in dibujos))
+        if clave == self._onion_key:
+            return
+        self._onion_key = clave
+        caja = QRectF(QPointF(0, 0), self.video_item.size())
+        if self.onion.box != caja:              # venia de un GIF de otro tamano
+            self.onion.set_box(caja)
+        if self._onion_bg[0] != (self.loaded_path, muestras):
+            self._onion_bg = ((self.loaded_path, muestras),
+                              onion_background([self.cache.image(j) for j in muestras]))
+        ghosts = onion_ghosts(self.cache.image(i),
+                              [(k, self.cache.image(j)) for k, j in vecinos], n, op,
+                              self._onion_bg[1])
+        # lo dibujado en los fotogramas vecinos, del mismo color que su fantasma
+        trazos = [(list(a["draw"]), ONION_BEFORE if d < 0 else ONION_AFTER,
+                   0.2 + 0.6 * onion_strength(d, n, op))
+                  for d, a in sorted(dibujos, key=lambda x: -abs(x[0]))]
+        self.onion.set_content(ghosts, trazos)
+        self.onion.setVisible(bool(ghosts or trazos))
+
+    def _on_cache_changed(self):
+        """Hay mas fotogramas en memoria: la barra los ensena y el papel cebolla los usa."""
+        f = self._frame_us / 1000.0
+        self.sld_pos.set_cached([(a * f, (b + 1) * f) for a, b in self.cache.runs()]
+                                if self.showing_video else [])
+        self._schedule_onion()
+
     def _on_review_export(self):
         self.flush_review()
         if self.loaded_path:
@@ -7843,12 +9252,18 @@ class PreviewPane(QWidget):
         if self.is_playing():
             self.player.pause()
             return
+        aqui = self.current_frame_us() / 1000       # donde se esta viendo (quiza desde memoria)
+        if self._scrub_us is not None:
+            self._settle_now()                  # el reproductor, a ese mismo fotograma
         self._want_us = None
+        self._seek_next = None
         if self.loop_on and self.has_loop_range():
             desde, hasta = self.loop_bounds()
-            if not desde <= self.player.position() < hasta - self._frame_us / 1000:
+            if not desde <= aqui < hasta - self._frame_us / 1000:
+                self._hide_proxy()
                 self.player.setPosition(desde)  # fuera del tramo: a su principio
-        elif self.player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia:
+        elif self.player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia \
+                and self._scrub_us is None:
             self.player.setPosition(0)          # al final, vuelve a empezar
         self.player.play()
 
@@ -7868,6 +9283,7 @@ class PreviewPane(QWidget):
             return
         self.video_item.setSize(tam)
         self.overlay.set_box(QRectF(QPointF(0, 0), tam))
+        self.onion.set_box(QRectF(QPointF(0, 0), tam))
         self.scene.setSceneRect(QRectF(QPointF(0, 0), tam))
         self.fit()
         self._caption_video()
@@ -7876,36 +9292,53 @@ class PreviewPane(QWidget):
         self.sld_pos.blockSignals(True)
         self.sld_pos.setRange(0, max(0, ms))
         self.sld_pos.blockSignals(False)
+        self._sync_timeline()
         self._refresh_loop_ui()
         self._on_position(self.player.position())
         if self.showing_video:
             self._caption_video()
 
     def _on_position(self, ms: int):
-        if not self.sld_pos.isSliderDown():
+        if self.is_playing() and not self.sld_pos.isSliderDown():
+            # en marcha la aguja corre con el tiempo (en pausa la pone _refresh_frame_ui)
             self.sld_pos.blockSignals(True)
             self.sld_pos.setValue(ms)
             self.sld_pos.blockSignals(False)
         self._refresh_frame_ui()
 
     def _on_seek(self, ms: int):
-        self._want_us = None                    # manda la barra, no un paso a medias
-        self._frame_start_us = ms * 1000        # provisional: el fotograma lo afina
-        if self.player is not None:
-            self.player.setPosition(ms)         # tambien en pausa: se ve el fotograma
+        """La barra manda: en marcha salta sin mas; en pausa (o arrastrando) va
+        al fotograma de ese punto, desde memoria si lo tiene."""
+        if self.player is None or not self.showing_video:
+            return
+        if self.is_playing():
+            self._want_us = None
+            self._frame_start_us = ms * 1000    # provisional: el fotograma lo afina
+            self.player.setPosition(ms)
+            return
+        self._go_to_frame_us(self.sld_pos.frame_of(ms) * self._frame_us,
+                             SCRUB_SETTLE_MS if self.sld_pos.isSliderDown() else STEP_SETTLE_MS)
 
     def _on_seek_jumped(self):
         """Clic en la barra, lejos del tirador: va alli y reproduce desde ese punto."""
         if self.showing_video and self.player is not None and not self.is_playing():
-            self._want_us = None
-            self.player.play()
+            self._play_from_here()
 
     def _on_seek_click(self, ms: int):
         if not self.sld_pos.isSliderDown():     # clic o flechas sobre la barra
             self._on_seek(ms)
 
     def _on_state(self, _estado):
-        themed(self.b_play, icon="pause" if self.is_playing() else "play")
+        en_marcha = self.is_playing()
+        themed(self.b_play, icon="pause" if en_marcha else "play")
+        self.sld_pos.setProperty("playing", en_marcha)
+        self.cache.hold(en_marcha)              # en marcha no se lee mas: que el video vaya fino
+        if en_marcha:
+            self._hide_proxy()                  # ya manda el video de verdad
+        self._onion_key = None
+        self._build_onion()
+        if not en_marcha:
+            self._refresh_frame_ui()
 
     def _on_mute(self, silencio: bool):
         if self.audio is not None:
@@ -7924,6 +9357,7 @@ class PreviewPane(QWidget):
 
     def hideEvent(self, e):
         self.flush_review()
+        self.cache.hold(True)                   # oculto no hace falta seguir leyendo
         if self.is_playing():
             self.player.pause()                 # oculto no deberia seguir sonando
         if self.showing_gif and self.gif.playing:
@@ -7933,6 +9367,8 @@ class PreviewPane(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
+        self._sync_prefs_ui()                   # por si se cambiaron en el otro visor
+        self.cache.hold(self.is_playing())
         if self.showing_gif and self._gif_resume:
             self._gif_resume = False
             self.gif.play()
@@ -8690,6 +10126,15 @@ def tool_icon(kind: str, size: int = 20) -> QIcon:
         else:
             p.drawLine(QPointF(M - 6, size / 2 - 3), QPointF(M, size / 2 + 3))
             p.drawLine(QPointF(M, size / 2 - 3), QPointF(M - 6, size / 2 + 3))
+    elif kind == "onion":
+        # tres siluetas: la de antes (roja), la de despues (verde) y la actual
+        r = (M - m) / 2 - 2.2
+        cy = size / 2
+        for color, cx in ((QColor(ONION_BEFORE), m + r + 0.5), (QColor(ONION_AFTER), M - r - 0.5)):
+            p.setPen(QPen(color, 1.6))
+            p.drawEllipse(QPointF(cx, cy), r, r)
+        p.setPen(lapiz)
+        p.drawEllipse(QPointF(size / 2, cy), r, r)
     elif kind == "loop":
         # flecha en circulo
         c = size / 2
@@ -8961,16 +10406,29 @@ EXTEND_MAX = 10000                  # pixeles que se pueden anadir de una vez co
 # derecho en una zona cambia esto, y se guarda en biblioteca.json
 EDIT_ZONES = {"left": "the left side", "right": "the right side", "bottom": "the bottom bar"}
 EDIT_ZONES_DEFAULT = {
-    "left": ["tools", "colours", "size", "opacity", "hardness"],
+    "left": ["tools", "colours", "size", "opacity", "hardness", "smoothing"],
     "right": ["layers", "colour_layer", "composition"],
     "bottom": ["rotate", "flip", "extend", "margin", "brightness", "contrast",
                "zoom", "mirror"],
 }
 EDIT_ZONE_WIDTHS = (128, 250)       # ancho de los laterales al empezar
+# Piezas que llegaron despues: (revision, pieza, detras de cual va). Una
+# biblioteca guardada antes de esa revision no la tiene en ninguna zona, y sin
+# esto se quedaria escondida; se mete una vez, al lado de su companera
+EDIT_ZONES_REV = 2
+EDIT_ZONES_ADDED = ((2, "smoothing", ("hardness", "opacity", "size", "tools")),)
 
 
-def clean_edit_zones(crudo) -> dict:
-    """Las zonas leidas de un json: listas de nombres, sin repetir ninguno."""
+def clean_smooth(crudo) -> int:
+    """La estabilizacion del trazo leida de un json: de 0 a 100."""
+    if isinstance(crudo, (int, float)) and not isinstance(crudo, bool):
+        return int(max(0, min(100, crudo)))
+    return SMOOTH_DEFAULT
+
+
+def clean_edit_zones(crudo, rev=EDIT_ZONES_REV) -> dict:
+    """Las zonas leidas de un json: listas de nombres, sin repetir ninguno.
+    rev es la revision con que se guardaron (None: de antes de que hubiera)."""
     if not isinstance(crudo, dict) or not any(isinstance(crudo.get(n), list)
                                               for n in EDIT_ZONES):
         return {n: list(ids) for n, ids in EDIT_ZONES_DEFAULT.items()}
@@ -8981,6 +10439,17 @@ def clean_edit_zones(crudo) -> dict:
             if isinstance(i, str) and i not in vistos:
                 vistos.add(i)
                 out[n].append(i)
+    rev = rev if isinstance(rev, int) and not isinstance(rev, bool) else 1
+    for desde, pieza, companeras in EDIT_ZONES_ADDED:
+        if rev >= desde or pieza in vistos:
+            continue
+        for c in companeras:
+            zona = next((n for n in EDIT_ZONES if c in out[n]), None)
+            if zona is not None:
+                out[zona].insert(out[zona].index(c) + 1, pieza)
+                break
+        else:
+            out["left"].append(pieza)
     return out
 
 
@@ -9153,6 +10622,9 @@ class CropView(QGraphicsView):
         self.width = 6
         self.opacity = 100                  # opacidad y dureza del siguiente trazo
         self.hardness = 100
+        self.smooth = 0                     # estabilizacion del trazo a mano alzada, de 0 a 100
+        self._stab: StrokeStabilizer | None = None
+        self._hilo = None                   # (pincel, raton): el hilo del trazo estabilizado
         self.show_grid = False              # rejilla de guia al girar
         self.frame_rect: QRectF | None = None   # contorno de la imagen al ampliar el encuadre
         self._puntos: list = []
@@ -9188,6 +10660,15 @@ class CropView(QGraphicsView):
         """Rejilla de cuadros sobre la imagen, para enderezar a ojo, y el aro
         del pincel (su tamano real, y por dentro hasta donde llega lo duro)."""
         radio = self._radio_aro()
+        if self._hilo is not None:
+            # el hilo: del pincel al raton, para ver cuanto va por detras
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            for color, estilo in ((QColor(0, 0, 0, 150), Qt.PenStyle.SolidLine),
+                                  (QColor(255, 255, 255, 220), Qt.PenStyle.DashLine)):
+                painter.setPen(QPen(color, 0, estilo))
+                painter.drawLine(self._hilo[0], self._hilo[1])
+            painter.restore()
         if radio and self._aro is not None:
             painter.save()
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -9251,6 +10732,16 @@ class CropView(QGraphicsView):
             self.scene().removeItem(self._preview)
         self._preview = None
         self._puntos = []
+        self._stab = None
+        self._poner_hilo(None)
+
+    def _poner_hilo(self, hilo):
+        """Cambia el hilo y repinta solo lo que cubria y lo que cubre."""
+        for h in (self._hilo, hilo):
+            if h is not None:
+                self.viewport().update(self.mapFromScene(
+                    QRectF(h[0], h[1]).normalized()).boundingRect().adjusted(-3, -3, 3, 3))
+        self._hilo = hilo
 
     def _forma(self) -> dict:
         alpha = 90 if self.tool == "rotulador" else 255
@@ -9309,6 +10800,10 @@ class CropView(QGraphicsView):
             return
         if self.tool in DRAW_TOOLS and e.button() == Qt.MouseButton.LeftButton:
             self._puntos = [self.mapToScene(e.position().toPoint())]
+            self._stab = None
+            if self.smooth and self.tool in ("trazo", "rotulador", "borrador"):
+                self._stab = StrokeStabilizer(self.smooth)
+                self._stab.start(self._puntos[0].x(), self._puntos[0].y())
             if self.tool == "texto":        # el texto se pone de un solo clic
                 self.drawn.emit(self._forma())
                 self._clear_preview()
@@ -9328,6 +10823,11 @@ class CropView(QGraphicsView):
         if self.tool in DRAW_TOOLS and self._puntos:
             p = self.mapToScene(e.position().toPoint())
             if self.tool in ("trazo", "rotulador", "borrador"):
+                if self._stab is not None:
+                    # el pincel va detras del raton: el temblor no llega a la linea
+                    raton = p
+                    p = QPointF(*self._stab.move(p.x(), p.y()))
+                    self._poner_hilo((p, raton))
                 self._puntos.append(p)
             else:
                 self._puntos = [self._puntos[0], p]
@@ -9343,6 +10843,9 @@ class CropView(QGraphicsView):
             self.drag_done.emit()
             return
         if self.tool in DRAW_TOOLS and self._puntos:
+            if self._stab is not None:
+                # al soltar, la linea llega hasta donde se solto
+                self._puntos += [QPointF(x, y) for x, y in self._stab.finish()]
             forma = self._forma()
             self._clear_preview()
             if len(forma["puntos"]) > 1 or forma["tipo"] in ("trazo", "rotulador", "borrar"):
@@ -9592,6 +11095,10 @@ class EditorDialog(QDialog):
 
     pop_out = Signal()                         # desde la vista previa: a ventana propia
     zones_changed = Signal(dict)               # se movio una pieza de zona (clic derecho)
+    # la estabilizacion del trazo es una preferencia: vale para todos los
+    # editores y la ventana principal la guarda en la biblioteca
+    smooth = SMOOTH_DEFAULT
+    on_smooth_changed = None
 
     def __init__(self, path: str, edit: dict, parent=None, independiente: bool = False,
                  incrustado: bool = False, zonas: dict | None = None,
@@ -9862,6 +11369,17 @@ class EditorDialog(QDialog):
                                       "Keys { and } change it")
         pieza(dibujo, "hardness", "Stroke hardness", self.sld_tool_hard)
         self.sld_tool_hard.valueChanged.connect(self._set_hardness)
+        self.sld_tool_smooth = BarSlider("Smoothing", "%d %%")
+        self.sld_tool_smooth.setRange(0, 100)
+        self.sld_tool_smooth.setValue(EditorDialog.smooth)
+        self.sld_tool_smooth.setToolTip("Stroke stabiliser for the pen, the highlighter and the "
+                                        "eraser. 0 follows your hand exactly; higher, the brush "
+                                        "trails behind the pointer as if pulled by a string, so "
+                                        "a shaky hand still draws a clean line. Drag, or "
+                                        "double-click to type a number")
+        pieza(dibujo, "smoothing", "Stroke smoothing", self.sld_tool_smooth)
+        self.sld_tool_smooth.valueChanged.connect(self._set_smooth)
+        self.view.smooth = EditorDialog.smooth
         self.b_fill = QPushButton("  Colour layer")
         themed(self.b_fill, icon="fill")
         self.b_fill.setToolTip("Cover the image with a see-through layer of the chosen colour, "
@@ -10468,6 +11986,16 @@ class EditorDialog(QDialog):
     def _set_hardness(self, v: int):
         self.view.hardness = v
         self.view.refrescar_aro()
+
+    def _set_smooth(self, v: int):
+        self.view.smooth = int(v)
+        if EditorDialog.smooth != int(v):
+            EditorDialog.smooth = int(v)
+            if EditorDialog.on_smooth_changed is not None:
+                try:
+                    EditorDialog.on_smooth_changed()
+                except RuntimeError:            # la ventana que lo guardaba ya no esta
+                    EditorDialog.on_smooth_changed = None
 
     def nudge(self, que: str, delta: int):
         """Teclas [ ] (tamano) y { } (dureza), como en Photoshop. El tamano
@@ -11763,7 +13291,10 @@ by one, with Shift by ten). They set the next stroke; a lower hardness softens i
 like an airbrush (the centre stays solid). The brush shows as a ring over the image, with
 a dotted ring inside where the hardness starts. The keys <b>[</b> and <b>]</b> change the
 size and <b>{</b> and <b>}</b> the hardness. The Layers panel changes opacity and hardness
-for the selected drawing.</li>
+for the selected drawing. <b>Smoothing</b> steadies the pen, the highlighter and the
+eraser: at 0 the stroke follows your hand exactly; higher, the brush trails behind the
+pointer as if pulled by a string (you see the string while you draw) and the line comes
+out clean. It is remembered.</li>
 <li>The <b>colour</b> is a single square: click it to choose from the palette, the colours
 you used last or <i>More colours...</i>.</li>
 <li><b>Composition</b> adds a guide over the final frame — rule of thirds, centre,
@@ -11835,6 +13366,8 @@ with the same name instead of duplicating them, and keeps your own edits.</li>
 <tr><td><b>[[key_prev]]</b> / <b>[[key_next]]</b></td><td>video: previous / next keyframe</td></tr>
 <tr><td><b>[[loop]]</b></td><td>video or GIF: loop on / off</td></tr>
 <tr><td><b>[[loop_in]]</b> / <b>[[loop_out]]</b> / <b>[[loop_clear]]</b></td><td>video or GIF: loop from / up to this frame, clear the fragment</td></tr>
+<tr><td><b>[[onion]]</b></td><td>video or GIF: onion skin on / off</td></tr>
+<tr><td><b>[[speed_down]]</b> / <b>[[speed_up]]</b></td><td>video: play slower / faster</td></tr>
 <tr><td><b>[[help]]</b></td><td>this help</td></tr>
 <tr><td><b>[[shortcuts]]</b></td><td>keyboard shortcuts: see and <b>change</b> them (Help menu)</td></tr>
 </table>
@@ -11876,6 +13409,21 @@ window <b>Space</b> plays and pauses. <b>Click the video</b> to play or
 pause it too: the window becomes the active one and <b>Space</b> keeps working
 right after the click. Click <b>anywhere on the time bar</b> (not only on its
 handle) to play from that point.</li>
+<li><b>The time bar</b> is a frame ruler. <b>Drag</b> along it to move through the video:
+it always lands on a whole frame, the frame under the pointer shows as you go, and when
+you let go you stay paused on it (if the video was playing, it carries on from there).
+Hold <b>Shift</b> while dragging for <b>fine steps</b> — one frame every few pixels, however
+long the video is — or roll the <b>wheel</b> over the bar to go one frame at a time. A
+few seconds after opening a video its frames are in memory (the <b>green line</b> under
+the bar shows how far): from then on dragging and stepping are instant, forwards and
+backwards.</li>
+<li><b>Speed</b>: the button next to the time (1&times;) plays at 0.25&times;, 0.5&times;,
+1.5&times; or 2&times;; <b>[[speed_down]]</b> and <b>[[speed_up]]</b> go down and up.</li>
+<li><b>Onion skin</b> (<b>[[onion]]</b>, the button with three circles): while paused, the
+frames <b>before</b> show through in <b>red</b> and the frames <b>after</b> in <b>green</b>,
+only where something moves, so you can read the spacing and the arcs. <i>Frames</i> sets
+how many on each side and <i>Ghost</i> how strong; drawings made on those frames show
+too, in the same colours. It works on GIFs as well.</li>
 <li>Videos go into categories like images, and <i>Export…</i> copies them as
 they are. The editor and the A/B comparison are for images only.</li>
 <li><b>Frame by frame</b>: the buttons either side of play, or <b>[[frame_prev]]</b> and
@@ -11895,7 +13443,9 @@ video to the next; the fragment belongs to the video you set it on.</li>
 <li><b>Annotate</b> (button next to the volume) works like SyncSketch: pause on a frame,
 draw on it (pencil, straight line — Shift keeps it at 45° steps —, arrow, rectangle,
 ellipse, text; five colours and thicknesses) and
-write a comment. The time stamp and frame number stay in front of the comment:
+write a comment. <b>Smooth</b> steadies the pencil: at 0 it follows your hand exactly;
+higher, the line trails behind the pointer on a string and a shaky hand still draws a
+clean curve. The time stamp and frame number stay in front of the comment:
 <i>[0:03.3 &middot; frame 50] Check the arc</i>. A pink bubble on the time bar marks each
 commented frame; the &#9664; and &#9654; buttons jump between them, and when you stop on
 one the drawing and the comment show up over the video, so a student can follow them
@@ -12074,6 +13624,8 @@ class ImageViewer(QDialog):
             self.pane.reviews_for = parent.reviews_of
             self.pane.on_reviews_changed = parent.set_video_reviews
             self.pane.on_export_review = parent.export_video_review
+            if hasattr(parent, "touch"):
+                self.pane.on_prefs_changed = parent.touch
             QShortcut(QKeySequence.StandardKey.Undo, self, lambda: self._history(parent.undo))
             QShortcut(QKeySequence.StandardKey.Redo, self, lambda: self._history(parent.redo))
 
@@ -12224,6 +13776,7 @@ class MainWindow(QMainWindow):
         self._muted: list = []                 # atajos callados mientras hay editor
         self._routers: list = []               # y los que reparten segun el foco
         self.edit_zones = clean_edit_zones(None)    # que va en cada zona del editor
+        EditorDialog.on_smooth_changed = self.touch  # la estabilizacion del trazo se guarda
         self.edit_zone_widths = list(EDIT_ZONE_WIDTHS)
         self.setWindowTitle("%s %s" % (APP_NAME, VERSION))
         self.resize(1500, 900)
@@ -12558,6 +14111,7 @@ class MainWindow(QMainWindow):
         self.preview.reviews_for = self.reviews_of
         self.preview.on_reviews_changed = self.set_video_reviews
         self.preview.on_export_review = self.export_video_review
+        self.preview.on_prefs_changed = self.touch
         self.preview.openBig.connect(self.open_viewer_current)
         self.preview.on_mode_changed = self._sync_panel
         self.preview.hide()
@@ -15433,7 +16987,11 @@ class MainWindow(QMainWindow):
             "show_timer": self.show_timer,
             "times": self.times,
             "edit_zones": self.edit_zones,
+            "edit_zones_rev": EDIT_ZONES_REV,
             "edit_zone_widths": self.edit_zone_widths,
+            "onion": dict(PreviewPane.onion_prefs),
+            "review_smooth": PreviewPane.review_smooth,
+            "edit_smooth": EditorDialog.smooth,
         }
         try:
             if not self._backed_up and STATE_FILE.exists():
@@ -15515,7 +17073,11 @@ class MainWindow(QMainWindow):
                 rotulos = list(BEFORE_AFTER_LABELS)
             self.pdf_before_after = {"on": bool(ba.get("on")), "labels": rotulos}
         self.times = canon_keys(clean_times(data.get("times")), lambda a, b: a + b)
-        self.edit_zones = clean_edit_zones(data.get("edit_zones"))
+        self.edit_zones = clean_edit_zones(data.get("edit_zones"), data.get("edit_zones_rev"))
+        PreviewPane.onion_prefs.update(clean_onion(data.get("onion")))
+        PreviewPane.review_smooth = clean_smooth(data.get("review_smooth"))
+        EditorDialog.smooth = clean_smooth(data.get("edit_smooth"))
+        self.preview._sync_prefs_ui()
         anchos = data.get("edit_zone_widths")
         if isinstance(anchos, list) and len(anchos) == 2 and \
                 all(isinstance(a, int) and 0 <= a <= 2000 for a in anchos):

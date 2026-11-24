@@ -173,6 +173,9 @@ areas for a checklist of every control and tick what you want in it; the layout
 is remembered. Size, opacity and hardness are Krita-style bars (drag, or
 double-click to type; `[` `]` change the size and `{` `}` the hardness) with a
 brush ring over the image, and the colour is one square that opens a palette.
+**Smoothing** is a stroke stabiliser for the pen, the highlighter and the eraser:
+the brush trails behind the pointer as if pulled by a string and the line comes
+out clean (0 follows your hand exactly).
 Your work is saved when you move to another file, as one undo
 step, and `Ctrl+Z` undoes in the editor while you work in it and in the library
 when you are in the thumbnails. Double-click (or `E`) still opens the editor in
@@ -190,7 +193,18 @@ and they go into categories and export like images. The editor and the A/B
 comparison stay image-only.
 **Click the video** to play or pause it; in the large window that also makes it the
 active window, so `Space` works right after the click. Click **anywhere on the time bar** (not
-only on its handle) to play from that point; dragging after the click keeps scrubbing.
+only on its handle) to play from that point.
+The time bar is a **frame ruler**: drag along it and the video follows frame by
+frame, always landing on a whole frame and staying paused there when you let go;
+hold `Shift` while dragging for fine steps (one frame every few pixels, however
+long the video is) or roll the wheel over it to go one frame at a time. A few
+seconds after a video opens its frames are in memory — the green line under the
+bar shows how far — and from then on scrubbing and stepping are instant, forwards
+and backwards. The speed button next to the time plays at 0.25× to 2× (`J` / `K`).
+**Onion skin** (`S`): while paused, the frames before show through in red and the
+frames after in green, only where something moves, so spacing and arcs are easy
+to read; *Frames* sets how many on each side and *Ghost* how strong, and drawings
+on those frames show too. It works on GIFs as well.
 **Loop** the whole video, or just a fragment marked with `I` and `O`.
 Step **frame by frame** and set **keyframes** on the frames that matter: they
 show as amber diamonds on the time bar, jump from one to the next, are saved
@@ -199,7 +213,10 @@ you hover over it.
 
 **Annotate a video, like SyncSketch.** Press **Annotate** next to the volume,
 pause on a frame and draw on it (pencil, straight line, arrow, rectangle, ellipse, text — five
-colours and thicknesses) and write a comment. The time stamp stays in front of
+colours and thicknesses) and write a comment. **Smooth** steadies the pencil: the
+line trails behind the pointer on a string, so a shaky hand still draws a clean
+curve (0 turns it off). With room, tools and comment share one row, so the video
+keeps the height. The time stamp stays in front of
 the comment, `[0:03.3 · frame 50] Check the arc`. A pink bubble on the time bar
 marks every commented frame and the ◀ ▶ buttons jump between them; when you stop
 on one, the drawing and the comment appear over the video, so a student can follow
@@ -327,6 +344,8 @@ you try it there, reports are welcome.
 | `Ctrl+,` / `Ctrl+.` | video: previous / next keyframe |
 | `L` | video or GIF: loop on / off |
 | `I` / `O` / `Shift+L` | video or GIF: loop from / up to this frame, clear the fragment |
+| `S` | video or GIF: onion skin on / off |
+| `J` / `K` | video: play slower / faster |
 | `F1` | help |
 
 There is a **? Help** button in the top-right corner with a full guide that
@@ -391,6 +410,9 @@ file, so they cannot touch your library. They cover, among other things:
 - Frame stepping lands on exactly the next or previous frame, keyframes can
   be set, jumped to and deleted with the real keys, and undoing one does not
   reload the video.
+- Scrubbing: the time bar snaps to whole frames (with Shift for fine steps),
+  frames are cached in memory and shown while dragging, the player settles on
+  the exact frame, onion skin, playback speed and the stroke stabiliser.
 - That every shortcut the in-app help advertises actually exists.
 
 Rebuilding the Windows package:

@@ -115,7 +115,7 @@ assert ed.window() is win and win.preview.notes_box.parent() is win.preview, \
     "la nota y el comentario siguen debajo"
 assert ed.zone_layout() == visor.clean_edit_zones(None), ed.zone_layout()
 assert ed._piezas["tools"][1].isVisible() and ed._piezas["layers"][1].isVisible()
-assert win.preview.bar.indexOf(ed.zona_abajo) >= 0, "la zona de abajo va en la barra"
+assert win.preview._lay.indexOf(ed.zona_abajo) >= 0, "la zona de abajo va bajo el lienzo, a todo el ancho"
 assert not ed._piezas["angle"][1].isVisible(), "lo que no esta en ninguna zona no se ve"
 QTest.keyClick(ed.view, Qt.Key.Key_Escape)
 espera(0.1)

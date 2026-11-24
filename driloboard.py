@@ -106,7 +106,7 @@ except ImportError:                                     # pragma: no cover
     HAS_VIDEO_EXPORT = False
 
 APP_NAME = "DriloBoard"
-VERSION = "2.6.0"
+VERSION = "2.6.1"
 
 
 def app_dir() -> Path:

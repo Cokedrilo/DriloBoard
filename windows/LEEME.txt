@@ -7,7 +7,15 @@ carpeta de red) y ejecuta DriloBoard.exe.
 Dentro del programa, el boton "? Help" de arriba a la derecha (o F1) explica
 como funciona todo. El manual en espanol esta en README.es.md.
 
-Novedades de la 2.6:
+Novedades de la 2.6.1:
+
+  - Espacio reproduce y pausa siempre que hay un video o un GIF puesto,
+    tambien en la vista previa de la ventana principal (escribiendo en una
+    caja de texto sigue siendo un espacio).
+  - Los videos se repiten por defecto, como los GIF. El boton de bucle (o L)
+    lo apaga, y lo que elijas se recuerda.
+
+De la 2.6:
 
   - Aguantar una anotacion: la barra Hold dice cuantos fotogramas se queda en
     pantalla el dibujo y el comentario de un fotograma, o (boton de la flecha)

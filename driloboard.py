@@ -303,7 +303,7 @@ SHORTCUT_FIXED = [
     ("Undo", "Ctrl+Z"), ("Redo", "Ctrl+Y"),
     ("Zoom in / out (editor)", "Ctrl++ / Ctrl+-"),
     ("Large viewer: previous / next image", "\u2190 / \u2192"),
-    ("Large viewer: play / pause a video or GIF", "Space"),
+    ("Play / pause a video or GIF", "Space"),
     ("Large viewer: full screen", "F / F11"),
     ("Close a window", "Esc"),
 ]
@@ -8123,6 +8123,7 @@ class PreviewPane(QWidget):
     onion_prefs = dict(ONION_DEFAULTS)      # papel cebolla: encendido, fotogramas y opacidad
     review_smooth = SMOOTH_DEFAULT          # estabilizacion del lapiz al anotar
     review_hold = 1                         # cuanto aguanta una anotacion nueva (o HOLD_NEXT)
+    loop_default = True                     # los videos se repiten, salvo que se apague el bucle
     _panes = weakref.WeakSet()              # los visores vivos: lo que cambia uno lo ven todos
 
     def __init__(self, parent=None, max_side: int = 0, with_button: bool = True):
@@ -8315,9 +8316,10 @@ class PreviewPane(QWidget):
         self._onion_timer.timeout.connect(self._build_onion)
         self.on_prefs_changed = lambda: None        # la ventana principal las guarda
         PreviewPane._panes.add(self)
-        # Espacio reproduce y pausa mientras se anota. La ventana grande ya
-        # tiene su Espacio (dos atajos con la misma tecla se anulan): alli
-        # own_space va a False y este se queda apagado
+        # Espacio reproduce y pausa siempre que haya un video o un GIF puesto
+        # (escribiendo en una caja de texto sigue siendo un espacio). La
+        # ventana grande ya tiene su Espacio, y dos atajos con la misma tecla
+        # se anulan: alli own_space va a False y este se queda apagado
         self.own_space = True
         self.space_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self, self.toggle_play)
         self.space_shortcut.setEnabled(False)
@@ -8390,11 +8392,12 @@ class PreviewPane(QWidget):
         vid_lay.addSpacing(4)
         # bucle: el video entero o, con un tramo marcado, solo ese tramo. El
         # boton de bucle se mantiene al pasar de video; el tramo, no
-        self.loop_on = False
+        self.loop_on = PreviewPane.loop_default
         self.loop_in = None                         # ms, o None
         self.loop_out = None
         self.b_loop = boton("loop", lambda: None)
         self.b_loop.setCheckable(True)
+        self.b_loop.setChecked(self.loop_on)
         self.b_loop.toggled.connect(self.set_loop)
         self.b_loop_in = boton("loop_in", self.set_loop_in)
         self.b_loop_out = boton("loop_out", self.set_loop_out)
@@ -9252,6 +9255,8 @@ class PreviewPane(QWidget):
         for id, atajo in zip(self._shortcut_ids, self._video_shortcuts):
             atajo.setEnabled(self.showing_video
                              or (self.showing_gif and id in self.GIF_SHORTCUTS))
+        self.space_shortcut.setEnabled(bool(self.own_space
+                                            and (self.showing_video or self.showing_gif)))
 
     # --- anotar: comentarios y dibujos sobre un fotograma --------------------
     #  Cada anotacion es del fotograma en que se hizo (su ms, como un fotograma
@@ -9287,7 +9292,6 @@ class PreviewPane(QWidget):
 
     def _apply_review_ui(self):
         activo = self.showing_video and self.review_on
-        self.space_shortcut.setEnabled(bool(activo and self.own_space))
         self.review_bar.setVisible(activo)
         if self.overlay is not None:
             self.overlay.setVisible(self.showing_video)
@@ -9797,6 +9801,10 @@ class PreviewPane(QWidget):
             self.b_loop.blockSignals(True)
             self.b_loop.setChecked(self.loop_on)
             self.b_loop.blockSignals(False)
+        if PreviewPane.loop_default != self.loop_on:
+            # lo ultimo que se eligio es con lo que abren los demas visores, y se guarda
+            PreviewPane.loop_default = self.loop_on
+            self.on_prefs_changed()
         self._apply_loop()
         if self.showing_video:
             self.flash(("Loop on" + (" (range)" if self.has_loop_range() else ""))
@@ -14075,10 +14083,10 @@ mov, webm, mkv, avi…). It is off by default, and remembered.</li>
 <li>Video thumbnails show a ▶ badge with the duration.</li>
 <li>In the preview and the large window a video opens <b>paused</b>, so
 browsing stays silent; tick <b>Autoplay</b> to have a video start playing as soon
-as you click it. Use the play button and the bar under it; in the large
-window <b>Space</b> plays and pauses. <b>Click the video</b> to play or
-pause it too: the window becomes the active one and <b>Space</b> keeps working
-right after the click. Click <b>anywhere on the time bar</b> (not only on its
+as you click it. Use the play button and the bar under it, or press <b>Space</b>:
+it plays and pauses the video (or GIF) in the preview and in the large window.
+<b>Click the video</b> to play or pause it too: the window becomes the active one
+and <b>Space</b> keeps working right after the click. Click <b>anywhere on the time bar</b> (not only on its
 handle) to play from that point.</li>
 <li><b>The time bar</b> is a frame ruler. <b>Drag</b> along it to move through the video:
 it always lands on a whole frame, the frame under the pointer shows as you go, and when
@@ -14105,12 +14113,13 @@ frame number.</li>
 <b>[[key_next]]</b> jump to the previous or next one, <b>[[key_del]]</b> deletes it. They appear as amber
 diamonds above the time bar, and <b>Ctrl+Z</b> undoes them. Hover over any
 button to see its shortcut.</li>
-<li><b>Loop</b>: the loop button (<b>[[loop]]</b>) repeats the whole video.
+<li><b>Loop</b>: a video <b>repeats by default</b>; the loop button
+(<b>[[loop]]</b>) turns that off, so it stops at the end, and your choice is remembered.
 To loop just a <b>fragment</b>, go to its first frame and press
 <b>[[loop_in]]</b>, then to its last and press <b>[[loop_out]]</b>: the
 fragment turns blue on the time bar and playback goes round it.
-<b>[[loop_clear]]</b> clears the fragment. The loop button stays on from one
-video to the next; the fragment belongs to the video you set it on.</li>
+<b>[[loop_clear]]</b> clears the fragment. The fragment belongs to the video you set
+it on.</li>
 <li><b>Annotate</b> (button next to the volume) works like SyncSketch: pause on a frame,
 draw on it (pencil, straight line — Shift keeps it at 45° steps —, arrow, rectangle,
 ellipse, text; five colours and thicknesses) and
@@ -17749,6 +17758,7 @@ class MainWindow(QMainWindow):
             "onion": dict(PreviewPane.onion_prefs),
             "review_smooth": PreviewPane.review_smooth,
             "review_hold": PreviewPane.review_hold,
+            "video_loop": PreviewPane.loop_default,
             "edit_smooth": EditorDialog.smooth,
         }
         try:
@@ -17835,6 +17845,8 @@ class MainWindow(QMainWindow):
         PreviewPane.onion_prefs.update(clean_onion(data.get("onion")))
         PreviewPane.review_smooth = clean_smooth(data.get("review_smooth"))
         PreviewPane.review_hold = clean_hold(data.get("review_hold"))
+        PreviewPane.loop_default = bool(data.get("video_loop", True))
+        self.preview.set_loop(PreviewPane.loop_default)
         EditorDialog.smooth = clean_smooth(data.get("edit_smooth"))
         self.preview._sync_prefs_ui()
         anchos = data.get("edit_zone_widths")

@@ -160,18 +160,24 @@ w.chk_preview.setChecked(True)
 w.view.setCurrentIndex(w.model.index(0))
 q = w.preview
 assert espera(lambda: q.showing_video and q.player.duration() > 0)
-assert not q.space_shortcut.isEnabled(), "sin anotar, Espacio sigue siendo de la rejilla"
-q.b_annotate.click()
-assert espera(lambda: q.review_bar.isVisible()) and q.space_shortcut.isEnabled()
+assert q.space_shortcut.isEnabled(), "con un video puesto, Espacio es del reproductor"
 w.activateWindow()
 w.view.setFocus()
+QTest.keyClick(w.view, Qt.Key.Key_Space)
+assert espera(lambda: q.is_playing()), "Espacio deberia reproducir en la vista previa"
+QTest.keyClick(w.view, Qt.Key.Key_Space)
+assert espera(lambda: not q.is_playing())
+q.b_annotate.click()                            # y anotando, igual
+assert espera(lambda: q.review_bar.isVisible()) and q.space_shortcut.isEnabled()
 QTest.keyClick(w.view, Qt.Key.Key_Space)
 assert espera(lambda: q.is_playing()), "anotando en la vista previa, Espacio reproduce"
 QTest.keyClick(w.view, Qt.Key.Key_Space)
 assert espera(lambda: not q.is_playing())
 q.b_annotate.click()
-assert not q.space_shortcut.isEnabled()
-print("   anotando, Espacio reproduce y pausa tambien alli")
+q.show_path(None)
+app.processEvents()
+assert not q.space_shortcut.isEnabled(), "sin video ni GIF, Espacio vuelve a ser de la rejilla"
+print("   Espacio reproduce y pausa con un video puesto, anotando o no")
 
 print("\nCLIC VIDEO OK")
 # cerrar tras un salto y reproducir cuelga el reproductor sin pantalla (tambien

@@ -193,8 +193,9 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
     cuanto lo pinchas, en vez de abrir en pausa. También se recuerda.
   - En la vista previa y en el visor grande el vídeo **abre en pausa**, para
     que no suene nada al pasar por las miniaturas. Debajo, play/pausa, barra
-    para moverse (también en pausa, se ve el fotograma), tiempo y volumen. En
-    el visor grande, `Espacio` reproduce y pausa. También **un clic sobre el
+    para moverse (también en pausa, se ve el fotograma), tiempo y volumen.
+    `Espacio` reproduce y pausa, en la vista previa y en el visor grande
+    (escribiendo en una caja de texto sigue siendo un espacio). También **un clic sobre el
     vídeo** lo reproduce o lo pausa, y en el visor grande deja esa ventana como
     la activa, así que `Espacio` funciona justo después de pinchar. Un clic en **cualquier punto
     de la barra de tiempo** (no solo en el círculo) salta ahí y reproduce desde ese
@@ -266,12 +267,12 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
     captura de ese fotograma con tu dibujo encima, el nombre del vídeo y el
     comentario, con la marca de tiempo delante. Si el vídeo no tiene ninguna
     anotación, el PDF lleva su primer y su último fotograma.
-  - **Bucle**: el botón de bucle (o `L`) repite el vídeo entero. Para repetir
+  - **Bucle**: un vídeo **se repite por defecto**; el botón de bucle (o `L`)
+    lo apaga para que pare al final, y lo que elijas se recuerda. Para repetir
     solo un **tramo**, ve a su primer fotograma y pulsa `I`, luego al último y
     pulsa `O`: el tramo se pinta en azul sobre la barra de tiempo y la
-    reproducción da vueltas dentro de él. `Shift+L` quita el tramo. El botón
-    de bucle se mantiene al pasar de un vídeo a otro; el tramo es de cada
-    vídeo y no se guarda.
+    reproducción da vueltas dentro de él. `Shift+L` quita el tramo, que es
+    de cada vídeo y no se guarda.
   - La barra de tiempo va a todo el ancho y los botones, debajo.
   - Cada botón enseña su atajo en un bocadillo al dejar el ratón encima.
   - Desde el código fuente hace falta `pip install PySide6-Addons`; sin él la
@@ -283,7 +284,7 @@ queda abierta mientras trabajas, así que puedes ir siguiéndola.
   distintivo **GIF** en la miniatura. En la vista previa y en el visor grande
   **se animan solos**; debajo, pausa/play, fotograma anterior y siguiente (o
   `,` y `.`, como en los vídeos), una barra para moverse por los fotogramas y
-  el número del que ves. En el visor grande, `Espacio` lo para y lo reanuda.
+  el número del que ves. `Espacio` lo para y lo reanuda.
   - **Bucle**: un GIF se repite de entrada, como en un navegador. El botón de
     bucle de su barra (o `L`) lo apaga, y entonces se para en el último
     fotograma; play lo vuelve a empezar. Para repetir solo unos fotogramas,

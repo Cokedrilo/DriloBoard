@@ -54,9 +54,21 @@ assert espera(lambda: abs(p._frame_us - 66666.7) < 50), p._frame_us
 f_ms = p._frame_us / 1000
 
 print("1. BUCLE DEL VIDEO ENTERO")
-assert not p.loop_on
+# de entrada, encendido: un video se repite como un GIF
+assert p.loop_on and p.b_loop.isChecked() and visor.PreviewPane.loop_default
+assert p.lbl_loop.text() == "\u27f2", p.lbl_loop.text()
+p.b_loop.click()
+assert not p.loop_on and "Loop off" in p.caption.text(), p.caption.text()
+assert not visor.PreviewPane.loop_default, "lo que se elige es con lo que abren los demas"
+w.save_state()
+import json
+assert json.loads(visor.STATE_FILE.read_text(encoding="utf-8"))["video_loop"] is False
+otro = visor.PreviewPane()
+assert not otro.loop_on and not otro.b_loop.isChecked()
+otro.deleteLater()
 p.b_loop.click()
 assert p.loop_on and "Loop on" in p.caption.text(), p.caption.text()
+assert visor.PreviewPane.loop_default
 assert p.lbl_loop.text() == "⟲" and p.sld_pos.loop_range is None
 assert p.player.loops() == 1, "el bucle lo lleva DriloBoard, no setLoops"
 # cerca del final: al acabar vuelve a empezar y sigue reproduciendo

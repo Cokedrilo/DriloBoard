@@ -205,7 +205,9 @@ and backwards. The speed button next to the time plays at 0.25× to 2× (`J` / `
 frames after in green, only where something moves, so spacing and arcs are easy
 to read; *Frames* sets how many on each side and *Ghost* how strong, and drawings
 on those frames show too. It works on GIFs as well.
-**Loop** the whole video, or just a fragment marked with `I` and `O`.
+`Space` plays and pauses, in the preview and in the large window. A video
+**loops** by default (the loop button or `L` turns that off, and it is
+remembered); mark a fragment with `I` and `O` to loop just that.
 Step **frame by frame** and set **keyframes** on the frames that matter: they
 show as amber diamonds on the time bar, jump from one to the next, are saved
 with the library and undo with `Ctrl+Z`. Every button shows its shortcut when
@@ -347,7 +349,7 @@ you try it there, reports are welcome.
 | `Ctrl+Z` / `Ctrl+Y` | undo / redo |
 | `F5` | re-read the folders from disk |
 | `Ctrl+T` | switch between dark and light theme |
-| `Space` | play / pause a video or GIF in the large window |
+| `Space` | play / pause a video or GIF |
 | `,` / `.` | video or GIF: previous / next frame |
 | `-` / `Ctrl+-` | video: set / delete a keyframe |
 | `Ctrl+,` / `Ctrl+.` | video: previous / next keyframe |
